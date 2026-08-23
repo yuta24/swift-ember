@@ -8,7 +8,7 @@ that is already running, with its heap, its navigation, and its login session
 intact.
 
 ```
-$ swift-splice watch
+$ swift-splice watch --project App.xcodeproj --scheme App
 watching examples/CounterApp/Sources
 listening on 127.0.0.1:51237
 
@@ -31,9 +31,9 @@ dispatch, and dyld does the loading. What this project adds is the part in
 between: deciding whether a change is safe to apply, writing the replacement,
 and getting it into the process.
 
-Status: **M3 of 5**. The loop works end to end for method bodies on a real
-Simulator app, and the classifier's refusals are pinned by tests. Read `PRD.md`
-for what is and is not promised.
+Status: **M3 of 5**, and it works against a real `.xcodeproj`. Method bodies
+reload end to end on a Simulator app, and the classifier's refusals are pinned
+by tests. Read `PRD.md` for what is and is not promised.
 
 ## Try it
 
@@ -45,6 +45,26 @@ examples/CounterApp/demo.sh
 
 It builds the app, starts the daemon, edits a method body, and screenshots
 before and after. `examples/CounterApp/README.md` walks through what happened.
+
+## Adding it to your project
+
+Two steps, both in Xcode.
+
+Base your Debug configuration on `integrations/xcode/Splice.xcconfig`, then add
+this package and link `SpliceRuntime` to your app target. Call `Splice.start()`
+once at launch; it needs no `#if` around it, because the package compiles the
+dialling and loading code only for Debug.
+
+Then check the setup and start watching:
+
+```
+swift-splice doctor --project App.xcodeproj --scheme App
+swift-splice watch  --project App.xcodeproj --scheme App
+```
+
+`doctor` names each missing setting rather than reporting a general failure,
+and it verifies the claim against the built binary instead of trusting the
+settings. `examples/XcodeApp` is a project wired up this way.
 
 ## How it works
 
@@ -83,11 +103,13 @@ Sources/SpliceGen      SwiftSyntax: what changed, and what to generate for it
 Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
+integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              24 cases pinning what Swift dynamic replacement does
 Tests/                 73 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
-examples/CounterApp    a Simulator app wired up end to end
+examples/CounterApp    a Simulator app built by script, flags in plain sight
+examples/XcodeApp      the same thing as a real .xcodeproj
 DESIGN.md              architecture and the measurements behind it
 PRD.md                 scope, tiers, milestones
 ```

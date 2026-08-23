@@ -248,6 +248,18 @@ Evaluate in this order:
     compatibility becomes unacceptable.
 4.  Compiler plugin/fork only as a last resort.
 
+Option 1 was enough. `integrations/xcode/Splice.xcconfig` carries the
+four settings; a project bases its Debug configuration on it and changes
+nothing else. `doctor` reads each setting back separately, so a
+half-configured project is told which half.
+
+The runtime arrives as a package product rather than as source to copy,
+and is Debug-only by construction: the target defines `SPLICE_ENABLED`
+only `.when(configuration: .debug)`, so a Release build links an inert
+entry point and nothing that dials or loads. That is what lets a call
+site say `Splice.start()` with no `#if` around it, which matters because
+a conditional at every call site is a thing projects get wrong.
+
 ### 5.3 Release isolation
 
 A project integrating SwiftHotReload MUST be able to verify:
@@ -330,6 +342,36 @@ than reverse-engineering every Xcode build setting.
 The implementation should normalize the captured invocation into
 `BuildContext`, excluding flags that are inappropriate for patch
 compilation.
+
+**Amended after implementing it.** The context comes from
+`xcodebuild -showBuildSettings -json` instead. Scraping a build log for
+the `swift-frontend` line means requiring a full build, parsing output
+with no compatibility promise, and getting nothing back when the build
+is already up to date. Asking Xcode for its resolved settings has none
+of those problems and is a supported interface.
+
+The concern behind the original preference was not guessing, and that is
+met a different way: nothing derived is trusted on its own. `doctor`
+reads the built binary back and checks it actually exports replacement
+keys, which is the only evidence that counts. Everything else is a
+hypothesis about what the build did.
+
+Only one field is genuinely derived rather than looked up: the target
+triple, assembled from architecture, platform, and deployment target.
+
+### 6.4 What a patch links against
+
+Not always the executable. Xcode 16 and later build a Debug
+configuration as a thin launcher plus a `.debug.dylib` holding the code,
+and the replacement keys are all in the dylib --- the executable has
+none. Linking a patch against the executable therefore resolves nothing,
+and the symptom is indistinguishable from a project that was never
+configured: `doctor` reports zero keys for a build whose settings are
+entirely correct.
+
+`BuildContext.linkTarget` resolves this on each use rather than storing
+it, because which of the two exists depends on how the app was last
+built.
 
 ### 6.3 Validation
 

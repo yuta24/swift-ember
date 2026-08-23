@@ -96,8 +96,12 @@ if [ "$CONFIG" = release ]; then
         echo "FAIL: release build exported $keys replacement keys" >&2
         exit 1
     fi
-    if xcrun nm "$APP/$MODULE" | grep -q 'Splice'; then
-        echo "FAIL: release build contains the reload runtime" >&2
+    # SpliceClient only exists inside #if SPLICE_ENABLED, so its absence is the
+    # precise statement that nothing which dials or loads was compiled. The
+    # public entry point may survive as an inert stub; that is by design, so
+    # that call sites need no #if of their own.
+    if xcrun nm "$APP/$MODULE" | grep -q 'SpliceClient'; then
+        echo "FAIL: release build contains the reload client" >&2
         exit 1
     fi
     echo "release isolation  OK (no keys, no runtime)"

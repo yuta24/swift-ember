@@ -280,6 +280,12 @@ The tool MUST discover and use the active build's Swift
 compiler/toolchain rather than shipping a separately versioned Swift
 compiler.
 
+For an Xcode project this is satisfied by
+`swift-splice --project X.xcodeproj --scheme Y`, which reads the
+resolved build settings from `xcodebuild` rather than asking the project
+to maintain a manifest. See `DESIGN.md` section 6.2 for why the settings
+rather than the literal compile invocation.
+
 It SHOULD capture the original Swift compiler invocation or equivalent
 build metadata, including relevant:
 

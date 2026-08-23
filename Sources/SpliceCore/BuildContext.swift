@@ -38,6 +38,19 @@ public struct BuildContext: Codable, Sendable {
         self.bundleIdentifier = bundleIdentifier
     }
 
+    /// What a patch must link against, which is not always the executable.
+    ///
+    /// Xcode 16 and later build Debug configurations as a thin launcher plus a
+    /// `.debug.dylib` holding the actual code. The replacement keys live in the
+    /// dylib; the executable has none at all, so linking a patch against it
+    /// resolves nothing and `doctor` reports a correctly configured project as
+    /// having no keys. Resolved on each use rather than stored, because whether
+    /// the dylib exists depends on how the app was last built.
+    public var linkTarget: String {
+        let debugDylib = appBinaryPath + ".debug.dylib"
+        return FileManager.default.fileExists(atPath: debugDylib) ? debugDylib : appBinaryPath
+    }
+
     /// The fields section 6.3 requires to match between the running binary and
     /// a patch. Compared as one opaque string so a mismatch is one message
     /// rather than a field-by-field audit.

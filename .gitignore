@@ -3,3 +3,5 @@
 fixtures/.build/
 examples/*/.build/
 examples/*/splice-context.json
+examples/**/xcuserdata/
+examples/**/*.xcworkspace/xcshareddata/swiftpm/

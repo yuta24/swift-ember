@@ -40,8 +40,15 @@ public struct PatchCompiler: Sendable {
         // Linking against the running binary resolves the replacement keys now
         // rather than at dlopen, so an ineligible declaration fails at LINK
         // with "Undefined symbols" instead of inside the app.
-        arguments += ["-Xlinker", "-bundle",
-                      "-Xlinker", "-bundle_loader", "-Xlinker", context.appBinaryPath]
+        let target = context.linkTarget
+        if target.hasSuffix(".dylib") {
+            // An Xcode 16 debug dylib: a plain linker input, since
+            // -bundle_loader only accepts an executable.
+            arguments += ["-Xlinker", target]
+        } else {
+            arguments += ["-Xlinker", "-bundle",
+                          "-Xlinker", "-bundle_loader", "-Xlinker", target]
+        }
 
         let start = DispatchTime.now().uptimeNanoseconds
         let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)

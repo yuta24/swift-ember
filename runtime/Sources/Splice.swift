@@ -1,5 +1,3 @@
-#if SPLICE_ENABLED
-
 import Foundation
 
 /// The in-app half of swift-splice.
@@ -17,18 +15,24 @@ public enum Splice {
     }
 
     private static let state = StateBox()
-    private static var client: SpliceClient?
 
-    /// Called once from the application. Safe to call in a Release build: the
-    /// whole file compiles away.
+    /// Called once from the application.
+    ///
+    /// The call site needs no `#if` of its own: without `SPLICE_ENABLED` this
+    /// does nothing, and nothing that dials, loads, or watches is compiled at
+    /// all. Callers get one entry point that is safe in every configuration.
     public static func start(onUpdate: @escaping @Sendable (Status) -> Void = { _ in }) {
+        #if SPLICE_ENABLED
         state.onUpdate = onUpdate
         let client = SpliceClient(state: state)
-        self.client = client
+        state.retain(client)
         client.start()
+        #endif
     }
 
     public static var status: Status { state.snapshot }
+
+    #if SPLICE_ENABLED
 
     // MARK: - Loading
 
@@ -55,6 +59,9 @@ public enum Splice {
     /// wants loaded, so nothing has to be inferred from a directory listing.
     @discardableResult
     public static func loadPendingPatches() -> [String] {
+        #if !SPLICE_ENABLED
+        return []
+        #else
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let inbox = documents.appendingPathComponent("Patches", isDirectory: true)
         let contents = (try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? []
@@ -74,12 +81,15 @@ public enum Splice {
         }
         if reported.isEmpty { state.note("nothing pending") }
         return reported
+        #endif
     }
 
     enum LoadOutcome {
         case loaded(generation: UInt64, durationMs: Double)
         case failed(stage: String, message: String)
     }
+
+    #endif
 
     /// Shared mutable state, kept in one place so the client and the loader do
     /// not each invent their own locking.
@@ -118,10 +128,13 @@ public enum Splice {
 
         var generations: [UInt64] { lock.withLock { status.loadedGenerations } }
 
+        /// Keeps the client alive for the process's lifetime. Held here rather
+        /// than in a static so there is one lock guarding all of this state.
+        private var client: AnyObject?
+        func retain(_ object: AnyObject) { lock.withLock { client = object } }
+
         private var loadedNames: Set<String> = []
         func hasLoaded(_ name: String) -> Bool { lock.withLock { loadedNames.contains(name) } }
         func markLoaded(_ name: String) { lock.withLock { _ = loadedNames.insert(name) } }
     }
 }
-
-#endif

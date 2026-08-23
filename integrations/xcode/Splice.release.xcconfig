@@ -1,0 +1,12 @@
+// swift-splice: the shape a Release configuration must keep.
+//
+// Optional. Include it from Release if you want the build to carry an explicit
+// record that hot reload is off, rather than relying on nobody having included
+// Splice.xcconfig in the wrong place.
+//
+// `swift-splice doctor --configuration Release` checks the same thing by
+// inspecting the built binary, which is the check that cannot be fooled by a
+// setting written in two places.
+
+SWIFT_ENABLE_TESTABILITY = NO
+SPLICE_CONFIGURED = NO

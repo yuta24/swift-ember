@@ -5,7 +5,7 @@ import SpliceDaemon
 /// DESIGN.md section 21. Every check reports what it looked at, so a failure
 /// tells the developer where to go rather than only that something is wrong.
 enum Doctor {
-    static func run(context: BuildContext) -> Bool {
+    static func run(context: BuildContext, project: XcodeProject.Resolved? = nil) -> Bool {
         var ok = true
 
         func check(_ label: String, _ detail: String?, passed: Bool) {
@@ -25,9 +25,9 @@ enum Doctor {
         let hasDevice = booted.contains("Booted")
         check("Simulator", hasDevice ? "a device is booted" : "boot a simulator", passed: hasDevice)
 
-        let binary = context.appBinaryPath
+        let binary = context.linkTarget
         let built = FileManager.default.fileExists(atPath: binary)
-        check("App binary", built ? binary : "run the app's build script", passed: built)
+        check("App binary", built ? binary : "build the app first", passed: built)
 
         // The two settings that decide whether hot reload can work at all.
         var keys = 0
@@ -36,11 +36,40 @@ enum Doctor {
             keys = symbols.split(separator: "\n").filter { $0.hasSuffix("Tx") }.count
         }
         check("Replacement keys", keys > 0 ? "\(keys) exported"
-              : "none exported; build with -enable-testing and -Xfrontend -enable-implicit-dynamic",
+              : "none exported; the settings above may be right but the built binary disagrees, so rebuild",
               passed: keys > 0)
 
         let sourcesExist = context.sourceRoots.allSatisfy { FileManager.default.fileExists(atPath: $0) }
         check("Sources", context.sourceRoots.joined(separator: ", "), passed: sourcesExist)
+
+        // With a real project the settings can be checked before anything is
+        // built, which turns "the patch would not have loaded" into "this
+        // configuration is not set up", named per setting.
+        if let project {
+            check("Optimisation", project.optimisationDisabled
+                  ? "-Onone" : "set SWIFT_OPTIMIZATION_LEVEL = -Onone; replacement dispatch does not survive optimisation",
+                  passed: project.optimisationDisabled)
+            check("Testability", project.testabilityEnabled
+                  ? "SWIFT_ENABLE_TESTABILITY = YES"
+                  : "set SWIFT_ENABLE_TESTABILITY = YES, or the replacement keys stay hidden",
+                  passed: project.testabilityEnabled)
+            check("Implicit dynamic", project.implicitDynamicEnabled
+                  ? "-Xfrontend -enable-implicit-dynamic"
+                  : "add -Xfrontend -enable-implicit-dynamic to OTHER_SWIFT_FLAGS",
+                  passed: project.implicitDynamicEnabled)
+            check("Runtime", project.runtimeEnabled
+                  ? "SPLICE_ENABLED is defined"
+                  : "add SPLICE_ENABLED to SWIFT_ACTIVE_COMPILATION_CONDITIONS, or the runtime stays inert",
+                  passed: project.runtimeEnabled)
+            if !project.declaredConfigured {
+                print("""
+
+                None of the above is set by this tool. The usual way to get all
+                of it at once is to base the Debug configuration on
+                integrations/xcode/Splice.xcconfig.
+                """)
+            }
+        }
 
         print()
         print(ok ? "Ready." : "Not ready.")
