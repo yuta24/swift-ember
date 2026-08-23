@@ -18,13 +18,21 @@ public final class IPCServer: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "dev.swift-splice.ipc")
     private let lock = NSLock()
+    private var stopped = false
+    /// Set while `start()` is waiting, so `stop()` can settle it.
+    private var startupFinish: (@Sendable (Result<UInt16, Error>) -> Void)?
     private var connection: NWConnection?
+    /// Bumped on every accept. `NWConnection.cancel()` is graceful, so a
+    /// superseded socket can finish tearing down long after its replacement is
+    /// live; the tag is how a late teardown knows it is no longer current.
+    private var connectionGeneration: UInt64 = 0
     private var session: Session?
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<Envelope, Error>] = [:]
 
     /// Valid once `start()` has returned.
-    public private(set) var port: UInt16 = 0
+    public var port: UInt16 { lock.withLock { _port } }
+    private var _port: UInt16 = 0
     public let token: String
 
     public var onEvent: (@Sendable (String) -> Void)?
@@ -53,6 +61,10 @@ public final class IPCServer: @unchecked Sendable {
 
     /// Starts listening and returns the port actually bound.
     public func start() async throws -> UInt16 {
+        // A listener that was already cancelled will never report anything to a
+        // handler installed afterwards, so there is nothing to wait for.
+        if lock.withLock({ stopped }) { throw StartupError.cancelledBeforeReady }
+
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -61,30 +73,61 @@ public final class IPCServer: @unchecked Sendable {
         let bound: UInt16 = try await withCheckedThrowingContinuation { continuation in
             // The listener can report .ready and later .failed; resume once.
             let resumed = OSAllocatedUnfairLock(initialState: false)
-            let finish: @Sendable (Result<UInt16, Error>) -> Void = { result in
+            let finish: @Sendable (Result<UInt16, Error>) -> Void = { [weak self] result in
                 let alreadyResumed = resumed.withLock { was -> Bool in
                     defer { was = true }
                     return was
                 }
-                if !alreadyResumed { continuation.resume(with: result) }
+                guard !alreadyResumed else { return }
+                self?.lock.withLock { self?.startupFinish = nil }
+                continuation.resume(with: result)
             }
+            // Handing this to stop() is what keeps a concurrent shutdown from
+            // stranding the caller: relying on the listener to report
+            // .cancelled is a race, because a cancel that lands before the
+            // handler is installed is never delivered.
+            lock.withLock { startupFinish = finish }
             listener.stateUpdateHandler = { state in
                 switch state {
-                case .ready: finish(.success(listener.port?.rawValue ?? 0))
-                case .failed(let error): finish(.failure(error))
-                default: break
+                case .ready:
+                    // A ready listener with no port is not a working listener.
+                    // Reporting 0 as success wrote `"port": 0` into the session
+                    // file, and the runtime then dialled port 0 forever without
+                    // either side saying anything.
+                    if let port = listener.port?.rawValue, port != 0 {
+                        finish(.success(port))
+                    } else {
+                        finish(.failure(StartupError.noPortAssigned))
+                    }
+                case .failed(let error):
+                    finish(.failure(error))
+                case .cancelled:
+                    // stop() before the listener came up. Nothing will resume
+                    // this otherwise, and start() would stay suspended for the
+                    // lifetime of the process.
+                    finish(.failure(StartupError.cancelledBeforeReady))
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
         }
 
-        port = bound
+        lock.withLock { _port = bound }
         return bound
     }
 
     public func stop() {
+        let pendingStart = lock.withLock { () -> (@Sendable (Result<UInt16, Error>) -> Void)? in
+            stopped = true
+            defer { startupFinish = nil }
+            return startupFinish
+        }
+        pendingStart?(.failure(StartupError.cancelledBeforeReady))
+
         listener.cancel()
         lock.withLock { connection }?.cancel()
+        failAllPending(IPCError.notConnected)
     }
 
     // MARK: - Connection lifecycle
@@ -92,26 +135,41 @@ public final class IPCServer: @unchecked Sendable {
     private func accept(_ incoming: NWConnection) {
         // One runtime at a time. A second connection means the app relaunched,
         // so the newer one wins.
-        lock.withLock {
+        let generation: UInt64 = lock.withLock {
             connection?.cancel()
             connection = incoming
+            connectionGeneration += 1
             session = nil
             buffer = Data()
+            return connectionGeneration
         }
         incoming.stateUpdateHandler = { [weak self] state in
-            if case .cancelled = state { self?.handleDisconnect() }
-            if case .failed = state { self?.handleDisconnect() }
+            switch state {
+            case .cancelled, .failed: self?.handleDisconnect(generation)
+            default: break
+            }
         }
         incoming.start(queue: queue)
-        receive(on: incoming)
+        receive(on: incoming, generation: generation)
     }
 
-    private func handleDisconnect() {
-        let had = lock.withLock { () -> Bool in
+    /// Only the current connection's teardown counts.
+    ///
+    /// Without the tag, an app that crashed mid-patch and then relaunched could
+    /// have its old socket finish cancelling *after* the new one had said
+    /// hello, and the stale teardown would wipe the fresh session and fail its
+    /// request. The daemon then reported "no app is connected" for every
+    /// subsequent save, permanently, because the runtime only sends hello on
+    /// connect and its socket was perfectly healthy.
+    private func handleDisconnect(_ generation: UInt64) {
+        let had = lock.withLock { () -> Bool? in
+            guard generation == connectionGeneration else { return nil }
             let had = session != nil
             session = nil
             return had
         }
+        guard let had else { return }
+
         // Anything still in flight will never be answered by a socket that is
         // gone. Leaving those continuations suspended is what turned an app
         // crash into a permanently wedged daemon.
@@ -119,18 +177,22 @@ public final class IPCServer: @unchecked Sendable {
         if had { onDisconnect?() }
     }
 
-    private func receive(on connection: NWConnection) {
+    private func receive(on connection: NWConnection, generation: UInt64) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            // Bytes from a superseded socket must not land in the current
+            // buffer, where they would be framed against someone else's stream.
+            guard self.lock.withLock({ generation == self.connectionGeneration }) else { return }
+
             if let data, !data.isEmpty {
                 self.lock.withLock { self.buffer.append(data) }
                 self.drainLines()
             }
             if isComplete || error != nil {
-                self.handleDisconnect()
+                self.handleDisconnect(generation)
                 return
             }
-            self.receive(on: connection)
+            self.receive(on: connection, generation: generation)
         }
     }
 
@@ -142,7 +204,11 @@ public final class IPCServer: @unchecked Sendable {
                 buffer = buffer[buffer.index(after: index)...]
                 return Data(line)
             }
-            guard let line, !line.isEmpty else { return }
+            // A blank line is not the end of the buffer: skip it and keep
+            // draining, or every message queued behind it waits for the next
+            // read that may never come.
+            guard let line else { return }
+            if line.isEmpty { continue }
             handle(line: line)
         }
     }
@@ -173,6 +239,18 @@ public final class IPCServer: @unchecked Sendable {
     }
 
     // MARK: - Requests
+
+    public enum StartupError: Error, CustomStringConvertible {
+        case noPortAssigned
+        case cancelledBeforeReady
+
+        public var description: String {
+            switch self {
+            case .noPortAssigned: "the listener came up without a port"
+            case .cancelledBeforeReady: "the listener was stopped before it was ready"
+            }
+        }
+    }
 
     public enum IPCError: Error, CustomStringConvertible {
         case notConnected

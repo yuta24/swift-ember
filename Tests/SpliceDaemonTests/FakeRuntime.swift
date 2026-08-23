@@ -24,20 +24,39 @@ final class FakeRuntime: @unchecked Sendable {
         connection = NWConnection(host: "127.0.0.1", port: .init(rawValue: port)!, using: .tcp)
     }
 
-    func connect() async {
-        await withCheckedContinuation { continuation in
+    /// Resolves on ready, or on any terminal state, or on a deadline.
+    ///
+    /// Waiting only for `.ready` with no bound meant a connection that failed
+    /// or stalled hung the test forever, and swift-testing has no per-test
+    /// deadline, so that surfaced as a stuck run with no output at all.
+    @discardableResult
+    func connect(timeout: Duration = .seconds(5)) async -> Bool {
+        let ready = await withCheckedContinuation { continuation in
             let resumed = OSAllocatedUnfairLock(initialState: false)
-            connection.stateUpdateHandler = { [weak self] state in
-                guard case .ready = state else { return }
-                self?.receive()
+            let finish: @Sendable (Bool) -> Void = { value in
                 let already = resumed.withLock { was -> Bool in
                     defer { was = true }
                     return was
                 }
-                if !already { continuation.resume() }
+                if !already { continuation.resume(returning: value) }
+            }
+            connection.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.receive()
+                    finish(true)
+                case .failed, .cancelled:
+                    finish(false)
+                default:
+                    break
+                }
             }
             connection.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + Double(timeout.components.seconds)) {
+                finish(false)
+            }
         }
+        return ready
     }
 
     func disconnect() { connection.cancel() }

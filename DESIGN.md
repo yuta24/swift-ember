@@ -437,7 +437,10 @@ semantic information. Two details make the syntactic approach hold up:
 -   Everything the indexer does not model is hashed into a residue, so a
     change nobody classified still forces a rebuild rather than passing
     unnoticed. Being unable to parse something is a rejection, not a
-    blind spot. The residue preserves document order: sorting it made a
+    blind spot --- which only holds if there is no path out of the
+    indexer that writes nothing anywhere, and one such path (a
+    comma-separated `var a = 1, b = 2`) got as far as a review before
+    being found. The residue preserves document order: sorting it made a
     pure reordering of declarations invisible.
 -   Declaration identity carries parameter types, not only argument
     labels, so overloads stay distinct. Keying on labels alone let two
@@ -1115,14 +1118,21 @@ justified.
 -   protocol serialization,
 -   toolchain feature probing.
 
-The daemon needs its own, and for a specific reason: its worst failure
-so far was invisible from the outside. `IPCServer.request` could not
+The daemon needs its own, and for a specific reason: its two worst
+failures so far were both invisible from the outside. `IPCServer.request` could not
 time out, and because `watch` awaits each save in turn, one unanswered
 request stopped the daemon from ever processing another --- with no
-error and no log. `SpliceDaemonTests` drives the server against a fake
-runtime that speaks the wire format directly, which also makes it a
-second reader of the protocol, so a drift between the two sides shows up
-there.
+error and no log. The second was a teardown race: `NWConnection.cancel()` is graceful, so
+an app that crashed mid-patch could have its old socket finish tearing
+down after the relaunched one had already connected, and the stale
+teardown wiped the fresh session. Every later save then reported "no app
+is connected", permanently, because the runtime only says hello once.
+Connections are tagged with a generation now, and a teardown that is not
+the current one does nothing.
+
+`SpliceDaemonTests` drives the server against a fake runtime that speaks
+the wire format directly, which also makes it a second reader of the
+protocol, so a drift between the two sides shows up there.
 
 ### 19.2 Compiler fixtures
 

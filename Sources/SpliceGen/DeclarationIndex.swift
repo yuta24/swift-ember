@@ -209,6 +209,14 @@ public enum DeclarationIndexer {
               let binding = variable.bindings.first,
               let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
         else {
+            // A comma-separated declaration (`var a = 1, b = 2`) or a tuple
+            // pattern (`let (a, b) = ...`). Not modelled, so it goes to the
+            // residue verbatim like any other construct this index does not
+            // understand. Returning silently here meant adding a property to a
+            // comma-separated list changed the type's layout and the tool
+            // answered "nothing changed" -- the one failure mode with no
+            // recovery, because the developer is never told to rebuild.
+            residue.append(normalise(variable.description))
             return
         }
 

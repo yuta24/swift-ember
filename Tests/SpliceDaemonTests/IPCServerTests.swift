@@ -213,3 +213,82 @@ private final class Reported: @unchecked Sendable {
     func append(_ line: String) { lock.withLock { lines.append(line) } }
     var all: [String] { lock.withLock { lines } }
 }
+
+// MARK: - Teardown races and framing
+
+@Test func aRelaunchSurvivesTheOldSocketTearingDownLate() async throws {
+    // NWConnection.cancel() is graceful, so a superseded socket can finish
+    // tearing down after its replacement has already said hello. Untagged, that
+    // late teardown wiped the fresh session, and the daemon then reported "no
+    // app is connected" for every save afterwards -- permanently, since the
+    // runtime only sends hello on connect.
+    let server = try await startedServer()
+    defer { server.stop() }
+
+    let crashed = try await connectedRuntime(to: server, identity: "first")
+    let relaunched = try await connectedRuntime(to: server, identity: "second")
+
+    // The old app's socket goes away only now, after the new one is live.
+    crashed.disconnect()
+    try await Task.sleep(for: .milliseconds(300))
+
+    #expect(server.currentSession?.hello.buildIdentity == "second",
+            "the stale teardown wiped the current session")
+
+    relaunched.responder = { envelope in
+        ("loadResult", try! JSONEncoder().encode(LoadPatchResult.loaded(generation: 1, durationMs: 1)))
+    }
+    let result = try await server.request(
+        type: "loadPatch",
+        payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
+                                  buildIdentity: "second", declarations: []),
+        expecting: LoadPatchResult.self,
+        timeout: .seconds(3))
+    guard case .loaded = result else {
+        Issue.record("the relaunched app could not be reached: \(result)")
+        return
+    }
+}
+
+@Test func aBlankLineDoesNotStallTheMessagesBehindIt() async throws {
+    // The drain loop treated an empty line as "nothing complete yet" and
+    // returned, abandoning every message already buffered behind it.
+    let server = try await startedServer()
+    defer { server.stop() }
+
+    let runtime = FakeRuntime(port: server.port)
+    await runtime.connect()
+
+    var payload = Data("\n".utf8)
+    payload.append(try Envelope(type: "hello", payload: Hello(
+        buildIdentity: "after-blank", moduleName: "Test",
+        processId: 99, loadedGenerations: [])).encodedLine())
+    runtime.sendRaw(payload)
+
+    for _ in 0..<100 {
+        if server.currentSession?.hello.processId == 99 { return }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    Issue.record("the message behind the blank line never arrived")
+}
+
+@Test func startingAnAlreadyStoppedServerFailsRatherThanHangs() async throws {
+    // A cancelled listener never reports anything to a handler installed after
+    // the fact, so waiting on one is waiting forever. This is the shape that
+    // hung a full test run: the same code passed in isolation and deadlocked
+    // when scheduling went the other way.
+    let server = try IPCServer()
+    server.stop()
+    await #expect(throws: IPCServer.StartupError.self) {
+        _ = try await server.start()
+    }
+}
+
+@Test func stoppingDuringStartupSettlesTheCaller() async throws {
+    let server = try IPCServer()
+    let starting = Task { try await server.start() }
+    server.stop()
+
+    // Either outcome is correct. What is not correct is never returning.
+    do { _ = try await starting.value } catch { }
+}

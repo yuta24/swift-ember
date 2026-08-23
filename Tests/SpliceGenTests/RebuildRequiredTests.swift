@@ -151,3 +151,24 @@ private func mustRebuild(_ baseline: String, _ current: String,
         Issue.record("expected a refusal")
     }
 }
+
+// MARK: - Declarations the index does not model
+
+// These reach neither the patchable nor the unsupported map, so they have to
+// land in the residue. A review found them reaching none of the three, which
+// made a layout change read as no change at all.
+
+@Test func commaSeparatedStoredPropertyAdded() {
+    mustRebuild("struct S { var a = 1, b = 2 }",
+                "struct S { var a = 1, b = 2, c = 3 }")
+}
+
+@Test func commaSeparatedStoredPropertyTypeChanged() {
+    mustRebuild("struct S { var a: Int = 1, b: Int = 2 }",
+                "struct S { var a: Int = 1, b: Double = 2 }")
+}
+
+@Test func tuplePatternPropertyChanged() {
+    mustRebuild("struct S { let (a, b) = (1, 2) }",
+                "struct S { let (a, b) = (1, 3) }")
+}
