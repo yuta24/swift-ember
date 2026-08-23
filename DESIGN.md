@@ -736,6 +736,9 @@ had already been resolved before the patch loaded: a program that reads
 the property only after loading tends to get the new value, while one
 that read it beforehand reads an `Int` through cached `String` metadata.
 
+It diverges by platform too. The identical fixture returns the new value
+on the macOS host and crashes with `SIGSEGV` on the iOS Simulator.
+
 Undefined behavior that sometimes produces the right answer is worse
 than a reliable crash, because it survives casual testing.
 
@@ -1147,7 +1150,8 @@ toolchains:
       swiftui: experimental
 ```
 
-First measured data point (host-only; see Appendix A):
+First measured data point, on the macOS host and an arm64 iOS Simulator
+(see Appendix A):
 
 ``` yaml
 toolchains:
@@ -1155,7 +1159,7 @@ toolchains:
     swift: "6.4 (swiftlang-6.4.0.27.1)"
     host: arm64-apple-macosx26.0
     simulator:
-      arm64: untested
+      arm64: tested
     features:
       implicit_dynamic: true
       dynamic_replacement: true
@@ -1480,16 +1484,18 @@ baseline. Do not generalize these results across Xcode versions.
 ### A.1 Environment
 
 ``` text
-Xcode    27.0 Beta 4
-swiftc   Apple Swift version 6.4 (swiftlang-6.4.0.27.1 clang-2100.3.27.1)
-host     arm64-apple-macosx26.0
+Xcode       27.0 Beta 4
+swiftc      Apple Swift version 6.4 (swiftlang-6.4.0.27.1 clang-2100.3.27.1)
+host        arm64-apple-macosx26.0
+simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
 ```
 
-Executed on the macOS host, not on an iOS Simulator runtime. The
-Simulator matrix is still owed.
+The matrix was run on both targets. All 24 cases pass on both, and every
+result below holds for both except where noted.
 
-Every result below is reproducible with `fixtures/run.sh`, which also
-regenerates `fixtures/results.yaml`.
+Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
+simulator`, which regenerate `fixtures/results-macos.yaml` and
+`fixtures/results-simulator.yaml`.
 
 ### A.2 Method
 
@@ -1558,12 +1564,19 @@ non-testable module
 ```
 
 The opaque result type case is the only one that reaches a running
-process. Its outcome varies:
+process, and its outcome varies:
 
 ``` text
 read only after the patch loads     new value returned
 read before and after               garbage characters, or SIGSEGV
+
+macOS host, fixture case            exit 0, returned the new value
+iOS Simulator, same fixture case    SIGSEGV
 ```
+
+The last two lines are the same source compiled by the same toolchain,
+differing only in target. A developer who tries this edit on one
+platform learns nothing about the other.
 
 ### A.4 Coverage of implicit dynamic
 

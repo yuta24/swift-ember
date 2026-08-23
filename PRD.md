@@ -213,9 +213,8 @@ Every detected edit MUST be classified before application.
 
 ### Tier A: Hot patch
 
-Verified against Xcode 27.0 Beta 4 / Swift 6.4 on the macOS host; see
-`DESIGN.md` Appendix A. Re-confirmation on an iOS Simulator runtime is
-still owed.
+Verified against Xcode 27.0 Beta 4 / Swift 6.4 on both the macOS host
+and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
 
 -   function body change,
 -   method body change (`class`, `struct`, `enum`, `final`),
@@ -487,7 +486,8 @@ The project is successful at v0.1 when:
 
 ### M0 --- Research spike
 
-Complete on the macOS host with Xcode 27.0 Beta 4 / Swift 6.4. The full
+Complete on the macOS host and on an arm64 iOS Simulator (iOS 27.0)
+with Xcode 27.0 Beta 4 / Swift 6.4. All 24 cases pass on both. The full
 matrix and method are in `DESIGN.md` Appendix A.
 
 -   [x] Top-level function.
@@ -513,11 +513,16 @@ Implicit dynamic also turned out not to cover `@inlinable`,
 `@_transparent`, `private`, or `fileprivate`, but each of those is
 rejected at compile time, so the pipeline fails closed there.
 
-The matrix is checked in as `fixtures/`, runnable with
-`fixtures/run.sh`, which regenerates `fixtures/results.yaml`.
+One result differs by platform. The opaque result type change returns
+the new value on the macOS host and crashes on the Simulator, from
+identical source. That is consistent with it being undefined rather than
+merely wrong, and it means the crash lands in exactly the environment
+this product targets.
 
-Remaining: repeat the matrix on an arm64 iOS Simulator runtime, and
-cover the already-suspended-task case for `async`.
+The matrix is checked in as `fixtures/`, runnable with
+`fixtures/run.sh [--platform simulator]`.
+
+Remaining: cover the already-suspended-task case for `async`.
 
 ### M1 --- Manual patch PoC
 
@@ -572,8 +577,8 @@ Only after measurement, evaluate:
 
 ## 16. Open questions
 
-Answered by the M0 spike on the macOS host. Re-confirm each on an iOS
-Simulator runtime before treating it as settled.
+Answered by the M0 spike, on both the macOS host and an arm64 iOS
+Simulator.
 
 2.  Can generated replacement source import the application module
     cleanly for internal declarations?

@@ -15,14 +15,16 @@ something that can be re-run when the toolchain changes.
 ./run.sh                                  # macOS host
 ./run.sh --platform simulator             # booted arm64 iOS Simulator
 ./run.sh --case actor-method              # one case
-./run.sh --results results.yaml           # also write the machine-readable matrix
+./run.sh --results results-macos.yaml     # also write the machine-readable matrix
 ```
 
-`results.yaml` is the compatibility matrix that `DESIGN.md` section 20 asks
-for, generated from an actual run rather than maintained by hand.
+`results-macos.yaml` and `results-simulator.yaml` are the compatibility matrix
+that `DESIGN.md` section 20 asks for, generated from actual runs rather than
+maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
-Nothing has been run there yet; the checked-in `results.yaml` is host-only.
+Both checked-in result files come from Xcode 27.0 Beta 4; the Simulator run
+used an iPhone 17 Pro on iOS 27.0. All 24 cases pass on both targets.
 
 ## Case layout
 
@@ -74,6 +76,10 @@ loader without a word, and the runtime result is undefined. Across otherwise
 similar programs it has produced the new value, garbage characters, and
 `SIGSEGV`. The determining factor observed so far is whether the opaque type's
 metadata was already resolved before the patch loaded.
+
+It also diverges by target. This case returns the new value on the macOS host
+and crashes on the iOS Simulator, from identical source built by the same
+toolchain. Compare the `observed:` field in the two result files.
 
 Because the outcome is undefined, that case records what happened instead of
 asserting a specific result. Pinning an expectation to undefined behavior would

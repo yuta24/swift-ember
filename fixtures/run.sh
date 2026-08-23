@@ -5,7 +5,7 @@
 #   ./run.sh                            # macOS host
 #   ./run.sh --platform simulator       # booted arm64 iOS Simulator
 #   ./run.sh --case actor-method        # one case
-#   ./run.sh --results results.yaml     # also write the machine-readable matrix
+#   ./run.sh --results results-macos.yaml   # also write the machine-readable matrix
 #
 # Each case directory holds App.swift, one or more patch sources, an
 # expected.txt of exact stdout, and an optional case.conf of overrides.
