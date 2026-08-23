@@ -32,7 +32,8 @@ APP="$OUT/$MODULE.app"
 rm -rf "$OUT"
 mkdir -p "$APP"
 
-sources=("$ROOT"/Sources/*.swift "$ROOT"/Runtime/*.swift)
+RUNTIME="$ROOT/../../runtime/Sources"
+sources=("$ROOT"/Sources/*.swift "$RUNTIME"/*.swift)
 
 if [ "$CONFIG" = debug ]; then
     # The three settings that make hot reload possible. -enable-testing is not
@@ -60,6 +61,30 @@ cp "$ROOT/Info.plist" "$APP/Info.plist"
 keys=$(xcrun nm -gU "$APP/$MODULE" | grep -c 'Tx$' || true)
 echo "configuration      $CONFIG"
 echo "replacement keys   $keys exported"
+
+if [ "$CONFIG" = debug ]; then
+    # What the daemon needs in order to compile a patch the running binary can
+    # actually load. Recovering this from an Xcode build instead is DESIGN.md
+    # section 6.2's problem; emitting it from the build that produced the
+    # binary is the version that cannot drift.
+    CONTEXT="$ROOT/splice-context.json"
+    cat > "$CONTEXT" <<JSON
+{
+  "moduleName": "$MODULE",
+  "bundleIdentifier": "$BUNDLE_ID",
+  "swiftCompilerPath": "$(xcrun --find swiftc)",
+  "swiftCompilerVersion": "$(xcrun swiftc --version 2>/dev/null | head -1)",
+  "targetTriple": "$TRIPLE",
+  "sdkPath": "$SDK",
+  "sdkName": "iphonesimulator",
+  "appBinaryPath": "$APP/$MODULE",
+  "moduleSearchPaths": ["$OUT"],
+  "extraCompilerFlags": [],
+  "sourceRoots": ["$ROOT/Sources"]
+}
+JSON
+    echo "build context      $CONTEXT"
+fi
 
 if [ "$CONFIG" = release ]; then
     # DESIGN.md section 5.3: a Release build must not be reloadable at all.

@@ -36,7 +36,9 @@ struct ContentView: View {
                     }
                 }
 
-                // Both rows are produced by patchable methods on Cart.
+                // Both rows come from patchable methods on Cart. Edit their
+                // bodies in Sources/Cart.swift while `swift-splice watch` is
+                // running and these change without the app restarting.
                 Section("Patched output") {
                     LabeledContent("Subtotal", value: cart.subtotalLabel())
                     LabeledContent("Discount", value: cart.discountLabel())
@@ -50,34 +52,23 @@ struct ContentView: View {
 
                 #if SPLICE_ENABLED
                 Section("Hot reload") {
-                    Text("watching \(Splice.inbox.lastPathComponent)/")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Button("Load pending patches now") {
-                        let results = Splice.loadPendingPatches()
-                        if results.isEmpty {
-                            cart.note("nothing pending")
-                        }
-                        for result in results {
-                            cart.note("\(result.name): \(result.detail)")
-                        }
-                    }
+                    LabeledContent("Daemon", value: cart.connected ? "connected" : "not connected")
+                    Button("Load pending patches") { Splice.loadPendingPatches() }
                     ForEach(Array(cart.reloadLog.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.caption).monospaced()
                     }
                 }
                 #else
                 Section("Hot reload") {
-                    Text("not built in")
-                        .foregroundStyle(.secondary)
+                    Text("not built in").foregroundStyle(.secondary)
                 }
                 #endif
             }
-            .navigationTitle("swift-splice M1")
+            .navigationTitle("swift-splice")
             #if SPLICE_ENABLED
             .onAppear {
-                Splice.startWatching { results in
-                    for result in results { cart.note("\(result.name): \(result.detail)") }
+                Splice.start { status in
+                    Task { @MainActor in cart.apply(status) }
                 }
             }
             #endif

@@ -1,2 +1,5 @@
+.build/
+.splice/
 fixtures/.build/
 examples/*/.build/
+examples/*/splice-context.json

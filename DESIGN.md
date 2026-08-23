@@ -427,6 +427,19 @@ Candidates:
 
 Do not embed Swift compiler internals until simpler mechanisms fail.
 
+The implementation uses SwiftSyntax, and so far nothing has needed
+semantic information. Two details make the syntactic approach hold up:
+
+-   Everything the indexer does not model is hashed into a residue, so a
+    change nobody classified still forces a rebuild rather than passing
+    unnoticed. Being unable to parse something is a rejection, not a
+    blind spot.
+-   Generation reuses the original declaration node as a template and
+    rewrites only its name, instead of reassembling a signature from
+    parts. Reassembly would eventually drop something --- an ownership
+    modifier, a global actor, a where clause --- and the failure would
+    be silent.
+
 ## 8. Replacement generation
 
 Given original:
@@ -1276,9 +1289,28 @@ the launch-time session token survive unchanged.
 
 Recompile patch against a real application module.
 
+Done, from the weaker end: the application's build emits the manifest
+rather than the daemon recovering it from Xcode. That is enough to prove
+the rest of the pipeline and cannot drift from the binary it describes,
+but it does not yet satisfy section 6.2.
+
 ### Step 5: Automation
 
 Watcher + generator + compiler + IPC.
+
+Done. `swift-splice watch` runs the loop against
+`examples/CounterApp`. Two decisions from the build-out are worth
+recording:
+
+-   The runtime dials the daemon rather than listening, which makes
+    reconnection after an app relaunch fall out for free. The first
+    version leaned on `NWConnection` recovering from `.waiting` by
+    itself and an app whose daemon had stopped never reconnected; the
+    retry is now explicit.
+-   Control travels over the socket and the image travels through the
+    file system. The daemon can already write into the application's
+    container, and a path keeps the artifact inspectable after the
+    fact, which is what section 10.1's `LoadPatchRequest` assumed.
 
 ### Step 6: Classifier
 

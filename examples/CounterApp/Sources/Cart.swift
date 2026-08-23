@@ -11,6 +11,7 @@ final class Cart: ObservableObject {
 
     @Published private(set) var items: [Item] = []
     @Published private(set) var reloadLog: [String] = []
+    @Published private(set) var connected = false
 
     struct Item: Identifiable {
         let id = UUID()
@@ -31,6 +32,15 @@ final class Cart: ObservableObject {
     func note(_ line: String) {
         reloadLog.append(line)
     }
+
+    #if SPLICE_ENABLED
+    /// Mirrors the runtime's status into the view. The runtime knows nothing
+    /// about SwiftUI, so the adapting happens here rather than there.
+    func apply(_ status: Splice.Status) {
+        connected = status.connected
+        reloadLog = status.lines
+    }
+    #endif
 
     // MARK: - Patchable
 

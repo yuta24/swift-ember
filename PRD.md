@@ -311,7 +311,13 @@ measured per toolchain rather than derived from a source-level rule.
 The daemon MUST detect modified `.swift` files.
 
 The MVP MAY use file-level recompilation even when only one declaration
-changed.
+changed. In practice the implementation compiles only the changed
+declarations, because the generator already knows which they are.
+
+Detection compares modification times rather than subscribing to file
+system events. Editors save atomically, by writing a temporary file and
+renaming it over the original, which invalidates any descriptor held on
+the old inode; comparing timestamps has no such hole.
 
 ### FR-4 Compatibility analysis
 
@@ -550,13 +556,39 @@ section 12 isolation requirement made executable.
 
 ### M2 --- Automated local loop
 
--   File watcher.
--   Build-command capture.
--   Replacement source generation.
--   Automatic compilation.
--   Runtime communication.
--   Automatic loading.
--   CLI diagnostics.
+Complete. Saving a method body in `examples/CounterApp/Sources/Cart.swift`
+while `swift-splice watch` is running changes the running app.
+
+-   [x] File watcher.
+-   [x] Build-command capture, as a manifest the application's build emits.
+-   [x] Replacement source generation, via SwiftSyntax.
+-   [x] Automatic compilation.
+-   [x] Runtime communication, over a versioned line protocol on loopback.
+-   [x] Automatic loading.
+-   [x] CLI diagnostics: `doctor`, `watch`, `status`.
+
+End-to-end latency for a one-declaration change:
+
+``` text
+classify                  19 ms
+generate                   1 ms
+compile                  348 ms
+transfer                 111 ms
+load                      32 ms
+--------------------------------
+total                    511 ms
+```
+
+Against the section 10 targets: detection and activation are already
+inside their long-term budgets, and the 2 s MVP budget for compile plus
+load is met with room to spare. Compile dominates at about 68 percent,
+which is the number that decides whether sections 14 and 15 are worth
+starting. It is a frontend cost on a tiny module, so the persistent
+compiler is the more promising of the two; neither should begin before
+M5 profiles a real project.
+
+M2 carries a minimal classifier, enough to tell a body-only change from
+everything else. Deepening it is M3's job.
 
 ### M3 --- Compatibility classifier
 
