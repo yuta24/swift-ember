@@ -1,0 +1,2 @@
+g0: doubled=42
+g1: doubled=2100

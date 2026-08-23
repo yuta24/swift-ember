@@ -1,0 +1,4 @@
+g0: old
+g0: value=42
+g1: new
+g1: value=42

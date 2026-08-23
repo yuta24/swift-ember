@@ -1,0 +1,2 @@
+g0: old(hits=7)
+g1: new(hits=7)

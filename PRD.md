@@ -225,6 +225,8 @@ still owed.
 -   `actor`-isolated and `@MainActor` method body change,
 -   protocol witness and protocol extension default implementation body
     change, for both direct and existential dispatch,
+-   static and class method body change,
+-   `@objc` method body change on an `NSObject` subclass,
 -   generic function body change under `-Onone`.
 
 ### Tier B: Potentially hot reloadable
@@ -251,20 +253,20 @@ Examples:
 -   build settings changed,
 -   imported module graph changed in an unsupported way,
 -   SwiftUI `body`, or any other declaration returning an opaque result
-    type, whose underlying type changes. This compiles cleanly and then
-    crashes the process with no diagnostic, so it is unsafe rather than
-    merely unsupported,
--   `@inlinable` declaration body changed. Implicit dynamic skips these,
-    so the patch would load successfully and silently do nothing,
--   `private` / `fileprivate` declarations, which `@testable import`
-    cannot reach.
+    type, whose underlying type changes. This passes both the compiler
+    and the loader without a diagnostic and is then undefined at
+    runtime, observed variously as the new value, as garbage, and as a
+    crash. Unsafe rather than merely unsupported,
+-   `@inlinable` or `@_transparent` declaration body changed. Implicit
+    dynamic does not cover these,
+-   `private` / `fileprivate` declarations, which implicit dynamic does
+    not cover and `@testable import` cannot reach.
 
 Safety rule: unknown changes are Tier C.
 
-Second safety rule: a declaration for which the running image exports no
-dynamic replacement key is Tier C, however its source changed. Source
-analysis alone cannot decide this, because the set of declarations
-implicit dynamic skips is undocumented.
+The last three are rejected by the compiler when the patch is built, so
+they fail closed even if the classifier misses them. The opaque result
+type case is not, which is why the classifier exists.
 
 ## 9. Functional requirements
 
@@ -298,10 +300,12 @@ option. It is a *frontend* option and MUST be passed as
 the `swiftc` driver. Because this is not a stable public interface, the
 implementation MUST isolate it behind a toolchain compatibility layer.
 
-The option does not cover every declaration. `@inlinable` declarations
-are excluded and receive no replacement key, with no diagnostic. The
-implementation MUST NOT assume that a declaration written in the source
-is replaceable in the built image.
+The option does not cover every declaration. `@inlinable`,
+`@_transparent`, `private`, and `fileprivate` declarations receive no
+replacement key. Patching them fails at compile time with an actionable
+diagnostic, so the gap is safe, but the covered set is undocumented and
+version-sensitive. The implementation MUST treat coverage as something
+measured per toolchain rather than derived from a source-level rule.
 
 ### FR-3 Change detection
 
@@ -382,14 +386,16 @@ Generated patch source MUST import the application module with
 The tool MUST detect a missing testability setting up front and report
 it as a configuration error, not as a reload failure.
 
-### FR-13 Replacement key verification
-
-Before reporting a successful reload, the system MUST confirm that the
-running image exports a dynamic replacement key for every declaration
-the patch claims to replace.
+### FR-13 Reload verification
 
 A patch that loads without error but replaces nothing MUST be reported
 as a failure, not a success.
+
+Enumerating replacement keys in the running image is useful evidence,
+but it is not sufficient on its own: an `@objc` member gets no native
+replacement key and is replaceable regardless. Verification SHOULD
+therefore rest on the compiler's own acceptance of the patch plus an
+observable check, not on symbol presence alone.
 
 ## 10. Performance requirements
 
@@ -496,12 +502,19 @@ matrix and method are in `DESIGN.md` Appendix A.
     in the patch, `Tx` replacement keys in the host image.
 -   [x] Exact Xcode/Swift version recorded.
 
-Three findings changed the plan:
+Two findings changed the plan:
 
 -   `-enable-testing` is a hard requirement, not a convenience;
--   `@inlinable` is silently excluded from implicit dynamic;
--   changing an opaque result type's underlying type crashes the
-    process with no diagnostic.
+-   changing an opaque result type's underlying type is undefined
+    behavior that neither the compiler nor the loader flags, and that
+    sometimes produces the correct answer.
+
+Implicit dynamic also turned out not to cover `@inlinable`,
+`@_transparent`, `private`, or `fileprivate`, but each of those is
+rejected at compile time, so the pipeline fails closed there.
+
+The matrix is checked in as `fixtures/`, runnable with
+`fixtures/run.sh`, which regenerates `fixtures/results.yaml`.
 
 Remaining: repeat the matrix on an arm64 iOS Simulator runtime, and
 cover the already-suspended-task case for `async`.
@@ -599,13 +612,16 @@ Still open:
 8.  How much latency is linker-related versus Swift frontend-related?
 9.  Does JITLink correctly register every Swift-specific Mach-O section
     needed by replacement images for our supported toolchains?
-11. Which declarations besides `@inlinable` does
-    `-enable-implicit-dynamic` skip, and can that set be enumerated from
-    the built image rather than guessed from source?
+11. The skipped set is measured for one toolchain (`@inlinable`,
+    `@_transparent`, `private`, `fileprivate`, `deinit`), but it is
+    undocumented. How should the tool track it across toolchains without
+    hand-maintaining a list?
 12. Can `private` / `fileprivate` declarations be supported at all, or
     must they stay permanently Tier C?
 13. Is there any way to detect an opaque-result-type underlying change
-    before loading, given that the compiler accepts it silently?
+    before loading, given that the compiler accepts it silently? Failing
+    that, is rejecting every opaque-result-type declaration too blunt to
+    be useful for SwiftUI?
 
 ## 17. References
 

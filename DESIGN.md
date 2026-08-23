@@ -407,10 +407,11 @@ Methods on:
 -   conformance changes that affect witnesses/layout,
 -   declaration removed while referenced,
 -   underlying type of an opaque result type (`some P`) changed --- this
-    compiles cleanly and then crashes; see section 12.7,
--   body of an `@inlinable` declaration changed --- the declaration is
-    not made dynamic and the patch silently does nothing; see section
-    12.8.
+    compiles cleanly, loads cleanly, and then behaves as undefined; see
+    section 12.7,
+-   body of an `@inlinable`, `@_transparent`, `private`, or
+    `fileprivate` declaration changed --- implicit dynamic does not
+    cover these, so the patch cannot be built; see section 12.8.
 
 ### 7.4 Implementation options
 
@@ -517,7 +518,9 @@ Before requesting runtime load, inspect:
 -   architecture,
 -   platform,
 -   minimum OS,
--   expected replacement symbols/sections where feasible,
+-   expected replacement symbols/sections where feasible, keeping in
+    mind that an absent native replacement key does not by itself prove
+    a declaration is unpatchable (section 12.8),
 -   unresolved dependencies if detectable.
 
 ## 10. Runtime loading
@@ -723,31 +726,72 @@ extension Opaque {
 }
 ```
 
-**compiles without error or warning**, loads successfully, and then
-crashes the process with `SIGSEGV` and no diagnostic output at all.
+**compiles without error or warning** and loads successfully. What
+happens next is undefined.
+
+Across otherwise similar programs the same edit has produced the new
+value, garbage characters, and `SIGSEGV` with no diagnostic output. The
+determining factor observed so far is whether the opaque type's metadata
+had already been resolved before the patch loaded: a program that reads
+the property only after loading tends to get the new value, while one
+that read it beforehand reads an `Int` through cached `String` metadata.
+
+Undefined behavior that sometimes produces the right answer is worse
+than a reliable crash, because it survives casual testing.
 
 Consequences:
 
--   the classifier is the only defense; the compiler provides none,
+-   the classifier is the only defense; neither the compiler nor the
+    loader provides one,
 -   any declaration returning an opaque result type MUST be
     rebuild-required unless the underlying type is proven identical,
 -   this is the ordinary SwiftUI `var body: some View` case, so it
     governs section 13.
 
-### 12.8 `@inlinable` is excluded from implicit dynamic
+The fixture for this case records the observed outcome rather than
+asserting one, since pinning an expectation to undefined behavior would
+only produce a flaky test.
 
-`-enable-implicit-dynamic` emits no replacement key for `@inlinable`
-declarations. A patch targeting one loads successfully and reports
-success while the old implementation keeps running.
+### 12.8 What implicit dynamic does not cover
 
-This is a silent-stale failure and violates the fail-closed principle in
-section 2.4. The classifier MUST reject `@inlinable` declarations
-explicitly rather than relying on a load-time error that never comes.
+`-enable-implicit-dynamic` is not exhaustive. Measured coverage
+(Appendix A):
 
-More generally, the set of declarations implicit dynamic skips is not
-documented. Artifact validation (section 9.3) should cross-check that
-the running image exports a replacement key for every declaration the
-patch claims to replace, rather than trusting a source-level rule.
+``` text
+covered      internal, public, @usableFromInline
+             static and class methods
+             init, subscript, operator functions
+             computed properties, lazy properties
+             nested type methods, extensions on imported types
+             generic functions
+
+not covered  @inlinable
+             @_transparent
+             private, fileprivate
+             deinit
+```
+
+Every uncovered case fails at the COMPILE stage with an actionable
+diagnostic, so the fail-closed principle in section 2.4 holds:
+
+``` text
+@inlinable / @_transparent
+  error: replaced function 'f()' is not marked dynamic
+
+private / fileprivate
+  error: replaced function 'f()' could not be found
+```
+
+Two cautions apply to reading this table.
+
+First, an absent replacement key does not prove a declaration is
+unpatchable. An `@objc` member of an `NSObject` subclass gets no native
+`Tx` key because it dispatches through the Objective-C runtime, yet
+dynamic replacement still applies to it.
+
+Second, the covered set is undocumented and version-sensitive. Treat the
+table as a per-toolchain measurement, not a language rule, and re-run
+the fixtures when the toolchain changes.
 
 ## 13. SwiftUI design
 
@@ -764,10 +808,10 @@ may preserve its source-level signature while its opaque underlying
 result type changes when the view tree changes.
 
 Section 12.7 makes the stakes concrete: an ordinary
-`@_dynamicReplacement` of `body` whose view tree changes shape is not
-merely unsupported, it crashes the process without a diagnostic. SwiftUI
-`body` replacement is therefore rebuild-required until a
-SwiftUI-specific mechanism is proven.
+`@_dynamicReplacement` of `body` whose underlying type changes is not
+merely unsupported, it is undefined behavior that no diagnostic warns
+about and that may appear to work. SwiftUI `body` replacement is
+therefore rebuild-required until a SwiftUI-specific mechanism is proven.
 
 Apple exposes `DebugReplaceableView` for debug-time replacement
 scenarios. Two facts constrain its use:
@@ -1022,7 +1066,12 @@ justified.
 
 ### 19.2 Compiler fixtures
 
-Create tiny projects for:
+Implemented in `fixtures/`. `fixtures/run.sh` builds each case, loads its
+patch into the running process, compares observable output across
+generations, and regenerates `fixtures/results.yaml` for section 20. It
+takes `--platform simulator` for the Simulator matrix.
+
+Covered:
 
 -   top-level function,
 -   class instance method,
@@ -1046,7 +1095,16 @@ Each fixture records:
 -   expected output after patch,
 -   expected state preservation.
 
+One case, the opaque result type change, records what it observed rather
+than asserting an expectation, because its behavior is undefined
+(section 12.7).
+
 ### 19.3 Negative fixtures
+
+These exercise the change classifier, which does not exist yet, so they
+are not in `fixtures/` --- that suite covers only what the runtime does
+once a patch has been built. The four build-time rejections that are
+covered today are listed in `fixtures/README.md`.
 
 -   stored property added,
 -   stored property removed,
@@ -1117,8 +1175,12 @@ toolchains:
       async_throws_method: tested
       actor_method: tested
       main_actor_method: tested
+      static_method: tested
+      objc_method: tested
       inlinable: unsupported
-      opaque_result_type_change: unsafe
+      transparent: unsupported
+      private: unsupported
+      opaque_result_type_change: undefined
       swiftui: untested
       debug_replaceable_view_min_os: "iOS 26.0"
 ```
@@ -1296,19 +1358,22 @@ Mitigation:
 -   fail closed,
 -   no layout migration in v0.x.
 
-### R7: Silently non-dynamic declarations
+### R7: Undocumented coverage of implicit dynamic
 
-`-enable-implicit-dynamic` skips some declarations, `@inlinable` among
-them. A patch targeting one succeeds at every pipeline stage and changes
-nothing, which reads to the developer as a successful reload.
+`-enable-implicit-dynamic` skips `@inlinable`, `@_transparent`, and
+`private`/`fileprivate` declarations (section 12.8). Today each of those
+fails closed at the COMPILE stage, so the immediate safety risk is low.
+The risk is that the covered set is undocumented, so it can change
+between toolchains without notice, and the tool's idea of what is
+patchable would silently drift from the compiler's.
 
 Mitigation:
 
--   enumerate exported replacement keys in the running image,
--   verify a key exists for every declaration the patch claims to
-    replace,
--   reject the patch otherwise,
--   never report success from a successful load alone.
+-   treat coverage as a per-toolchain measurement, not a language rule,
+-   re-run the fixture matrix on every supported toolchain,
+-   record the result in the compatibility matrix,
+-   prefer the compiler's own diagnostic over a hand-maintained source
+    rule when the two disagree.
 
 ## 24. Decisions
 
@@ -1423,6 +1488,9 @@ host     arm64-apple-macosx26.0
 Executed on the macOS host, not on an iOS Simulator runtime. The
 Simulator matrix is still owed.
 
+Every result below is reproducible with `fixtures/run.sh`, which also
+regenerates `fixtures/results.yaml`.
+
 ### A.2 Method
 
 Application fixture:
@@ -1466,13 +1534,61 @@ throws function                               replaced
 async throws function                         replaced
 actor instance method                         replaced, state preserved
 @MainActor method                             replaced, state preserved
-@inlinable function                           NOT replaced, no error
+static method                                 replaced
+@objc method on an NSObject subclass          replaced
 opaque result type, same underlying type      replaced
-opaque result type, changed underlying type   compiles, then SIGSEGV
 two generations loaded in sequence            newest wins
+
+@inlinable function                           rejected at COMPILE
+@_transparent function                        rejected at COMPILE
+private function                              rejected at COMPILE
+patch against a non-testable module           rejected at COMPILE
+opaque result type, changed underlying type   undefined behavior
 ```
 
-### A.4 Symbol visibility
+Diagnostics for the rejected cases:
+
+``` text
+@inlinable / @_transparent
+  error: replaced function 'f()' is not marked dynamic
+private
+  error: replaced function 'f()' could not be found
+non-testable module
+  error: module 'Fixture' was not compiled for testing
+```
+
+The opaque result type case is the only one that reaches a running
+process. Its outcome varies:
+
+``` text
+read only after the patch loads     new value returned
+read before and after               garbage characters, or SIGSEGV
+```
+
+### A.4 Coverage of implicit dynamic
+
+Declarations of each kind were compiled with implicit dynamic and the
+emitted replacement keys compared against the source:
+
+``` text
+key emitted      internal, public, @usableFromInline
+                 static and class methods
+                 init, subscript, operator functions
+                 computed properties, lazy properties
+                 nested type methods, extensions on imported types
+                 generic functions
+
+no key emitted   @inlinable, @_transparent
+                 private, fileprivate
+                 deinit
+                 @objc members of NSObject subclasses
+```
+
+The last line is the trap: `@objc` members get no native key because
+they dispatch through the Objective-C runtime, but they are replaceable
+anyway. Key presence is evidence, not proof.
+
+### A.5 Symbol visibility
 
 Exported dynamic replacement keys in the host executable, out of 14
 emitted:
@@ -1492,7 +1608,7 @@ dlopen FAILED: symbol not found in flat namespace
 
 The patch image carries the expected `__TEXT,__swift5_replace` section.
 
-### A.5 Flag verification
+### A.6 Flag verification
 
 ``` text
 $ swiftc -enable-implicit-dynamic ...
@@ -1513,7 +1629,7 @@ Xcode build setting mapping, from `Swift.xcspec`:
 SWIFT_ENABLE_TESTABILITY = YES  ->  -enable-testing
 ```
 
-### A.6 DebugReplaceableView
+### A.7 DebugReplaceableView
 
 From
 `iPhoneSimulator27.0.sdk/.../SwiftUICore.swiftmodule/arm64-apple-ios-simulator.swiftinterface`:
