@@ -408,9 +408,13 @@ Methods on:
 -   inheritance changed,
 -   conformance changes that affect witnesses/layout,
 -   declaration removed while referenced,
--   underlying type of an opaque result type (`some P`) changed --- this
-    compiles cleanly, loads cleanly, and then behaves as undefined; see
-    section 12.7,
+-   any declaration returning an opaque result type (`some P`), whether
+    or not the underlying type changed --- see section 12.7,
+-   property observers (`willSet`/`didSet`), which look like accessors
+    but have real backing storage,
+-   operator declarations, which are replaceable but whose
+    `@_dynamicReplacement(for:)` spelling this generator does not know,
+-   protocol requirements, whose shape is the witness table's,
 -   body of an `@inlinable`, `@_transparent`, `private`, or
     `fileprivate` declaration changed --- implicit dynamic does not
     cover these, so the patch cannot be built; see section 12.8.
@@ -433,7 +437,15 @@ semantic information. Two details make the syntactic approach hold up:
 -   Everything the indexer does not model is hashed into a residue, so a
     change nobody classified still forces a rebuild rather than passing
     unnoticed. Being unable to parse something is a rejection, not a
-    blind spot.
+    blind spot. The residue preserves document order: sorting it made a
+    pure reordering of declarations invisible.
+-   Declaration identity carries parameter types, not only argument
+    labels, so overloads stay distinct. Keying on labels alone let two
+    overloads collide in the index, and an edit to whichever one lost
+    the write disappeared without either a patch or a rebuild.
+-   Two declarations that still reduce to the same identity are both
+    demoted to unsupported rather than one silently overwriting the
+    other.
 -   Generation reuses the original declaration node as a template and
     rewrites only its name, instead of reassembling a signature from
     parts. Reassembly would eventually drop something --- an ownership
@@ -782,6 +794,15 @@ The fixture for this case records the observed outcome rather than
 asserting one, since pinning an expectation to undefined behavior would
 only produce a flaky test.
 
+The classifier rejects any declaration whose result type mentions
+`some`, without trying to establish whether the underlying type actually
+changed. Proving that needs type checking, and the cost of being wrong
+is not symmetric: over-rejecting costs a rebuild, under-rejecting
+corrupts a process. A review found this check missing entirely --- the
+signature text `var body: some View` is identical before and after, so
+neither the signature comparison nor the residue noticed --- which meant
+the case the design calls its most dangerous was undefended in the
+implementation. `Tests/SpliceGenTests/SoundnessTests.swift` pins it.
 ### 12.8 What implicit dynamic does not cover
 
 `-enable-implicit-dynamic` is not exhaustive. Measured coverage

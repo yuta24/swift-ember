@@ -86,7 +86,7 @@ public actor PatchCoordinator {
             let start = DispatchTime.now().uptimeNanoseconds
             let request = LoadPatchRequest(generation: next, path: delivered.path,
                                            buildIdentity: context.identity,
-                                           declarations: declarations.map(\.identity))
+                                           declarations: declarations.map(\.displayName))
             let result: LoadPatchResult
             do {
                 result = try await server.request(type: "loadPatch", payload: request,
@@ -114,12 +114,14 @@ public actor PatchCoordinator {
 
             generation = next
             baselines[url] = current
-            return .applied(generation: next, declarations: declarations.map(\.identity), timeline: timeline)
+            return .applied(generation: next, declarations: declarations.map(\.displayName), timeline: timeline)
         } catch let error as SpliceError {
             return .rejected(error)
         } catch {
-            return .rejected(SpliceError(stage: .generate, subject: url.lastPathComponent,
-                                         reason: "\(error)", recovery: .rebuild))
+            // Anything reaching here failed to name its own stage, so do not
+            // invent one. Every deliberate failure above throws a SpliceError.
+            return .rejected(SpliceError(stage: .verify, subject: url.lastPathComponent,
+                                         reason: "unattributed failure: \(error)", recovery: .rebuild))
         }
     }
 }
@@ -156,10 +158,20 @@ struct SimulatorContainer: Sendable {
         let inbox = try dataContainer()
             .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("Patches", isDirectory: true)
-        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
         let destination = inbox.appendingPathComponent(image.lastPathComponent)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.copyItem(at: image, to: destination)
+        do {
+            try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: image, to: destination)
+        } catch {
+            // FileManager throws plain NSErrors. Without translating them here
+            // the coordinator's catch-all labelled a full disk or a vanished
+            // container as a GENERATE failure and told the developer to fix
+            // their source.
+            throw SpliceError(stage: .transfer, subject: image.lastPathComponent,
+                              reason: "could not copy the patch into the app container: \(error.localizedDescription)",
+                              recovery: .restart)
+        }
         return destination
     }
 }

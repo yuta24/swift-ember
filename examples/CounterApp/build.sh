@@ -39,10 +39,14 @@ if [ "$CONFIG" = debug ]; then
     # The three settings that make hot reload possible. -enable-testing is not
     # optional: without it the dynamic replacement keys stay hidden and a patch
     # cannot bind to them. See DESIGN.md section 5.4.
+    # Conditional compilation flags have to reach the patch compile too. A
+    # patched body containing `#if SPLICE_ENABLED` would otherwise take the
+    # other branch, because the daemon compiles the patch without them.
+    defines=(-D SPLICE_ENABLED)
     flags=(-Onone
            -enable-testing
            -Xfrontend -enable-implicit-dynamic
-           -D SPLICE_ENABLED)
+           "${defines[@]}")
 else
     flags=(-O)
 fi
@@ -79,7 +83,7 @@ if [ "$CONFIG" = debug ]; then
   "sdkName": "iphonesimulator",
   "appBinaryPath": "$APP/$MODULE",
   "moduleSearchPaths": ["$OUT"],
-  "extraCompilerFlags": [],
+  "extraCompilerFlags": [$(printf '"%s",' "${defines[@]}" | sed 's/,$//')],
   "sourceRoots": ["$ROOT/Sources"]
 }
 JSON

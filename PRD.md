@@ -256,8 +256,13 @@ Examples:
     and the loader without a diagnostic and is then undefined at
     runtime, observed variously as the new value, as garbage, and as a
     crash. Unsafe rather than merely unsupported,
+-   any declaration returning an opaque result type, changed or not,
 -   `@inlinable` or `@_transparent` declaration body changed. Implicit
     dynamic does not cover these,
+-   property observer (`willSet`/`didSet`) body changed; these have real
+    backing storage despite looking like accessors,
+-   operator declaration body changed,
+-   protocol requirement changed,
 -   `private` / `fileprivate` declarations, which implicit dynamic does
     not cover and `@testable import` cannot reach.
 

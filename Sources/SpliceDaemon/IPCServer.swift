@@ -77,6 +77,10 @@ public final class IPCServer: @unchecked Sendable {
             session = nil
             return had
         }
+        // Anything still in flight will never be answered by a socket that is
+        // gone. Leaving those continuations suspended is what turned an app
+        // crash into a permanently wedged daemon.
+        failAllPending(IPCError.notConnected)
         if had { onDisconnect?() }
     }
 
@@ -122,12 +126,14 @@ public final class IPCServer: @unchecked Sendable {
 
         switch envelope.type {
         case "hello":
-            guard let hello = try? envelope.decode(Hello.self) else { return }
+            guard let hello = try? envelope.decode(Hello.self) else {
+                onEvent?("could not read the runtime's hello; the two sides' protocol types have drifted")
+                return
+            }
             lock.withLock { session = Session(hello: hello, connectedAt: Date()) }
             onConnect?(hello)
         default:
-            let continuation = lock.withLock { pending.removeValue(forKey: envelope.requestId) }
-            continuation?.resume(returning: envelope)
+            settle(envelope.requestId, with: .success(envelope))
         }
     }
 
@@ -145,7 +151,34 @@ public final class IPCServer: @unchecked Sendable {
         }
     }
 
+    /// Settles a pending request exactly once, whoever gets there first: the
+    /// reply, the timeout, a send failure, or a disconnect.
+    ///
+    /// The removal is what makes it exactly-once, so every path must go through
+    /// here rather than resuming a continuation it happens to hold.
+    private func settle(_ requestId: String, with result: Result<Envelope, Error>) {
+        let continuation = lock.withLock { pending.removeValue(forKey: requestId) }
+        continuation?.resume(with: result)
+    }
+
+    private func failAllPending(_ error: Error) {
+        let outstanding = lock.withLock { () -> [CheckedContinuation<Envelope, Error>] in
+            let all = Array(pending.values)
+            pending.removeAll()
+            return all
+        }
+        for continuation in outstanding { continuation.resume(throwing: error) }
+    }
+
     /// Sends a request and waits for the reply carrying the same requestId.
+    ///
+    /// The timeout is a scheduled eviction rather than a sibling task racing
+    /// the continuation inside a task group. That earlier shape did not work:
+    /// when the timeout won, the group cancelled the waiting child and then
+    /// waited for it to finish, but cancelling a task does not resume a
+    /// `withCheckedThrowingContinuation`, so the call hung forever instead of
+    /// timing out -- and because `watch` awaits each save in turn, one hang
+    /// silently stopped the daemon from processing anything else.
     public func request<P: Codable, R: Codable>(type: String, payload: P, expecting: R.Type,
                                                 timeout: Duration = .seconds(10)) async throws -> R {
         guard let connection = lock.withLock({ self.connection }), currentSession != nil else {
@@ -153,26 +186,22 @@ public final class IPCServer: @unchecked Sendable {
         }
 
         let envelope = try Envelope(type: type, payload: payload)
-        let reply = try await withThrowingTaskGroup(of: Envelope.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation { continuation in
-                    self.lock.withLock { self.pending[envelope.requestId] = continuation }
-                    do {
-                        connection.send(content: try envelope.encodedLine(),
-                                        completion: .contentProcessed { _ in })
-                    } catch {
-                        self.lock.withLock { _ = self.pending.removeValue(forKey: envelope.requestId) }
-                        continuation.resume(throwing: error)
-                    }
-                }
+        let seconds = Double(timeout.components.seconds)
+            + Double(timeout.components.attoseconds) / 1e18
+
+        let reply: Envelope = try await withCheckedThrowingContinuation { continuation in
+            lock.withLock { pending[envelope.requestId] = continuation }
+
+            queue.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                self?.settle(envelope.requestId, with: .failure(IPCError.timedOut))
             }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw IPCError.timedOut
+
+            do {
+                connection.send(content: try envelope.encodedLine(),
+                                completion: .contentProcessed { _ in })
+            } catch {
+                settle(envelope.requestId, with: .failure(error))
             }
-            let first = try await group.next()!
-            group.cancelAll()
-            return first
         }
 
         return try reply.decode(R.self)

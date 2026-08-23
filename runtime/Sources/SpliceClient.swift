@@ -122,7 +122,10 @@ final class SpliceClient: @unchecked Sendable {
     }
 
     private func handle(_ line: Data) {
-        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: line) else { return }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: line) else {
+            state.note("could not read a message from the daemon")
+            return
+        }
         guard envelope.protocolVersion == ProtocolVersion else {
             state.note("daemon speaks protocol \(envelope.protocolVersion), this runtime speaks \(ProtocolVersion)")
             return
@@ -130,7 +133,17 @@ final class SpliceClient: @unchecked Sendable {
 
         switch envelope.type {
         case "loadPatch":
-            guard let request = try? envelope.decode(LoadPatchRequest.self) else { return }
+            guard let request = try? envelope.decode(LoadPatchRequest.self) else {
+                // Never leave a request unanswered. The daemon is waiting on
+                // this requestId, and silence used to wedge it until its
+                // timeout -- or, before that timeout worked, forever.
+                state.note("could not read a loadPatch request; the two sides' protocol types have drifted")
+                send(type: "loadResult",
+                     payload: LoadPatchResult.failed(stage: "LOAD",
+                                                     message: "the runtime could not decode the request"),
+                     requestId: envelope.requestId)
+                return
+            }
             let result = apply(request)
             send(type: "loadResult", payload: result, requestId: envelope.requestId)
         default:
