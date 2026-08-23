@@ -526,11 +526,27 @@ Remaining: cover the already-suspended-task case for `async`.
 
 ### M1 --- Manual patch PoC
 
--   Sample app built with Debug instrumentation.
--   Hand-authored replacement source.
--   Patch compiled as dylib.
--   Patch manually loaded.
--   State-preserving replacement demonstrated.
+Complete. `examples/CounterApp` is a SwiftUI iOS Simulator app whose method
+bodies are replaced while it keeps running.
+
+-   [x] Sample app built with Debug instrumentation.
+-   [x] Hand-authored replacement source.
+-   [x] Patch compiled and loaded as a Mach-O image.
+-   [x] Patch loaded into the live process.
+-   [x] State-preserving replacement demonstrated: the launch-time session
+    token is unchanged across two patch generations while the patched
+    methods produce new output.
+
+Patch compilation measures 250--500 ms for this app, which is the first
+real input to the section 10 latency targets.
+
+Two implementation notes came out of it. Patches link against the
+application binary with `-bundle_loader` rather than
+`-undefined dynamic_lookup`, which moves an unresolvable replacement key
+from a `dlopen` failure to a LINK failure and avoids a deprecated
+Simulator linker flag. And `build.sh --release` asserts that a Release
+build exports no replacement keys and contains no runtime, which is the
+section 12 isolation requirement made executable.
 
 ### M2 --- Automated local loop
 

@@ -260,7 +260,9 @@ Release:
   testability enabled?  no
 ```
 
-Provide a CI check eventually.
+Provide a CI check eventually. `examples/CounterApp/build.sh --release`
+is a first version of it: the build fails if the binary exports any
+replacement key or still contains the runtime.
 
 ### 5.4 Symbol visibility (required)
 
@@ -510,6 +512,18 @@ If direct dylib generation is awkward:
 ```
 
 Keep compile and link timing separate.
+
+Measured note from `examples/CounterApp`: linking the patch against the
+application binary with
+
+``` text
+-Xlinker -bundle -Xlinker -bundle_loader -Xlinker <app binary>
+```
+
+is preferable to `-undefined dynamic_lookup`. It resolves replacement
+keys at LINK, so a declaration that is not actually replaceable fails
+with `Undefined symbols` before anything reaches the running process.
+`-undefined dynamic_lookup` is also deprecated for the iOS Simulator.
 
 ### 9.3 Artifact validation
 
@@ -1253,6 +1267,10 @@ Prove:
 ### Step 3: Real iOS Simulator app
 
 Add runtime library and load a patch while the process remains alive.
+
+Done, in `examples/CounterApp`. Two hand-authored patches replace two
+methods on a live `ObservableObject` while its instance, its items, and
+the launch-time session token survive unchanged.
 
 ### Step 4: Build context capture
 
