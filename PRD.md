@@ -597,9 +597,34 @@ everything else. Deepening it is M3's job.
 
 ### M3 --- Compatibility classifier
 
--   Detect common layout/signature changes.
--   Fail closed.
--   Add fixture suite for supported/unsupported changes.
+Complete. 73 tests across three suites, plus the 24 toolchain fixtures.
+
+-   [x] Detect common layout/signature changes.
+-   [x] Fail closed.
+-   [x] Fixture suite for supported and unsupported changes.
+
+The suites divide by what they are accountable for:
+
+``` text
+fixtures/run.sh          what the Swift toolchain does      24 cases
+SpliceGenTests           what the classifier decides        49 tests
+SpliceEndToEndTests      what the generated patch does      16 tests
+SpliceDaemonTests        what the daemon does under load     8 tests
+```
+
+The end-to-end suite is the one M3 was really missing. It takes a real
+source edit through the real classifier and generator, compiles the
+result, loads it into a live process, and checks the output. A verdict
+nobody executes is a guess, and both generator bugs a review found ---
+constrained extensions losing their `where` clause, overloads colliding
+on one identity --- are the kind that a test on the verdict alone cannot
+see.
+
+Writing the exhaustive refusal list against section 19.3 found one more:
+reordering two stored properties was classified as no change, because
+the map of unsupported declarations is keyed and therefore order-blind.
+Storage layout follows declaration order, so that is a real edit, and
+answering "nothing changed" is the worst of the available answers.
 
 ### M4 --- SwiftUI spike
 

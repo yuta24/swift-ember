@@ -20,5 +20,7 @@ let package = Package(
         .target(name: "SpliceDaemon", dependencies: ["SpliceCore", "SpliceGen"]),
         .executableTarget(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon"]),
         .testTarget(name: "SpliceGenTests", dependencies: ["SpliceGen"]),
+        .testTarget(name: "SpliceDaemonTests", dependencies: ["SpliceCore", "SpliceDaemon"]),
+        .testTarget(name: "SpliceEndToEndTests", dependencies: ["SpliceCore", "SpliceGen"]),
     ]
 )

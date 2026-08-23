@@ -1,0 +1,154 @@
+import Foundation
+import Testing
+import SpliceGen
+
+/// Runs a source edit through the real pipeline and into a real process.
+///
+/// `fixtures/` establishes what the Swift toolchain does with hand-written
+/// patches; `SpliceGenTests` establishes what the classifier decides. Neither
+/// checks that a verdict of `.hotPatch` produces a patch that compiles, loads,
+/// and returns the right answer. That gap is what let a review find a generator
+/// bug -- constrained extensions losing their `where` clause -- that unit tests
+/// on the verdict alone could never have caught.
+///
+/// Host-only and deliberately so: the toolchain behaviour these depend on is
+/// already pinned on the Simulator by `fixtures/run.sh --platform simulator`,
+/// and building for the host keeps a full pass in seconds rather than minutes.
+enum Loop {
+    struct Outcome {
+        var before: [String]
+        var after: [String]
+    }
+
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // SpliceEndToEndTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo
+    }
+
+    private static var harness: URL {
+        repoRoot.appendingPathComponent("fixtures/Harness/Harness.swift")
+    }
+
+    /// Builds `baseline`, edits it to `current`, and applies whatever the
+    /// pipeline produces to the running-then-relaunched fixture.
+    ///
+    /// The process is started fresh for each generation rather than kept alive,
+    /// because what is under test here is the generator, not state preservation
+    /// -- `examples/CounterApp` covers that, in a real app.
+    static func run(baseline: String, current: String,
+                    sourceLocation: SourceLocation = #_sourceLocation) throws -> Outcome {
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("splice-e2e-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let module = "Fixture"
+        let appSource = work.appendingPathComponent("App.swift")
+        try baseline.write(to: appSource, atomically: true, encoding: .utf8)
+
+        let binary = work.appendingPathComponent("app")
+        try compileApplication(sources: [harness, appSource], module: module,
+                               into: work, binary: binary)
+
+        let before = try execute(binary, arguments: [])
+
+        guard case .hotPatch(let declarations) =
+                ChangeClassifier.classify(baseline: baseline, current: current) else {
+            throw Failure.notHotPatchable(ChangeClassifier.classify(baseline: baseline, current: current))
+        }
+
+        let generated = try ReplacementGenerator.generate(module: module, generation: 1,
+                                                          declarations: declarations)
+        let patchSource = work.appendingPathComponent("Patch.swift")
+        try generated.write(to: patchSource, atomically: true, encoding: .utf8)
+
+        let image = work.appendingPathComponent("Patch.dylib")
+        try compilePatch(source: patchSource, moduleSearchPath: work,
+                         appBinary: binary, image: image, generatedSource: generated)
+
+        let after = try execute(binary, arguments: [image.path])
+        return Outcome(before: before, after: after)
+    }
+
+    enum Failure: Error, CustomStringConvertible {
+        case notHotPatchable(ChangeClassification)
+        case build(String, String)
+        case crashed(Int32, String)
+
+        var description: String {
+            switch self {
+            case .notHotPatchable(let classification):
+                switch classification {
+                case .noChange: "the classifier saw no change"
+                case .rebuildRequired(let reason): "the classifier refused: \(reason)"
+                case .hotPatch: "unreachable"
+                }
+            case .build(let what, let output): "\(what) failed:\n\(output)"
+            case .crashed(let status, let output): "the fixture exited with \(status)\n\(output)"
+            }
+        }
+    }
+
+    // MARK: - Toolchain
+
+    private static func compileApplication(sources: [URL], module: String,
+                                           into directory: URL, binary: URL) throws {
+        // The same four settings examples/CounterApp/build.sh uses.
+        var arguments = ["swiftc", "-parse-as-library", "-Onone",
+                         "-enable-testing",
+                         "-Xfrontend", "-enable-implicit-dynamic",
+                         "-module-name", module,
+                         "-emit-module", "-emit-module-path",
+                         directory.appendingPathComponent("\(module).swiftmodule").path,
+                         "-emit-executable", "-o", binary.path]
+        arguments += sources.map(\.path)
+        let result = try shell(arguments)
+        guard result.status == 0 else { throw Failure.build("the fixture build", result.output) }
+    }
+
+    private static func compilePatch(source: URL, moduleSearchPath: URL, appBinary: URL,
+                                     image: URL, generatedSource: String) throws {
+        let result = try shell(["swiftc", "-Onone",
+                                "-emit-library", "-o", image.path,
+                                "-module-name", "Patch",
+                                "-I", moduleSearchPath.path,
+                                source.path,
+                                "-Xlinker", "-bundle",
+                                "-Xlinker", "-bundle_loader", "-Xlinker", appBinary.path])
+        guard result.status == 0 else {
+            throw Failure.build("the patch build", result.output + "\n--- generated ---\n" + generatedSource)
+        }
+    }
+
+    private static func execute(_ binary: URL, arguments: [String]) throws -> [String] {
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw Failure.crashed(process.terminationStatus, output)
+        }
+        return output.split(separator: "\n").map(String.init)
+    }
+
+    private static func shell(_ arguments: [String]) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+}

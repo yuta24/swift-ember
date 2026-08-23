@@ -28,7 +28,7 @@ enum Watch {
         }
         server.onDisconnect = { print("disconnected; waiting for the app to reconnect") }
         server.onEvent = { print($0) }
-        server.start()
+        let port = try await server.start()
 
         await coordinator.primeBaselines(from: roots)
         try await coordinator.announceSession()
@@ -37,7 +37,7 @@ enum Watch {
         watcher.prime()
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
-        print("listening on 127.0.0.1:\(server.port)")
+        print("listening on 127.0.0.1:\(port)")
         print("")
 
         let changes = AsyncStream<[URL]> { continuation in

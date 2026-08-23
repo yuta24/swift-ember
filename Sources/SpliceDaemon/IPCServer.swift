@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 import SpliceCore
 
 /// The daemon end of the local development channel (DESIGN.md section 11).
@@ -22,7 +23,8 @@ public final class IPCServer: @unchecked Sendable {
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<Envelope, Error>] = [:]
 
-    public let port: UInt16
+    /// Valid once `start()` has returned.
+    public private(set) var port: UInt16 = 0
     public let token: String
 
     public var onEvent: (@Sendable (String) -> Void)?
@@ -31,20 +33,53 @@ public final class IPCServer: @unchecked Sendable {
 
     public var currentSession: Session? { lock.withLock { session } }
 
-    public init(port: UInt16 = SpliceProtocol.defaultPort) throws {
+    /// Pass a port to pin one; omit it to take whatever the system offers.
+    ///
+    /// Ephemeral is the default because the runtime learns where to dial from
+    /// the session file, so nothing needs a well-known number, and two projects
+    /// can then run `watch` at the same time without fighting over one.
+    public init(port: UInt16? = nil) throws {
         self.token = UUID().uuidString
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .init(rawValue: port)!)
+        let host = NWEndpoint.Host("127.0.0.1")
+        if let port, let resolved = NWEndpoint.Port(rawValue: port) {
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: host, port: resolved)
+        } else {
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: host, port: .any)
+        }
         self.listener = try NWListener(using: parameters)
-        self.port = port
     }
 
-    public func start() {
+    /// Starts listening and returns the port actually bound.
+    public func start() async throws -> UInt16 {
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
-        listener.start(queue: queue)
+
+        let listener = self.listener
+        let bound: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            // The listener can report .ready and later .failed; resume once.
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            let finish: @Sendable (Result<UInt16, Error>) -> Void = { result in
+                let alreadyResumed = resumed.withLock { was -> Bool in
+                    defer { was = true }
+                    return was
+                }
+                if !alreadyResumed { continuation.resume(with: result) }
+            }
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready: finish(.success(listener.port?.rawValue ?? 0))
+                case .failed(let error): finish(.failure(error))
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+
+        port = bound
+        return bound
     }
 
     public func stop() {

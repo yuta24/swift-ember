@@ -1115,6 +1115,15 @@ justified.
 -   protocol serialization,
 -   toolchain feature probing.
 
+The daemon needs its own, and for a specific reason: its worst failure
+so far was invisible from the outside. `IPCServer.request` could not
+time out, and because `watch` awaits each save in turn, one unanswered
+request stopped the daemon from ever processing another --- with no
+error and no log. `SpliceDaemonTests` drives the server against a fake
+runtime that speaks the wire format directly, which also makes it a
+second reader of the protocol, so a drift between the two sides shows up
+there.
+
 ### 19.2 Compiler fixtures
 
 Implemented in `fixtures/`. `fixtures/run.sh` builds each case, loads its
@@ -1165,9 +1174,36 @@ covered today are listed in `fixtures/README.md`.
 -   generic constraints changed,
 -   inheritance changed.
 
-All must fail closed.
+All must fail closed. Implemented as
+`Tests/SpliceGenTests/RebuildRequiredTests.swift`, one test per entry
+above so the list cannot quietly narrow.
 
-### 19.4 Integration test
+Two of these are order-sensitive rather than text-sensitive, and both
+were initially missed. Enum cases and stored properties both determine
+layout by declaration order, so a reordering is a real change; the
+residue fingerprint therefore preserves document order, and the order in
+which declarations are rejected is part of it. Reordering a method is
+not a change by the same reasoning, and is deliberately still accepted
+as no change.
+
+### 19.4 End-to-end generation
+
+The gap between "the classifier said yes" and "the patch works" needs
+its own suite, because a verdict nobody executes is a guess. For each
+declaration kind the classifier accepts, `SpliceEndToEndTests` takes a
+real edit through the real classifier and generator, compiles the
+result, loads it into a live process, and checks the output.
+
+This is what the toolchain fixtures cannot do: they use hand-written
+patches, so they say nothing about the generator. Two generator bugs ---
+constrained extensions losing their `where` clause, and overloads
+sharing an identity --- were invisible to every other suite.
+
+Host-only, because the toolchain behaviour underneath is already pinned
+on the Simulator by `fixtures/run.sh --platform simulator`, and building
+for the host keeps a full pass in seconds.
+
+### 19.5 Integration test
 
 Automate:
 
@@ -1336,6 +1372,12 @@ recording:
 ### Step 6: Classifier
 
 Reject unsafe changes.
+
+Done. The refusal list in section 19.3 is now one test each, and the
+suites are split by what they can be held to: the toolchain fixtures
+cover what Swift does, the unit tests cover what the classifier decides,
+and an end-to-end suite covers what the generated patch actually does in
+a process.
 
 ### Step 7: SwiftUI research
 

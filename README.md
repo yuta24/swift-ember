@@ -31,8 +31,9 @@ dispatch, and dyld does the loading. What this project adds is the part in
 between: deciding whether a change is safe to apply, writing the replacement,
 and getting it into the process.
 
-Status: **M2 of 5**. The loop works end to end for method bodies on a real
-Simulator app. Read `PRD.md` for what is and is not promised.
+Status: **M3 of 5**. The loop works end to end for method bodies on a real
+Simulator app, and the classifier's refusals are pinned by tests. Read `PRD.md`
+for what is and is not promised.
 
 ## Try it
 
@@ -83,6 +84,9 @@ Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 fixtures/              24 cases pinning what Swift dynamic replacement does
+Tests/                 73 tests: what the classifier decides, what the
+                       generated patch does in a process, what the daemon
+                       does when the app goes quiet
 examples/CounterApp    a Simulator app wired up end to end
 DESIGN.md              architecture and the measurements behind it
 PRD.md                 scope, tiers, milestones

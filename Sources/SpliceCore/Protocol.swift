@@ -23,6 +23,15 @@ public struct Envelope: Codable, Sendable {
         self.payload = try JSONEncoder().encode(payload)
     }
 
+    /// For a payload that is already encoded, such as one being relayed or
+    /// constructed by a test.
+    public init(type: String, requestId: String = UUID().uuidString, rawPayload: Data) {
+        self.protocolVersion = SpliceProtocol.version
+        self.type = type
+        self.requestId = requestId
+        self.payload = rawPayload
+    }
+
     public func decode<P: Codable>(_ type: P.Type) throws -> P {
         try JSONDecoder().decode(P.self, from: payload)
     }

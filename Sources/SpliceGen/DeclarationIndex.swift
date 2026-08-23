@@ -120,12 +120,14 @@ public enum DeclarationIndexer {
         }
 
         if let function = decl.as(FunctionDeclSyntax.self) {
-            record(function: function, context: context, into: &patchable, unsupported: &unsupported)
+            record(function: function, context: context, into: &patchable,
+                   unsupported: &unsupported, residue: &residue)
             return
         }
 
         if let variable = decl.as(VariableDeclSyntax.self) {
-            record(variable: variable, context: context, into: &patchable, unsupported: &unsupported)
+            record(variable: variable, context: context, into: &patchable,
+                   unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -136,7 +138,8 @@ public enum DeclarationIndexer {
 
     private static func record(function: FunctionDeclSyntax, context: [String],
                                into patchable: inout [String: PatchableDeclaration],
-                               unsupported: inout [String: UnsupportedDeclaration]) {
+                               unsupported: inout [String: UnsupportedDeclaration],
+                               residue: inout [String]) {
         let labels = function.signature.parameterClause.parameters.map { parameter in
             (parameter.firstName.text == "_" ? "_" : parameter.firstName.text) + ":"
         }.joined()
@@ -156,14 +159,14 @@ public enum DeclarationIndexer {
 
         guard let body = function.body else {
             reject(identity, "declaration has no body", signature,
-                   into: &patchable, unsupported: &unsupported)
+                   into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
         let fingerprint = signature + normalise(body.description)
 
         if let reason = rejection(attributes: function.attributes, modifiers: function.modifiers) {
-            reject(identity, reason, fingerprint, into: &patchable, unsupported: &unsupported)
+            reject(identity, reason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -173,12 +176,12 @@ public enum DeclarationIndexer {
             // this generator knows, and guessing would produce a patch that
             // either fails to compile or replaces the wrong thing.
             reject(identity, "operator declarations are not supported by this generator",
-                   fingerprint, into: &patchable, unsupported: &unsupported)
+                   fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
         if containsOpaqueType(function.signature.returnClause?.type) {
-            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported)
+            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -200,7 +203,8 @@ public enum DeclarationIndexer {
 
     private static func record(variable: VariableDeclSyntax, context: [String],
                                into patchable: inout [String: PatchableDeclaration],
-                               unsupported: inout [String: UnsupportedDeclaration]) {
+                               unsupported: inout [String: UnsupportedDeclaration],
+                               residue: inout [String]) {
         guard variable.bindings.count == 1,
               let binding = variable.bindings.first,
               let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
@@ -216,7 +220,7 @@ public enum DeclarationIndexer {
             // layout is the reason section 12.2 exists, so any change forces a
             // rebuild.
             reject(identity, "stored property; changing one changes the type's layout",
-                   normalise(variable.description), into: &patchable, unsupported: &unsupported)
+                   normalise(variable.description), into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -226,12 +230,12 @@ public enum DeclarationIndexer {
         let fingerprint = signature + normalise(accessors.description)
 
         if let reason = rejection(attributes: variable.attributes, modifiers: variable.modifiers) {
-            reject(identity, reason, fingerprint, into: &patchable, unsupported: &unsupported)
+            reject(identity, reason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
         if containsOpaqueType(binding.typeAnnotation?.type) {
-            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported)
+            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -287,9 +291,23 @@ public enum DeclarationIndexer {
         patchable[identity] = declaration
     }
 
+    /// Records a declaration this index will not patch.
+    ///
+    /// The identity also goes into the residue, in document order, because the
+    /// unsupported map is keyed and therefore order-blind. Storage layout
+    /// follows declaration order, so swapping two stored properties is a real
+    /// change -- and without this it read as no change at all, which is the
+    /// worst answer available: the developer sees nothing happen and is not
+    /// told why.
+    ///
+    /// Patchable declarations are deliberately left out of this. Moving a
+    /// method around has no effect on a running process, and forcing a rebuild
+    /// for a pure code reshuffle would be noise.
     private static func reject(_ identity: String, _ reason: String, _ fingerprint: String,
                                into patchable: inout [String: PatchableDeclaration],
-                               unsupported: inout [String: UnsupportedDeclaration]) {
+                               unsupported: inout [String: UnsupportedDeclaration],
+                               residue: inout [String]) {
+        residue.append("unsupported:" + identity)
         if let existing = unsupported[identity] {
             unsupported[identity] = UnsupportedDeclaration(
                 identity: identity, reason: duplicateReason(identity),
