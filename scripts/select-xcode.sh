@@ -47,8 +47,18 @@ if [ ${#candidates[@]} -eq 0 ]; then
     exit 1
 fi
 
+# Sorted on the version field alone. Sorting the whole "version|path" string
+# put 6.0 after 6.0.2, which made "oldest" right only by accident.
+sorted() { printf '%s\n' "${candidates[@]}" | sort -V -t'|' -k1,1; }
+
 if [ "${1:-}" = "--list" ]; then
-    printf '%s\n' "${candidates[@]}" | sort -V | while IFS='|' read -r version dir; do
+    sorted | while IFS='|' read -r version dir; do
+        # --supported narrows to what DESIGN.md section 20 claims. CI images
+        # carry a decade of Xcodes, and compiling under one this project has
+        # never measured produces a red that means nothing.
+        if [ "${2:-}" = "--supported" ] && ! at_least "$MINIMUM" "$version"; then
+            continue
+        fi
         printf 'swift %-8s %s\n' "$version" "$dir"
     done
     exit 0
@@ -64,7 +74,7 @@ while IFS='|' read -r version dir; do
     if [ "${1:-}" = "--oldest" ] && [ -n "$best" ]; then continue; fi
     best="$dir"
     best_version="$version"
-done < <(printf '%s\n' "${candidates[@]}" | sort -V)
+done < <(sorted)
 
 if [ -z "$best" ]; then
     {

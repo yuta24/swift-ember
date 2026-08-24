@@ -935,8 +935,16 @@ result type changes when the view tree changes.
 ```
 
 A *whole* opaque return type spelled `some View` is therefore already
-erased to a concrete type, and `type(of: screen.body)` reports
-`DebugReplaceableView` regardless of what the body returns.
+erased to a concrete type regardless of what the body returns.
+
+Which of the two erasers applies depends on the deployment target.
+`DebugReplaceableView` is available from iOS 26 and macOS 26; below
+that the compiler falls back to the second one, `AnyView`. Both are
+concrete, so the property that matters holds either way, and the
+fixture asserts that one of them applied rather than naming one. It
+originally named `DebugReplaceableView`, which passed on every machine
+here and failed on the first CI runner that was older --- which is a
+fair summary of why the matrix needed to leave one laptop.
 
 The word whole is load-bearing. Erasure does not reach an opaque
 position nested inside a type: `func f() -> (some View)?` measures as
@@ -987,7 +995,9 @@ scenarios. Three facts constrain its use:
 -   it is annotated
     `@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)`;
 -   it is already in play whether or not anyone asks for it, as the
-    first `@_typeEraser` on `View`.
+    first `@_typeEraser` on `View` --- but only where it is available.
+    Below iOS 26 or macOS 26 the second eraser, `AnyView`, applies
+    instead.
 
 Any SwiftUI support built on it therefore carries a hard
 deployment-target floor that core function replacement does not.

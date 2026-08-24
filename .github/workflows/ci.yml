@@ -66,6 +66,9 @@ jobs:
         with:
           name: fixtures-${{ matrix.runner }}
           path: .ci-results/*.yaml
+          # .ci-results is a dot directory, and the action skips those by
+          # default -- the upload failed on a run whose suite had passed.
+          include-hidden-files: true
           if-no-files-found: error
 
   # Separate because the matrix jobs always take the newest toolchain on their

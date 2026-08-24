@@ -121,7 +121,7 @@ check_runtime_across_toolchains() {
             sed -n '1,6p' "$work/log"
             failed=1
         fi
-    done < <("$ROOT/scripts/select-xcode.sh" --list)
+    done < <("$ROOT/scripts/select-xcode.sh" --list --supported)
     rm -rf "$work"
     [ "$any" -eq 1 ] || { echo "no toolchains to check" >&2; return 1; }
     return "$failed"
