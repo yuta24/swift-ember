@@ -1,0 +1,4 @@
+g0: evaluated=old
+g0: erased-to=DebugReplaceableView
+g1: evaluated=new
+g1: erased-to=DebugReplaceableView

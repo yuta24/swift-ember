@@ -36,6 +36,11 @@ public struct UnsupportedDeclaration: Sendable {
 public struct FileIndex: Sendable {
     public let patchable: [String: PatchableDeclaration]
     public let unsupported: [String: UnsupportedDeclaration]
+    /// The file's imports, verbatim and in order. A patch is compiled on its
+    /// own, so a body that mentions `VStack` needs the `import SwiftUI` its
+    /// original file had; without them the patch fails at COMPILE with
+    /// "cannot find type in scope", which reads like the tool's bug.
+    public let imports: [String]
     /// Everything else in the file, hashed, so that a change nobody indexed
     /// still forces a rebuild instead of passing unnoticed.
     public let residue: String
@@ -47,23 +52,59 @@ public struct FileIndex: Sendable {
 /// Deliberately syntactic. DESIGN.md section 7.4 says not to reach for
 /// compiler internals until simpler mechanisms fail, and for body-only changes
 /// the syntax is enough.
+/// What the index is willing to consider, beyond what it can prove.
+public struct ClassifierPolicy: Sendable {
+    /// Allow declarations returning an opaque result type.
+    ///
+    /// Off by default and dangerous on: changing the concrete type behind
+    /// `some P` compiles and loads without a diagnostic and is then undefined
+    /// (DESIGN.md 12.7). `View` is the one protocol measured to be different,
+    /// because it carries `@_typeEraser(DebugReplaceableView)` and every
+    /// `some View` is already erased to that concrete type. This switch exists
+    /// so that claim can be tested against a running app rather than argued
+    /// about; see DESIGN.md 13.
+    public var allowOpaqueResultTypes = false
+
+    public init(allowOpaqueResultTypes: Bool = false) {
+        self.allowOpaqueResultTypes = allowOpaqueResultTypes
+    }
+
+    public static let `default` = ClassifierPolicy()
+
+    /// Reads the switch from the environment so a spike can be run without a
+    /// build of its own. Not a supported interface.
+    public static var fromEnvironment: ClassifierPolicy {
+        ClassifierPolicy(
+            allowOpaqueResultTypes: ProcessInfo.processInfo.environment["SPLICE_EXPERIMENTAL_SWIFTUI"] == "1")
+    }
+}
+
 public enum DeclarationIndexer {
-    public static func index(source: String) -> FileIndex {
+    public static func index(source: String,
+                             policy: ClassifierPolicy = .default) -> FileIndex {
         let file = Parser.parse(source: source)
         var patchable: [String: PatchableDeclaration] = [:]
         var unsupported: [String: UnsupportedDeclaration] = [:]
         var residue: [String] = []
 
-        walk(members: file.statements.map(\.item), context: [], into: &patchable,
+        walk(members: file.statements.map(\.item), context: [], policy: policy, into: &patchable,
              unsupported: &unsupported, residue: &residue)
+
+        let imports = file.statements.compactMap { statement -> String? in
+            guard case .decl(let decl) = statement.item,
+                  let importDecl = decl.as(ImportDeclSyntax.self) else { return nil }
+            return importDecl.trimmedDescription
+        }
 
         // Not sorted: order is part of the fingerprint. Sorting made a pure
         // reordering of declarations -- enum cases, say -- invisible.
         return FileIndex(patchable: patchable, unsupported: unsupported,
+                         imports: imports,
                          residue: residue.joined(separator: "\n"))
     }
 
     private static func walk(members: [CodeBlockItemSyntax.Item], context: [String],
+                             policy: ClassifierPolicy,
                              into patchable: inout [String: PatchableDeclaration],
                              unsupported: inout [String: UnsupportedDeclaration],
                              residue: inout [String]) {
@@ -72,11 +113,13 @@ public enum DeclarationIndexer {
                 residue.append(normalise(item.description))
                 continue
             }
-            visit(decl, context: context, into: &patchable, unsupported: &unsupported, residue: &residue)
+            visit(decl, context: context, policy: policy, into: &patchable,
+                  unsupported: &unsupported, residue: &residue)
         }
     }
 
     private static func visit(_ decl: DeclSyntax, context: [String],
+                              policy: ClassifierPolicy,
                               into patchable: inout [String: PatchableDeclaration],
                               unsupported: inout [String: UnsupportedDeclaration],
                               residue: inout [String]) {
@@ -98,7 +141,7 @@ public enum DeclarationIndexer {
             let name = type.name.text
             residue.append(normalise(head(of: type)))
             walk(members: type.memberBlock.members.map { .decl($0.decl) },
-                 context: context + [name], into: &patchable,
+                 context: context + [name], policy: policy, into: &patchable,
                  unsupported: &unsupported, residue: &residue)
             return
         }
@@ -114,19 +157,19 @@ public enum DeclarationIndexer {
             }
             residue.append(normalise(head(of: ext)))
             walk(members: ext.memberBlock.members.map { .decl($0.decl) },
-                 context: [name], into: &patchable,
+                 context: [name], policy: policy, into: &patchable,
                  unsupported: &unsupported, residue: &residue)
             return
         }
 
         if let function = decl.as(FunctionDeclSyntax.self) {
-            record(function: function, context: context, into: &patchable,
+            record(function: function, context: context, policy: policy, into: &patchable,
                    unsupported: &unsupported, residue: &residue)
             return
         }
 
         if let variable = decl.as(VariableDeclSyntax.self) {
-            record(variable: variable, context: context, into: &patchable,
+            record(variable: variable, context: context, policy: policy, into: &patchable,
                    unsupported: &unsupported, residue: &residue)
             return
         }
@@ -137,6 +180,7 @@ public enum DeclarationIndexer {
     // MARK: - Functions
 
     private static func record(function: FunctionDeclSyntax, context: [String],
+                               policy: ClassifierPolicy,
                                into patchable: inout [String: PatchableDeclaration],
                                unsupported: inout [String: UnsupportedDeclaration],
                                residue: inout [String]) {
@@ -180,8 +224,10 @@ public enum DeclarationIndexer {
             return
         }
 
-        if containsOpaqueType(function.signature.returnClause?.type) {
-            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
+        let returnType = function.signature.returnClause?.type
+        if !policy.allowOpaqueResultTypes, containsOpaqueType(returnType) {
+            reject(identity, mentionsView(returnType) ? swiftUIBodyReason : opaqueReason,
+                   fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -202,6 +248,7 @@ public enum DeclarationIndexer {
     // MARK: - Properties
 
     private static func record(variable: VariableDeclSyntax, context: [String],
+                               policy: ClassifierPolicy,
                                into patchable: inout [String: PatchableDeclaration],
                                unsupported: inout [String: UnsupportedDeclaration],
                                residue: inout [String]) {
@@ -242,8 +289,10 @@ public enum DeclarationIndexer {
             return
         }
 
-        if containsOpaqueType(binding.typeAnnotation?.type) {
-            reject(identity, opaqueReason, fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
+        let declaredType = binding.typeAnnotation?.type
+        if !policy.allowOpaqueResultTypes, containsOpaqueType(declaredType) {
+            reject(identity, mentionsView(declaredType) ? swiftUIBodyReason : opaqueReason,
+                   fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
             return
         }
 
@@ -276,6 +325,27 @@ public enum DeclarationIndexer {
         returns an opaque result type; changing the concrete type behind `some` \
         compiles and loads without a diagnostic and is then undefined at runtime
         """
+
+    /// `View` is the measured exception, and it fails a different way.
+    ///
+    /// It carries `@_typeEraser(DebugReplaceableView)`, so `some View` is
+    /// already a concrete type and changing the tree shape is not the
+    /// undefined-behaviour case above --- the patch loads, and a direct call to
+    /// `body` really does reach it. SwiftUI's own rendering does not, so the
+    /// edit silently changes nothing on screen. Measured in DESIGN.md 13; a
+    /// silent no-op is the outcome this tool exists to avoid reporting as
+    /// success.
+    static let swiftUIBodyReason = """
+        returns `some View`; the patch would load and change nothing, because \
+        SwiftUI does not evaluate a view body through the replacement
+        """
+
+    /// Syntactic and deliberately loose: a type named `View` from somewhere
+    /// else lands on the SwiftUI wording, which costs a slightly wrong
+    /// explanation and never a wrong verdict, since both are refusals.
+    private static func mentionsView(_ type: TypeSyntax?) -> Bool {
+        type?.trimmedDescription.contains("View") ?? false
+    }
 
     /// Two declarations that reduce to the same identity cannot be told apart,
     /// so neither is patchable. Both are demoted, and the fingerprint carries

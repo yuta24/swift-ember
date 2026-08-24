@@ -57,7 +57,8 @@ public actor PatchCoordinator {
         let timeline = StageTimeline(generation: next)
 
         let classification = timeline.measure(.classify) {
-            ChangeClassifier.classify(baseline: baseline, current: current)
+            ChangeClassifier.classify(baseline: baseline, current: current,
+                                      policy: .fromEnvironment)
         }
 
         let declarations: [PatchableDeclaration]
@@ -72,9 +73,11 @@ public actor PatchCoordinator {
         }
 
         do {
+            let imports = DeclarationIndexer.index(source: current).imports
             let source = try timeline.measure(.generate) {
                 try ReplacementGenerator.generate(module: context.moduleName,
-                                                  generation: next, declarations: declarations)
+                                                  generation: next, declarations: declarations,
+                                                  imports: imports)
             }
 
             let artifact = try compiler.compile(source: source, generation: next, timeline: timeline)

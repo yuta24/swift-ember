@@ -210,3 +210,56 @@ private func expectRebuild(_ baseline: String, _ current: String,
     let source = try! ReplacementGenerator.generate(module: "M", generation: 1, declarations: declarations)
     #expect(source.contains("extension Outer.Inner {"))
 }
+
+// MARK: - SwiftUI
+
+@Test func aSwiftUIBodyIsRefusedWithItsOwnReason() {
+    // Not the undefined-behaviour case: `View` carries a type eraser, so the
+    // patch is safe. It is refused because it does nothing -- SwiftUI never
+    // evaluates a body through the replacement -- and a reload that reports
+    // success while changing nothing is the outcome this tool exists to avoid.
+    expectRebuild(
+        "import SwiftUI\nstruct Screen: View { var body: some View { Text(\"old\") } }",
+        "import SwiftUI\nstruct Screen: View { var body: some View { Text(\"new\") } }",
+        because: "SwiftUI does not evaluate a view body through the replacement")
+}
+
+@Test func theExperimentalSwitchLetsAViewBodyThrough() throws {
+    // The spike in DESIGN.md 13 needs a way to keep measuring. It is not a
+    // feature: `watch` prints what it will and will not do when it is set.
+    let baseline = "import SwiftUI\nstruct Screen: View { var body: some View { Text(\"old\") } }"
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    let policy = ClassifierPolicy(allowOpaqueResultTypes: true)
+    guard case .hotPatch(let declarations) = ChangeClassifier.classify(
+        baseline: baseline, current: current, policy: policy) else {
+        Issue.record("the switch did not take effect")
+        return
+    }
+    #expect(declarations.map(\.displayName) == ["Screen.body"])
+
+    // The generated patch has to carry the file's imports, or a body mentioning
+    // VStack fails to compile on its own.
+    let imports = DeclarationIndexer.index(source: current).imports
+    let source = try ReplacementGenerator.generate(module: "M", generation: 1,
+                                                   declarations: declarations, imports: imports)
+    #expect(source.contains("import SwiftUI"))
+}
+
+@Test func generatedPatchesCarryTheOriginalImports() throws {
+    let baseline = """
+    import Foundation
+    import SwiftUI
+    struct S { func f() -> String { "old" } }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+        Issue.record("expected a hot patch")
+        return
+    }
+    let source = try ReplacementGenerator.generate(
+        module: "M", generation: 1, declarations: declarations,
+        imports: DeclarationIndexer.index(source: current).imports)
+    #expect(source.contains("import Foundation"))
+    #expect(source.contains("import SwiftUI"))
+    #expect(source.contains("@testable import M"))
+}

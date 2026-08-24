@@ -11,6 +11,13 @@ struct CounterApp: App {
     }
 }
 
+/// A SwiftUI body small enough to watch change. The M4 spike edits this one.
+struct Banner: View {
+    var body: some View {
+        Text("banner: one line").font(.caption).foregroundStyle(.secondary)
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var cart: Cart
 
@@ -39,6 +46,10 @@ struct ContentView: View {
                 // Both rows come from patchable methods on Cart. Edit their
                 // bodies in Sources/Cart.swift while `swift-splice watch` is
                 // running and these change without the app restarting.
+                Section("SwiftUI") {
+                    Banner()
+                }
+
                 Section("Patched output") {
                     LabeledContent("Subtotal", value: cart.subtotalLabel())
                     LabeledContent("Discount", value: cart.discountLabel())

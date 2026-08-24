@@ -31,9 +31,10 @@ dispatch, and dyld does the loading. What this project adds is the part in
 between: deciding whether a change is safe to apply, writing the replacement,
 and getting it into the process.
 
-Status: **M3 of 5**, and it works against a real `.xcodeproj`. Method bodies
+Status: **M4 of 5**, and it works against a real `.xcodeproj`. Method bodies
 reload end to end on a Simulator app, and the classifier's refusals are pinned
-by tests. Read `PRD.md` for what is and is not promised.
+by tests. SwiftUI `body` is not among them, for a measured reason — see below.
+Read `PRD.md` for what is and is not promised.
 
 ## Try it
 
@@ -123,7 +124,12 @@ where a new one stands. `DESIGN.md` section 20 keeps the matrix.
 ## What it will not do
 
 Release builds, physical devices, and anything that changes a type's layout.
-SwiftUI `body` is currently a rebuild: changing the underlying type behind
-`some View` compiles cleanly, loads cleanly, and then corrupts the process,
-which `DESIGN.md` section 12.7 covers in detail. The full list is `PRD.md`
-section 5.
+
+SwiftUI `body` is a rebuild too, though not for the reason you would guess.
+`View` carries a type eraser, so `some View` is already concrete and patching
+one is perfectly safe — it just does nothing. SwiftUI reaches a body through
+code generated at compile time rather than through the replacement, so the
+reload reports success and the screen does not change. A reload that lies is
+worse than a refusal. `DESIGN.md` section 13 has the measurements.
+
+The full list is `PRD.md` section 5.

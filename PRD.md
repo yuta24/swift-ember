@@ -634,9 +634,34 @@ answering "nothing changed" is the worst of the available answers.
 
 ### M4 --- SwiftUI spike
 
--   Investigate `DebugReplaceableView` and current Xcode behavior.
--   Determine opaque-result-type constraints.
--   Demonstrate state-preserving SwiftUI edit where feasible.
+Complete, with a negative result.
+
+-   [x] Investigate `DebugReplaceableView` and current Xcode behaviour.
+-   [x] Determine opaque-result-type constraints.
+-   [ ] Demonstrate a state-preserving SwiftUI edit. **Not feasible**
+    with dynamic replacement alone.
+
+`View` carries `@_typeEraser(DebugReplaceableView)`, so `some View` is
+already concrete and changing a view tree's shape is safe --- not the
+undefined behaviour section 12.7 describes for other opaque result
+types. The replacement loads and dispatches on a direct call to `body`.
+
+But SwiftUI never makes that call. In a running app the patch reports
+success and the screen does not change, in the same render pass where an
+ordinary method replacement took effect. SwiftUI reaches a body through
+compile-time-generated `_makeView` code, not through the replaceable
+getter, so an invalidation trigger would not help: the graph re-ran and
+still produced the old tree.
+
+A reload that reports success and changes nothing is worse than a
+refusal, so `body` stays Tier C --- now for a reason that is understood
+rather than feared. `DESIGN.md` section 13 has the measurements and what
+would have to be found next.
+
+One thing the spike fixed along the way: generated patches now carry the
+original file's imports. A patched body mentioning `VStack` had been
+failing to compile on its own, which would have hit any project the
+moment a patched method used a type from an import.
 
 ### M5 --- Performance
 

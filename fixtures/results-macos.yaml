@@ -112,6 +112,12 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
+  - id: swiftui-body-direct-call
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "some View is erased to DebugReplaceableView, so a shape change is safe; the replacement dispatches on a direct call but not through SwiftUI's rendering"
   - id: throws-function
     supported: true
     kind: replace

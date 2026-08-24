@@ -925,23 +925,68 @@ var body: some View
 may preserve its source-level signature while its opaque underlying
 result type changes when the view tree changes.
 
-Section 12.7 makes the stakes concrete: an ordinary
-`@_dynamicReplacement` of `body` whose underlying type changes is not
-merely unsupported, it is undefined behavior that no diagnostic warns
-about and that may appear to work. SwiftUI `body` replacement is
-therefore rebuild-required until a SwiftUI-specific mechanism is proven.
+**Measured, and it is not what section 12.7 predicted.**
+
+`View` is the one protocol found to carry a type eraser:
+
+``` swift
+@_typeEraser(DebugReplaceableView) @_typeEraser(AnyView)
+@preconcurrency @MainActor public protocol View
+```
+
+Every `some View` is therefore already erased to a concrete type, and
+`type(of: screen.body)` reports `DebugReplaceableView` regardless of what
+the body returns. The undefined behaviour in section 12.7 comes from a
+caller holding stale metadata for a type that changed; here there is no
+such type. Changing a view tree's shape in a patch is safe. A fixture
+pins this, and a second one pins that the replacement dispatches: a
+direct read of `body` after loading really does run the new code.
+
+It still must not be allowed, for a different reason.
+
+In a rendering application the patch loads, reports success, and changes
+nothing on screen. Both halves were observed in one render pass:
+`Banner.body` was replaced twice and the banner never changed, while
+`Cart.subtotalLabel()` was replaced in the same session and its row
+updated immediately. So the view did re-render and still produced the
+old tree. SwiftUI does not reach a body through the replaceable getter;
+it goes through the `_makeView` machinery generated at compile time,
+which holds the original.
+
+That makes SwiftUI `body` a silent no-op, which is the outcome this tool
+treats as worse than a refusal --- the developer edits, the CLI says
+"hot reloaded", and the screen disagrees. The classifier refuses it, with
+its own wording rather than the undefined-behaviour one, because telling
+someone their `some View` edit is memory-unsafe would be false.
+
+`SPLICE_EXPERIMENTAL_SWIFTUI=1` lifts the refusal so the spike can
+continue. `watch` prints exactly what it will and will not do when the
+variable is set. It is not a feature.
+
+What would have to be found next: how Xcode Previews reaches a body,
+given that `DebugReplaceableView` exists for that purpose and is public
+but undocumented. `_makeView` and the attribute graph are where the
+original implementation is captured, so an invalidation trigger alone is
+not enough --- the graph re-ran and still called the old code.
 
 Apple exposes `DebugReplaceableView` for debug-time replacement
-scenarios. Two facts constrain its use:
+scenarios. Three facts constrain its use:
 
 -   it is declared in **SwiftUICore**, not SwiftUI, and reaches callers
     through SwiftUI's re-export;
 -   it is annotated
-    `@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)`.
+    `@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)`;
+-   it is already in play whether or not anyone asks for it, as the
+    first `@_typeEraser` on `View`.
 
 Any SwiftUI support built on it therefore carries a hard
 deployment-target floor that core function replacement does not.
 Record this in the compatibility matrix (section 20).
+
+`SWIFT_ENABLE_OPAQUE_TYPE_ERASURE` maps to
+`-enable-experimental-feature OpaqueTypeErasure` and defaults to NO, but
+erasure of `some View` was observed with the flag on, off, and absent, so
+on this toolchain the setting is not what turns it on.
 
 The project should investigate the current Xcode/SwiftUI preview
 pipeline rather than assume ordinary method replacement is sufficient.

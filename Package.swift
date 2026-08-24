@@ -30,7 +30,7 @@ let package = Package(
         .target(name: "SpliceDaemon", dependencies: ["SpliceCore", "SpliceGen"]),
         // The CLI is a library plus a thin main so that argument parsing can be
         // tested; an executable target cannot be imported.
-        .target(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon"]),
+        .target(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon", "SpliceGen"]),
         .executableTarget(name: "swift-splice", dependencies: ["SpliceCLI"],
                           path: "Sources/SpliceCLIMain"),
         .testTarget(name: "SpliceGenTests", dependencies: ["SpliceGen"]),

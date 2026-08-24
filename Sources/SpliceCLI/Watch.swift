@@ -1,6 +1,7 @@
 import Foundation
 import SpliceCore
 import SpliceDaemon
+import SpliceGen
 
 public enum Watch {
     public static func run(context: BuildContext) async throws {
@@ -35,6 +36,19 @@ public enum Watch {
 
         let watcher = FileWatcher(roots: roots)
         watcher.prime()
+
+        if ClassifierPolicy.fromEnvironment.allowOpaqueResultTypes {
+            print("""
+            SPLICE_EXPERIMENTAL_SWIFTUI is set.
+
+            Declarations returning an opaque result type will be patched. For
+            `some View` that is safe and useless: the patch loads and SwiftUI
+            never calls it, so the reload is reported as successful and nothing
+            on screen changes. For any other `some P` it is undefined behaviour.
+            This exists to continue the spike in DESIGN.md 13, not to be used.
+
+            """)
+        }
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         print("listening on 127.0.0.1:\(port)")
