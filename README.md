@@ -5,7 +5,7 @@
 Apply Swift implementation changes to a running iOS Simulator app without
 restarting it or losing its state.
 
-Save a file, and the method bodies you changed take effect in the process
+Save a file, and the implementation you changed takes effect in the process
 that is already running, with its heap, its navigation, and its login session
 intact.
 
@@ -33,9 +33,9 @@ dispatch, and dyld does the loading. What this project adds is the part in
 between: deciding whether a change is safe to apply, writing the replacement,
 and getting it into the process.
 
-Status: **M5 of 5**, and it works against a real `.xcodeproj`. Method bodies
-reload end to end on a Simulator app, and the classifier's refusals are pinned
-by tests. SwiftUI `body` is not among them, for a measured reason — see below.
+Status: **M5 of 5**, and it works against a real `.xcodeproj`. Bodies reload
+end to end on a Simulator app --- overrides and `private` helpers among them ---
+and the classifier's refusals are pinned by tests. SwiftUI `body` is not among them, for a measured reason — see below.
 Read `PRD.md` for what is and is not promised.
 
 A reload takes about 350 ms and, unlike a build, does not care how big your
@@ -91,7 +91,7 @@ your editor                          the running app
      v                                      | "load generation 3"
   ChangeClassifier  --- not safe --->  rebuild required
      |                                      ^
-     | body-only change                     |
+     | implementation change                |
      v                                      |
   ReplacementGenerator  ->  swiftc  ->  IPCServer
 ```
@@ -108,6 +108,31 @@ is conservative by construction: a change it does not understand is a rebuild.
 A false negative costs a rebuild, a false positive corrupts a live process,
 and those are not comparable.
 
+## What reloads
+
+Method and function bodies, computed property bodies, and the implementations
+they reach. Concretely:
+
+- methods on `class`, `struct`, `enum`, and `actor`, including `mutating`,
+  `static`, `async`, `throws`, and `@MainActor` ones;
+- **overrides**, including a body that opens with `super.viewDidLoad()`, and
+  including one UIKit reaches through `objc_msgSend` rather than through
+  Swift's vtable;
+- **`private` and `fileprivate` bodies**. These can never be replaced --- they
+  have no replacement key and `@testable import` cannot name them --- so the
+  patch carries its own copy and replaces the callers instead. All of them:
+  `private` is file-scoped, which is what makes "all of them" a question with
+  an answer;
+- **declarations you just added**. A new helper is carried in the patch rather
+  than replacing anything, since nothing already running could be calling it.
+
+The last two are also what lets you edit a body that *calls* a private helper
+at all. Before the patch carried them, that ordinary edit failed to compile.
+
+Anything that changes a type's layout, a signature, or the set of things a
+protocol requires is a rebuild, and so is any declaration returning an opaque
+result type. `PRD.md` section 8 is the full tier list.
+
 ## Layout
 
 ```
@@ -117,8 +142,8 @@ Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              24 cases pinning what Swift dynamic replacement does
-Tests/                 73 tests: what the classifier decides, what the
+fixtures/              32 cases pinning what Swift dynamic replacement does
+Tests/                 176 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight

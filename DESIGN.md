@@ -486,6 +486,25 @@ Methods on:
 
 `mutating` status must remain unchanged.
 
+Two further shapes are safe candidates, and neither is a body-only change
+in the same sense:
+
+-   a declaration that did not exist in the built binary. It is carried in
+    the patch rather than replacing anything. Nothing already running can
+    call it, so it displaces nothing and changes no layout,
+-   a `private` or `fileprivate` declaration whose body changed. It cannot
+    be replaced --- it has no key, and `@testable import` cannot name it ---
+    but the patch can carry its own copy, and a replaced body then resolves
+    the reference to that copy rather than to the invisible original. The
+    copy is only reached from what the patch replaced, so *every* caller in
+    the file has to be replaced along with it, or one function would mean
+    two things at once. `private` is file-scoped, which is what bounds that
+    search.
+
+Carrying a copy is also required, not optional, whenever a replaced body
+calls a `private` declaration at all. Without it the patch names something
+the patch module cannot see and fails at COMPILE.
+
 #### Unsafe
 
 -   stored-property set/layout changed,
@@ -505,9 +524,130 @@ Methods on:
 -   operator declarations, which are replaceable but whose
     `@_dynamicReplacement(for:)` spelling this generator does not know,
 -   protocol requirements, whose shape is the witness table's,
--   body of an `@inlinable`, `@_transparent`, `private`, or
-    `fileprivate` declaration changed --- implicit dynamic does not
-    cover these, so the patch cannot be built; see section 12.8.
+-   body of an `@inlinable` or `@_transparent` declaration changed ---
+    implicit dynamic does not cover these, so the patch cannot be built;
+    see section 12.8,
+-   body of a `private` or `fileprivate` declaration changed, where any
+    caller cannot itself be replaced: an initialiser, a stored property's
+    initial value, a top-level statement, or an `@inlinable` body. The copy
+    the patch carries would then be reached by some callers and not others,
+-   an `override` or `@objc` declaration *added*. An extension is the only
+    place a patch can put a member, and it may declare neither,
+-   a file-local declaration whose name is *overridden* in the same file. A
+    carried copy sits in an extension and is statically dispatched, so a
+    replaced caller reaches the copy where it used to reach the subclass's
+    version. Measured: the process quietly ran the base class's
+    implementation while the reload reported success. `private` and
+    `fileprivate` members can only be overridden from inside their own file,
+    so the file-scoped check is complete,
+-   a file-local declaration reached from a *default argument*. A default
+    argument compiles into a generator function of its own, which dynamic
+    replacement does not touch,
+-   any body that names a file-local declaration no patch can carry: a
+    stored property, a type, a typealias, an operator, an `@objc` member, one
+    returning an opaque type, one of a comma-separated binding, or one of two
+    that collided on a single identity. There is no key to replace it and no
+    copy that could stand in --- a copy of storage would be different storage.
+    Refused rather than emitted, because the patch would otherwise fail at
+    COMPILE against generated source and blame the developer's file for it.
+
+    That list is not how the check is written. Listing the ways a declaration
+    can fail to be carryable is exactly what kept turning out to be
+    incomplete: four of the seven entries above were found one at a time,
+    after the check was written, each as a patch that did not build. The set
+    is now *derived* --- declared file-local anywhere in the file, and not
+    among the declarations actually carried --- so a new way to be
+    uncarryable joins it without anyone noticing,
+-   a member of an extension of a file-local type. `extension Helper` carries
+    no `private` of its own, and Swift gives its members the type's access
+    level anyway. The enclosing type's name is part of what the patch writes
+    down, so it counts as something the declaration names.
+
+### 7.3a Where the facts come from
+
+Three of the refusals above read facts about the file rather than about the
+declaration being edited: which names are overridden, which are file-local and
+uncarryable, and whether a file-local protocol exists.
+
+These are collected by a pass over the whole tree, deliberately not by the
+indexing walk. The walk stops descending in three places --- a file-local type,
+an `#if` block, a function body --- and summarises what is inside as residue.
+That is right for deciding what changed and wrong for these facts: an
+`override` inside `#if os(iOS)` is still an override. Collected along the walk,
+the override guard saw an empty set for four ordinary spellings, and a carried
+copy was measured displacing a subclass's implementation in a running process
+while the reload reported success --- the exact failure the guard had just been
+written to close.
+
+Mentions have the same shape of hazard. A call to a private operator spells it
+with an operator token rather than an identifier, so collecting only
+identifiers left one invisible to every guard: measured, the patch compiled,
+the private overload was not in it, and the call silently rebound to a generic
+one.
+
+### 7.3b Reach
+
+The question this section does not otherwise answer is what fraction of
+ordinary edits reach a running process.
+
+Measured over three hand-written files in the shapes this tool is for --- an
+`ObservableObject` view model, an async service, a UIKit view controller, 403
+lines between them --- by editing every function body, accessor, `init`,
+`subscript` and `deinit` in turn:
+
+``` text
+                            bodies   hot patched   refused
+CartViewModel.swift             18             5        13
+FeedService.swift               13             3        10
+ProfileViewController.swift     15             0        15
+                                46             8        38
+```
+
+Eight of forty-six, and zero for the view controller. Thirty-two of the
+thirty-eight refusals name a `private` declaration the patch cannot reach.
+
+The cause is one thing, and the counterfactual isolates it: with every
+`private` stored property in those files changed to `internal`, the same sweep
+goes from 8 to 31. A patch cannot name a `private` declaration, because
+`@testable import` elevates `internal` and stops there --- and a method that
+touches private state is most methods in most real types. A view controller is
+almost entirely methods that touch private outlets, which is why it scores
+zero.
+
+Two smaller cliffs, both whole-file: one `private protocol` anywhere disables
+carrying for the entire file (section 12.5), and nothing inside an `#if` is
+ever patchable, since the block is residue.
+
+Almost none of this is the name analysis being blunt --- 30 of the 32 refusals
+are unavoidable given what a patch can name. The one genuinely spurious shape
+is a local variable sharing a name with an unrelated private stored property
+elsewhere in the file, because `mentions` is every identifier token with no
+scope resolution. Moving the number therefore needs a different mechanism for
+private state, not a smarter analysis. Section 7.3c is the measured candidate.
+
+### 7.3c Private imports, measured and not adopted
+
+`-Xfrontend -enable-private-imports` on the application build, and
+`@_private(sourceFile: "Cart.swift")` on the patch's import, both work on Xcode
+27.0 Beta 4:
+
+``` text
+read a private stored property from a patched body    works
+replace a private function directly, by its own key   works
+```
+
+The second is the surprising half. With private imports enabled the private
+declaration has a replacement key like any other, so it is *replaced* rather
+than copied --- and the replacement was observed through an unpatched caller,
+which a carried copy could never be.
+
+Adopting this would raise reach from 8/46 toward the 31/46 the counterfactual
+suggests, and would make most of section 7.3's carry machinery a fallback
+rather than the main path. It is not adopted because it is a change to what
+every integrating project must build with, not a change to this tool, and
+because the flag is another undocumented frontend option to put behind the
+adapter in section 4.4. Recorded here so the decision is made on the
+measurement rather than on the guess.
 
 ### 7.4 Implementation options
 
@@ -915,6 +1055,13 @@ not covered  @inlinable
              deinit
 ```
 
+Overrides are covered, and were refused for years of this document's life
+on the mistaken ground that they could not be. The replacement is a
+separate declaration bound to the original's key rather than an override
+of its own, so an extension accepts it, and the original is then reached
+through the base class, through `objc_msgSend`, and from a body calling
+`super`. Pinned by `fixtures/Cases/override-*`.
+
 Every uncovered case fails at the COMPILE stage with an actionable
 diagnostic, so the fail-closed principle in section 2.4 holds:
 
@@ -925,6 +1072,10 @@ diagnostic, so the fail-closed principle in section 2.4 holds:
 private / fileprivate
   error: replaced function 'f()' could not be found
 ```
+
+The `private` row is a statement about *replacement* only. Section 7.3
+describes the route around it, which does not replace the declaration at
+all: the patch carries a copy and replaces the callers.
 
 Two cautions apply to reading this table.
 
@@ -1322,17 +1473,17 @@ milliseconds, from an optimised build of the daemon:
 
 ``` text
 module size    full build    classify  generate  compile  link   total
-4 decls               439           0         0      174    175    349
-200 decls           1,112           0         0      175    175    350
-1,000 decls         4,529           0         0      174    175    349
-4,000 decls        18,225           0         0      174    175    349
-10,000 decls       49,797           0         0      174    178    352
+4 decls               439           0         0      176    175    349
+200 decls           1,161           0         0      174    174    347
+1,000 decls         4,502           0         0      175    174    349
+4,000 decls        18,463           0         0      175    174    349
+10,000 decls       50,416           0         0      175    181    356
 ```
 
 **Patch latency does not grow with the module around the edit.** A full
-build goes from 0.4 s to 50 s across that range, 113 times slower, while
-the patch pipeline moves from 349 ms to 352 ms. At the top of the range
-a reload is 141 times faster than a build, and costs the same as it did
+build goes from 0.4 s to 50 s across that range, 115 times slower, while
+the patch pipeline moves from 349 ms to 356 ms. At the top of the range
+a reload is 142 times faster than a build, and costs the same as it did
 at the bottom.
 
 Two qualifications, both found by reviewing the first version of this
@@ -1352,22 +1503,53 @@ rather than the module:
 
 ``` text
 edited file    classify  compile  link   total
-13 lines              0      175    175    349
-213 lines             2      173    175    349
-813 lines             6      176    175    357
-2,013 lines          18      173    175    366
+13 lines              0      175    174    349
+213 lines             1      173    175    349
+813 lines             4      172    174    349
+2,013 lines           9      173    175    358
 ```
 
-That is 5% of the loop at two thousand lines, which is tolerable. It is
+That is under 3% of the loop at two thousand lines, which is tolerable. It is
 only tolerable optimised. Classification is SwiftSyntax parsing, and at
-`-Onone` the same column reads 1, 21, 83, and 244 ms --- fourteen times
-the cost, turning a 366 ms reload into 591 ms. A daemon built for debug
-is not a daemon worth measuring, and `examples/CounterApp/demo.sh`
+`-Onone` it costs roughly fourteen times as much. A daemon built for
+debug is not a daemon worth measuring, and `examples/CounterApp/demo.sh`
 builds it with `-c release` for that reason.
 
 Halving that column took caching the baseline's parsed form between
 saves; it changes only when a patch lands, and re-parsing it every time
 doubled the one stage that grows.
+
+That column ended up *faster* than before the classifier grew a reference
+analysis, which it had no right to be, and the route there is worth
+recording because every step was found by re-measuring rather than by
+reading.
+
+The analysis added an identifier walk per declaration --- 2 ms on a
+2,000-line file, never the problem --- and a way to ignore comments. The
+first attempt at ignoring them rewrote the tree with comment trivia
+removed, per declaration, and indexing that file went to 4,760 ms.
+Mutating a SwiftSyntax node that has a parent rebuilds the whole tree it
+belongs to, so N declarations meant N rebuilds of the file. Doing it once
+at the root brought it to 2,930 ms, which was still absurd: the rewriter
+returned a *new* token even where it had changed nothing, and rebuilding
+every token rebuilds every ancestor with it. Returning the original token
+when there is no comment: 32 ms.
+
+Then a review found that the comparison key --- built by collapsing
+whitespace in the printed source --- collapsed it inside string literals
+too, so `"Total:  9"` and `"Total: 9"` compared equal and the save was
+reported as no change at all. The fix removed the rewrite entirely: the
+key is now built from the tokens and the statement boundaries, and
+nothing touches trivia, so comments are ignored without being removed.
+That also fixed a second defect the same review found, where a comment
+had been the only thing separating two tokens and removing it emitted
+`1 ++2`.
+
+Building the key over *every* node kind cost 55 ms, because naming a
+`SyntaxKind` allocates. Marking only statement boundaries --- the one
+structure whitespace can change --- costs 9 ms, and `.detached` on the
+signature path is worth another 65 ms on a file that size. Hence a
+column that reads 0, 1, 4, 9 where it used to read 0, 2, 6, 18.
 
 None of this undercuts the conclusion, but it does narrow it. Neither
 section 14 nor section 15 was proposed because 350 ms is too slow; both
@@ -1399,7 +1581,7 @@ the linker's own startup rather than anything about the patch.
 Defer both.
 
 The long-term target in PRD.md section 10 is under 500 ms for a simple
-patch compile and load. That is met, at 385 ms, on a module of ten
+patch compile and load. That is met, at 356 ms, on a module of ten
 thousand declarations.
 
 If either is picked up later, the numbers point at them roughly equally
@@ -1558,10 +1740,20 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    26/26  26/26 (iOS 27.0)   109/109
+local, Xcode 27.0b4  6.4     macosx26.0    32/32  32/32 (iOS 27.0)   176/176
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
+
+The counts differ by row because the matrix grew. Six cases --- the three
+`override-*` ones, `patch-local-declaration`, `private-via-caller`, and
+`carried-two-generations` --- were added after every row but Xcode 27.0b4 was
+last measured, so the other rows report the 26-case matrix and the 109-test
+suite they were actually run against; the suite has since grown to 176 with
+the tests that pin the new cases and the refusals a review added. Five of the six were run separately on
+the host under Xcode 26.2, 26.3, and 26.5 and pass on all three, so nothing
+suggests the older rows would differ; but a row is not re-measured until it is
+re-run, and none of them has been.
 
 The last two rows come from `.ci-results/*.yaml` uploaded by the run,
 not from anything committed here, and they cover two things no machine
@@ -1625,6 +1817,12 @@ toolchains:
       main_actor_method: tested
       static_method: tested
       objc_method: tested
+      override_method: tested
+      override_via_objc_dispatch: tested
+      super_call_in_replacement: tested
+      patch_local_declaration: tested
+      private_via_replaced_callers: tested
+      carried_declaration_across_generations: tested
       inlinable: unsupported
       transparent: unsupported
       private: unsupported
@@ -1972,7 +2170,7 @@ host        arm64-apple-macosx26.0
 simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
 ```
 
-The matrix was run on both targets. All 24 cases pass on both, and every
+The matrix was run on both targets. All 32 cases pass on both, and every
 result below holds for both except where noted.
 
 Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
@@ -2024,6 +2222,12 @@ actor instance method                         replaced, state preserved
 @MainActor method                             replaced, state preserved
 static method                                 replaced
 @objc method on an NSObject subclass          replaced
+override, called through the base class       replaced, state preserved
+override, called through objc_msgSend         replaced
+override whose replacement calls super        replaced, state preserved
+declaration carried only in the patch         callable from a replaced body
+private function, via its replaced callers    new implementation observed
+two patches carrying the same private name    no collision; newest wins
 opaque result type, same underlying type      replaced
 two generations loaded in sequence            newest wins
 
@@ -2068,6 +2272,7 @@ emitted replacement keys compared against the source:
 ``` text
 key emitted      internal, public, @usableFromInline
                  static and class methods
+                 overrides of class methods
                  init, subscript, operator functions
                  computed properties, lazy properties
                  nested type methods, extensions on imported types
