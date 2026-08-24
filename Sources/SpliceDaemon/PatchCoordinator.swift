@@ -14,6 +14,11 @@ public actor PatchCoordinator {
     private let compiler: PatchCompiler
     private let container: SimulatorContainer
     private var baselines: [URL: String] = [:]
+    /// The baseline's parsed form, kept because it only changes when a patch
+    /// lands. Re-parsing it on every save doubled the cost of classification,
+    /// which is the one stage that grows with the size of the file being
+    /// edited.
+    private var baselineIndexes: [URL: FileIndex] = [:]
     private var generation: UInt64 = 0
 
     public init(context: BuildContext, server: IPCServer, workDirectory: URL) {
@@ -32,6 +37,9 @@ public actor PatchCoordinator {
             guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
                                                               options: [.skipsHiddenFiles]) else { continue }
             for case let url as URL in walker where url.pathExtension == "swift" {
+                // Text only. Parsing every file at startup would cost a large
+                // project seconds before the first edit, and most files are
+                // never touched in a session.
                 baselines[url.standardizedFileURL] = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             }
         }
@@ -69,7 +77,9 @@ public actor PatchCoordinator {
         // rows in the summary read as two stages.
         let (currentIndex, classification) = timeline.measure(.classify) {
             let currentIndex = DeclarationIndexer.index(source: current, policy: policy)
-            let baselineIndex = DeclarationIndexer.index(source: baseline, policy: policy)
+            let baselineIndex = baselineIndexes[url]
+                ?? DeclarationIndexer.index(source: baseline, policy: policy)
+            baselineIndexes[url] = baselineIndex
             return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex))
         }
 
@@ -129,6 +139,7 @@ public actor PatchCoordinator {
 
             generation = next
             baselines[url] = current
+            baselineIndexes[url] = currentIndex
             return .applied(generation: next, declarations: declarations.map(\.displayName), timeline: timeline)
         } catch let error as SpliceError {
             return .rejected(error)

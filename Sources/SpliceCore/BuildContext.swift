@@ -91,10 +91,15 @@ public struct BuildContext: Codable, Sendable {
         sdkName = try required(.sdkName)
         appBinaryPath = try required(.appBinaryPath)
         bundleIdentifier = try required(.bundleIdentifier)
-        moduleSearchPaths = try container.decodeIfPresent([String].self, forKey: .moduleSearchPaths) ?? []
+        // Required. A manifest without these decodes into a daemon that either
+        // cannot find the app's module or watches nothing at all, and says so
+        // only much later, if ever. Only fields added after the format was in
+        // use get to be absent.
+        moduleSearchPaths = try container.decode([String].self, forKey: .moduleSearchPaths)
+        sourceRoots = try container.decode([String].self, forKey: .sourceRoots)
+        extraCompilerFlags = try container.decode([String].self, forKey: .extraCompilerFlags)
+        // Added later; absent in manifests written before it existed.
         frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
-        extraCompilerFlags = try container.decodeIfPresent([String].self, forKey: .extraCompilerFlags) ?? []
-        sourceRoots = try container.decodeIfPresent([String].self, forKey: .sourceRoots) ?? []
         debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
     }
 

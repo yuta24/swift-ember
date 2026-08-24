@@ -29,9 +29,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> building the daemon"
-swift build --package-path "$REPO" > /dev/null
-SPLICE="$(swift build --package-path "$REPO" --show-bin-path)/swift-splice"
+# Optimised, and not as a matter of taste. Classification is SwiftSyntax
+# parsing, which at -Onone costs about fourteen times what it does optimised:
+# on a 2,000-line file that is 244 ms against 18 ms, turning a 366 ms reload
+# into a 591 ms one. The first build of this takes a couple of minutes.
+echo "==> building the daemon (release)"
+swift build -c release --package-path "$REPO" > /dev/null
+SPLICE="$(swift build -c release --package-path "$REPO" --show-bin-path)/swift-splice"
 
 echo "==> building and launching the app"
 "$ROOT/build.sh" > /dev/null

@@ -36,9 +36,13 @@ reload end to end on a Simulator app, and the classifier's refusals are pinned
 by tests. SwiftUI `body` is not among them, for a measured reason — see below.
 Read `PRD.md` for what is and is not promised.
 
-A reload takes about 385 ms and, unlike a build, does not care how big your
+A reload takes about 350 ms and, unlike a build, does not care how big your
 project is. On a module of ten thousand declarations a full build takes 50
-seconds and a patch still takes 343 ms.
+seconds and a patch still takes 352 ms.
+
+Build the daemon with `swift build -c release`. Classification is SwiftSyntax
+parsing, and unoptimised it costs fourteen times as much — enough to be most of
+the loop on a large file.
 
 ## Try it
 

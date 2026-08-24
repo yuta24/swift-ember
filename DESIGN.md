@@ -1247,26 +1247,62 @@ justified. It has now been collected; section 18.1 has it.
 
 `Sources/SpliceBench` generates a synthetic application of a given size,
 builds it, and drives the real classifier, generator, and compiler
-through an edit. Median of five patches, milliseconds:
+through an edit. Median of five patches after a discarded warmup,
+milliseconds, from an optimised build of the daemon:
 
 ``` text
 module size    full build    classify  generate  compile  link   total
-4 decls               423           1         0      165    167    334
-200 decls           1,100           1         0      166    167    333
-1,000 decls         4,481           1         0      165    167    333
-4,000 decls        17,982           1         0      165    168    334
-10,000 decls       50,122           1         0      168    173    343
+4 decls               439           0         0      174    175    349
+200 decls           1,112           0         0      175    175    350
+1,000 decls         4,529           0         0      174    175    349
+4,000 decls        18,225           0         0      174    175    349
+10,000 decls       49,797           0         0      174    178    352
 ```
 
-**Patch latency does not grow with the project.** A full build goes from
-0.4 s to 50 s across that range, 119 times slower, while the patch
-pipeline moves from 334 ms to 343 ms. At the top of the range a reload
-is 146 times faster than a build, and the absolute number is the same as
-it was at the bottom.
+**Patch latency does not grow with the module around the edit.** A full
+build goes from 0.4 s to 50 s across that range, 113 times slower, while
+the patch pipeline moves from 349 ms to 352 ms. At the top of the range
+a reload is 141 times faster than a build, and costs the same as it did
+at the bottom.
 
-That undercuts the premise both section 14 and section 15 were written
-on. Neither was proposed because 350 ms is too slow; both were proposed
-in case the pipeline scaled badly. It does not.
+Two qualifications, both found by reviewing the first version of this
+section, which measured only one axis and drew a broader conclusion than
+it had earned.
+
+The first is that the patch here names one small type. `@testable
+import` deserialises lazily, so a patch that reaches into many of the
+module's types pays more: a 510-line patch naming 500 types costs about
+40 ms more than one naming a single type. The statement that survives is
+"latency does not grow with module size for an edit of fixed reach",
+which is still the useful one --- an edit reaches what it reaches
+regardless of how large the project around it is.
+
+The second is that one stage does scale, with the file being edited
+rather than the module:
+
+``` text
+edited file    classify  compile  link   total
+13 lines              0      175    175    349
+213 lines             2      173    175    349
+813 lines             6      176    175    357
+2,013 lines          18      173    175    366
+```
+
+That is 5% of the loop at two thousand lines, which is tolerable. It is
+only tolerable optimised. Classification is SwiftSyntax parsing, and at
+`-Onone` the same column reads 1, 21, 83, and 244 ms --- fourteen times
+the cost, turning a 366 ms reload into 591 ms. A daemon built for debug
+is not a daemon worth measuring, and `examples/CounterApp/demo.sh`
+builds it with `-c release` for that reason.
+
+Halving that column took caching the baseline's parsed form between
+saves; it changes only when a patch lands, and re-parsing it every time
+doubled the one stage that grows.
+
+None of this undercuts the conclusion, but it does narrow it. Neither
+section 14 nor section 15 was proposed because 350 ms is too slow; both
+were proposed in case the pipeline scaled badly with the project. It
+does not.
 
 Where the 385 ms of a real reload actually goes, decomposed by running
 each layer directly:

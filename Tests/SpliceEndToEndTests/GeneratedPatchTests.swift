@@ -209,3 +209,20 @@ private func probe(_ body: String) -> String {
         .replacingOccurrences(of: "old-b", with: "new-b")
     expectReload(baseline, current, before: ["old-a", "old-b"], after: ["new-a", "new-b"])
 }
+
+@Test func aConditionalImportSurvivesIntoACompilablePatch() {
+    // The unit tests only inspect the generated text, and a broken `#if` head
+    // slipped past one of them as a substring. This case compiles the result.
+    let baseline = """
+    #if canImport(Darwin)
+    import Darwin
+    #else
+    import Glibc
+    #endif
+
+    func subject() -> String { "old-" + String(Int(floor(1.5))) }
+    \(probe("[subject()]"))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: "old-", with: "new-"),
+                 before: ["old-1"], after: ["new-1"])
+}

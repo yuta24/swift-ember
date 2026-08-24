@@ -345,9 +345,40 @@ private func expectRebuild(_ baseline: String, _ current: String,
     let source = try ReplacementGenerator.generate(
         module: "M", generation: 1, declarations: declarations,
         imports: DeclarationIndexer.index(source: current).imports)
-    #expect(source.contains("#if canImport(UIKit)"))
-    #expect(source.contains("import UIKit"))
-    #expect(source.contains("#endif"))
+    // Compared as whole lines. `contains("#if canImport(UIKit)")` was
+    // satisfied by the "##if canImport(UIKit)" a hand-assembled `#if` head
+    // produced, so this assertion passed while the feature was broken in every
+    // case it applied to.
+    let lines = source.split(separator: "\n").map(String.init)
+    #expect(lines.contains("#if canImport(UIKit)"))
+    #expect(lines.contains("import UIKit"))
+    #expect(lines.contains("#endif"))
+    #expect(lines.filter { $0 == "#endif" }.count == 1)
+}
+
+@Test func anIfElseImportKeepsOneEndif() throws {
+    // One `#endif` per clause is the other half of the same mistake, and it
+    // needs a two-clause case to show up at all.
+    let baseline = """
+    #if canImport(UIKit)
+    import UIKit
+    #else
+    import AppKit
+    #endif
+    struct S { func f() -> String { "old" } }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+        Issue.record("expected a hot patch")
+        return
+    }
+    let source = try ReplacementGenerator.generate(
+        module: "M", generation: 1, declarations: declarations,
+        imports: DeclarationIndexer.index(source: current).imports)
+    let lines = source.split(separator: "\n").map(String.init)
+    #expect(lines.filter { $0 == "#endif" }.count == 1)
+    #expect(lines.contains("#else"))
+    #expect(!lines.contains { $0.hasPrefix("##") })
 }
 
 @Test func submoduleImportsSurvive() throws {

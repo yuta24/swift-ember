@@ -54,20 +54,30 @@ func source(file index: Int, declarations: Int) -> String {
     return lines.joined(separator: "\n") + "\n"
 }
 
-/// The file the benchmark edits. Always the same shape, so the work the
-/// pipeline does is constant and only the surrounding module grows.
-func subjectSource(body: String) -> String {
-    """
-    import Foundation
-
-    struct Subject {
-        var seed: Int = 7
-
-        func headline() -> String {
-            \(body)
-        }
+/// The file the benchmark edits.
+///
+/// `padding` adds unchanged methods around the one being edited. Holding this
+/// at its smallest hid the one stage that does scale with input: the daemon
+/// parses the edited file twice per save, so classification grows with the file
+/// the developer is working in even though it does not grow with the module
+/// around it.
+func subjectSource(body: String, padding: Int = 0) -> String {
+    var lines = ["import Foundation", "", "struct Subject {", "    var seed: Int = 7", ""]
+    for index in 0..<padding {
+        lines.append("""
+                func filler\(index)(_ input: Int) -> String {
+                    let scaled = input &* \(index + 1) &+ seed
+                    return "filler\(index):\\(scaled)"
+                }
+            """)
     }
-    """
+    lines.append("""
+            func headline() -> String {
+                \(body)
+            }
+        """)
+    lines.append("}")
+    return lines.joined(separator: "\n") + "\n"
 }
 
 func shell(_ arguments: [String]) throws -> Int32 {
@@ -107,12 +117,11 @@ let sdkPath = try xcrunOutput(["--sdk", "macosx", "--show-sdk-path"])
 // PatchCompiler execs this path directly, so it has to be the compiler itself.
 let swiftcPath = try xcrunOutput(["--find", "swiftc"])
 
-print("size         build      classify   generate   compile    link       total")
-print(String(repeating: "-", count: 72))
-
-for size in sizes {
+/// One configuration: an application of `size`, edited in a file padded to
+/// `padding` extra methods.
+func measure(size: Size, padding: Int) throws -> (build: Double, stages: [Stage: Double], total: Double)? {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("splice-bench-\(size.files)")
+        .appendingPathComponent("splice-bench-\(size.files)-\(padding)")
     try? FileManager.default.removeItem(at: root)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -124,7 +133,7 @@ for size in sizes {
         sources.append(url.path)
     }
     let subjectURL = root.appendingPathComponent("Subject.swift")
-    let baseline = subjectSource(body: #""headline:\(seed)""#)
+    let baseline = subjectSource(body: #""headline:\(seed)""#, padding: padding)
     try baseline.write(to: subjectURL, atomically: true, encoding: .utf8)
     sources.append(subjectURL.path)
 
@@ -137,7 +146,7 @@ for size in sizes {
                             "-emit-module", "-emit-module-path",
                             root.appendingPathComponent("\(module).swiftmodule").path,
                             "-emit-library", "-o", binary.path] + sources)
-    guard status == 0 else { print("build failed at \(size.files) files"); continue }
+    guard status == 0 else { return nil }
     let buildMs = Double(DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000
 
     let context = BuildContext(
@@ -157,40 +166,64 @@ for size in sizes {
 
     var samples: [Stage: [Double]] = [:]
     var totals: [Double] = []
+    // The daemon keeps the baseline's index between saves; so does this.
+    var baselineIndex: FileIndex?
 
-    for repetition in 0..<repetitions {
-        let current = subjectSource(body: #""headline:\(seed) rev\#(repetition)""#)
+    // One warmup, discarded. It is the cost a developer pays for the first save
+    // after a build, and averaging it into the rest would flatter every row.
+    for repetition in 0...repetitions {
+        let current = subjectSource(body: #""headline:\(seed) rev\#(repetition)""#, padding: padding)
         let timeline = StageTimeline(generation: UInt64(repetition + 1))
 
         let (index, classification) = timeline.measure(.classify) { () -> (FileIndex, ChangeClassification) in
             let after = DeclarationIndexer.index(source: current)
-            return (after, ChangeClassifier.classify(
-                before: DeclarationIndexer.index(source: baseline), after: after))
+            let before = baselineIndex ?? DeclarationIndexer.index(source: baseline)
+            baselineIndex = before
+            return (after, ChangeClassifier.classify(before: before, after: after))
         }
-        guard case .hotPatch(let declarations) = classification else {
-            print("\(size.files) files: classifier refused the edit"); break
-        }
+        guard case .hotPatch(let declarations) = classification else { return nil }
         let generated = try timeline.measure(.generate) {
             try ReplacementGenerator.generate(module: module, generation: UInt64(repetition + 1),
                                               declarations: declarations, imports: index.imports)
         }
         _ = try compiler.compile(source: generated, generation: UInt64(repetition + 1), timeline: timeline)
 
+        guard repetition > 0 else { continue }
         for event in timeline.all { samples[event.stage, default: []].append(event.durationMs) }
         totals.append(timeline.totalMs)
     }
 
-    guard !totals.isEmpty else { continue }
-    func column(_ stage: Stage) -> String {
-        String(format: "%-10.0f", median(samples[stage] ?? [0]))
-    }
-    let label = "\(size.total) decls".padding(toLength: 13, withPad: " ", startingAt: 0)
-    print(label
-          + String(format: "%-10.0f", buildMs)
+    guard totals.count == repetitions else { return nil }
+    return (buildMs, samples.mapValues(median), median(totals))
+}
+
+func row(_ label: String, _ result: (build: Double, stages: [Stage: Double], total: Double)?) {
+    guard let result else { print(label.padding(toLength: 15, withPad: " ", startingAt: 0) + "not measured"); return }
+    func column(_ stage: Stage) -> String { String(format: "%-10.0f", result.stages[stage] ?? 0) }
+    print(label.padding(toLength: 15, withPad: " ", startingAt: 0)
+          + String(format: "%-12.0f", result.build)
           + column(.classify) + column(.generate) + column(.compile) + column(.link)
-          + String(format: "%.0f", median(totals)))
+          + String(format: "%.0f", result.total))
+}
+
+let header = "               build       classify  generate  compile   link      total"
+
+print("How the module around the edit affects a patch")
+print(header)
+print(String(repeating: "-", count: 72))
+for size in sizes {
+    row("\(size.total) decls", try measure(size: size, padding: 0))
 }
 
 print("")
-print("build is the whole application, once, for reference. Every other column")
-print("is the median of \(repetitions) patches, in milliseconds.")
+print("How the edited file itself affects a patch, module held at 1,000 declarations")
+print(header)
+print(String(repeating: "-", count: 72))
+let fixed = Size(files: 50, declarationsPerFile: 20)
+for padding in [0, 50, 200, 500] {
+    row("\(padding * 4 + 13) lines", try measure(size: fixed, padding: padding))
+}
+
+print("")
+print("Median of \(repetitions) patches after one discarded warmup, in milliseconds.")
+print("build is the whole application, once, for reference.")

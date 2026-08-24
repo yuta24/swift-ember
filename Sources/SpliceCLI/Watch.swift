@@ -58,11 +58,29 @@ public enum Watch {
         // reinstall moves the app to a new container, and the session file in
         // the old one is unreachable from the new process -- so without this
         // the daemon waits forever for a connection the app cannot make.
-        let reannounce = Task {
+        let reannounce = Task.detached {
+            // Detached because announceSession runs `simctl`, measured at about
+            // 94 ms, and doing that on the coordinator every two seconds would
+            // make a save landing in that window queue behind it.
+            var consecutiveFailures = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                if server.currentSession == nil {
-                    try? await coordinator.announceSession()
+                let backoff = min(2 << min(consecutiveFailures, 4), 60)
+                try? await Task.sleep(for: .seconds(consecutiveFailures == 0 ? 2 : backoff))
+                guard server.currentSession == nil else {
+                    consecutiveFailures = 0
+                    continue
+                }
+                do {
+                    try await coordinator.announceSession()
+                    consecutiveFailures = 0
+                } catch {
+                    // Reported once, then backed off. Swallowing it hid exactly
+                    // the case this loop exists for: an app deleted from the
+                    // simulator, where the daemon otherwise waits in silence.
+                    consecutiveFailures += 1
+                    if consecutiveFailures == 1 {
+                        print("cannot reach the app's container: \(error)")
+                    }
                 }
             }
         }

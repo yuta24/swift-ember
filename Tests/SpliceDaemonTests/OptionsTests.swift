@@ -1,6 +1,8 @@
+import Foundation
 import Testing
 import SpliceCore
 @testable import SpliceCLI
+@testable import SpliceDaemon
 
 /// Argument parsing had no tests. It is the first thing a user touches, and a
 /// combination that slips through validation produces a confusing failure much
@@ -90,4 +92,71 @@ private func parse(_ arguments: String...) throws -> Options {
 
     context.debugDylibPath = "/tmp/App.app/App.debug.dylib"
     #expect(context.linkTarget == "/tmp/App.app/App.debug.dylib")
+}
+
+// MARK: - Search paths
+
+// Xcode reports these as one space-separated string with quoted entries, and a
+// parity split on the quote character broke whenever the first entry was
+// quoted. swiftc ignores a -F that does not exist, so the damage showed up as
+// "no such module" rather than as anything pointing here.
+
+@Test func searchPathsHandleQuotingAndRecursion() {
+    #expect(XcodeProject.parseSearchPaths(nil) == [])
+    #expect(XcodeProject.parseSearchPaths("") == [])
+    #expect(XcodeProject.parseSearchPaths("/a/b") == ["/a/b"])
+    #expect(XcodeProject.parseSearchPaths("/a/b /c/d") == ["/a/b", "/c/d"])
+
+    // Leading quoted entry: the case parity got wrong.
+    #expect(XcodeProject.parseSearchPaths("\"/Users/me/My App/Frameworks\" /other")
+            == ["/Users/me/My App/Frameworks", "/other"])
+    #expect(XcodeProject.parseSearchPaths("\"/My App/A\" \"/My App/B\"")
+            == ["/My App/A", "/My App/B"])
+    #expect(XcodeProject.parseSearchPaths("/a/b \"/Users/me/My App/Frameworks\"")
+            == ["/a/b", "/Users/me/My App/Frameworks"])
+
+    // `/**` means recursive to Xcode and nothing to swiftc.
+    #expect(XcodeProject.parseSearchPaths("/a/b/**") == ["/a/b"])
+}
+
+// MARK: - Build context
+
+@Test func aManifestMissingSourceRootsIsRefused() {
+    // Tolerating this produced a daemon that watched nothing and said nothing.
+    let json = """
+    {"moduleName":"A","swiftCompilerPath":"/x","swiftCompilerVersion":"v",
+     "targetTriple":"t","sdkPath":"/s","sdkName":"n","appBinaryPath":"/b",
+     "bundleIdentifier":"id","moduleSearchPaths":[],"extraCompilerFlags":[]}
+    """
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(BuildContext.self, from: Data(json.utf8))
+    }
+}
+
+@Test func aManifestMissingOnlyFrameworkSearchPathsStillLoads() {
+    // The one field added after the format was in use.
+    let json = """
+    {"moduleName":"A","swiftCompilerPath":"/x","swiftCompilerVersion":"v",
+     "targetTriple":"t","sdkPath":"/s","sdkName":"n","appBinaryPath":"/b",
+     "bundleIdentifier":"id","moduleSearchPaths":["/m"],"extraCompilerFlags":[],
+     "sourceRoots":["/r"]}
+    """
+    let context = try! JSONDecoder().decode(BuildContext.self, from: Data(json.utf8))
+    #expect(context.frameworkSearchPaths.isEmpty)
+    #expect(context.sourceRoots == ["/r"])
+}
+
+@Test func aBuildContextRoundTrips() throws {
+    let original = BuildContext(
+        moduleName: "A", swiftCompilerPath: "/x", swiftCompilerVersion: "v",
+        targetTriple: "t", sdkPath: "/s", sdkName: "n", appBinaryPath: "/b",
+        moduleSearchPaths: ["/m"], extraCompilerFlags: ["-D", "X"],
+        sourceRoots: ["/r"], bundleIdentifier: "id",
+        debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"])
+    let decoded = try JSONDecoder().decode(
+        BuildContext.self, from: try JSONEncoder().encode(original))
+    #expect(decoded.identity == original.identity)
+    #expect(decoded.debugDylibPath == original.debugDylibPath)
+    #expect(decoded.frameworkSearchPaths == original.frameworkSearchPaths)
+    #expect(decoded.linkTarget == original.linkTarget)
 }

@@ -670,17 +670,23 @@ Complete. `DESIGN.md` section 18.1 has the numbers.
 -   [x] Profile every stage separately, compile and link included.
 -   [x] Measure how each scales with the size of the application.
 
-The result that matters: **patch latency does not grow with the
-project**. Across modules from 4 to 10,000 declarations a full build
-goes from 0.4 s to 50 s while a patch stays between 333 and 343 ms. At
-the top of that range a reload is 146 times faster than a build.
+The result that matters: **patch latency does not grow with the module
+around the edit**. Across modules from 4 to 10,000 declarations a full
+build goes from 0.4 s to 50 s while a patch stays between 349 and
+352 ms. At the top of that range a reload is 141 times faster than a
+build.
+
+One stage does scale, with the file being edited rather than the module:
+classification is 18 ms on a 2,000-line file against nothing on a small
+one. At 5% of the loop that is tolerable, and only because the daemon is
+built optimised --- at `-Onone` the same figure is 244 ms.
 
 Against the section 10 targets, on the 10,000-declaration module:
 
   Metric                        Target       Measured
   --------------------------- ------------ -----------
   File change detection         \< 100 ms      ~150 ms
-  Simple patch compile + load      \< 2 s       385 ms
+  Simple patch compile + load      \< 2 s       352 ms
   Runtime activation            \< 200 ms        27 ms
 
 The long-term targets are 50 ms, 500 ms, and 50 ms. Two of the three are

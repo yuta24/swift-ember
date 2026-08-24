@@ -178,27 +178,46 @@ public enum DeclarationIndexer {
     /// Imports, including those inside `#if`.
     ///
     /// A file that reaches UIKit through `#if canImport(UIKit)` still needs the
-    /// import in its patch. The conditional wrapper is preserved rather than
-    /// flattened, because the patch compile is given the same `-D` set as the
-    /// app and will resolve it the same way.
+    /// import in its patch. The conditional is preserved rather than flattened,
+    /// because the patch compile is given the same `-D` set as the app and will
+    /// resolve it the same way.
+    ///
+    /// A conditional block is emitted by rewriting the node with its
+    /// non-import statements removed and printing it whole. Reassembling the
+    /// `#if` scaffolding by hand produced `##if`, one `#endif` per clause, and
+    /// a top-level `#else`, none of which is Swift.
     private static func collectImports(_ items: [CodeBlockItemSyntax.Item]) -> [String] {
-        items.flatMap { item -> [String] in
-            guard case .decl(let decl) = item else { return [] }
-            if let importDecl = decl.as(ImportDeclSyntax.self) {
-                return [importDecl.trimmedDescription]
+        items.compactMap(retainingImports).map(\.trimmedDescription)
+    }
+
+    /// The declaration with everything that is not an import removed, or nil if
+    /// nothing is left.
+    private static func retainingImports(_ item: CodeBlockItemSyntax.Item) -> DeclSyntax? {
+        guard case .decl(let decl) = item else { return nil }
+        if decl.is(ImportDeclSyntax.self) { return decl }
+
+        guard var conditional = decl.as(IfConfigDeclSyntax.self) else { return nil }
+
+        var kept = false
+        conditional.clauses = IfConfigClauseListSyntax(conditional.clauses.map { clause in
+            var clause = clause
+            guard case .statements(let statements)? = clause.elements else {
+                clause.elements = nil
+                return clause
             }
-            if let conditional = decl.as(IfConfigDeclSyntax.self) {
-                return conditional.clauses.flatMap { clause -> [String] in
-                    guard case .statements(let statements)? = clause.elements else { return [] }
-                    let inner = collectImports(statements.map(\.item))
-                    guard !inner.isEmpty else { return [] }
-                    let head = "#\(clause.poundKeyword.text)"
-                        + (clause.condition.map { " \($0.trimmedDescription)" } ?? "")
-                    return [head] + inner + ["#endif"]
-                }
+            // Recursive, so a nested conditional import is not lost.
+            let imports = statements.compactMap { statement -> CodeBlockItemSyntax? in
+                guard let retained = retainingImports(statement.item) else { return nil }
+                return CodeBlockItemSyntax(item: .decl(retained))
             }
-            return []
-        }
+            kept = kept || !imports.isEmpty
+            // Empty clauses are kept rather than dropped: removing the `#if`
+            // branch would leave a list that starts with `#else`.
+            clause.elements = imports.isEmpty ? nil : .statements(CodeBlockItemListSyntax(imports))
+            return clause
+        })
+
+        return kept ? DeclSyntax(conditional) : nil
     }
 
     /// The module an import statement names, ignoring any `import struct Foo.Bar`
