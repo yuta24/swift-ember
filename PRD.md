@@ -330,6 +330,16 @@ system events. Editors save atomically, by writing a temporary file and
 renaming it over the original, which invalidates any descriptor held on
 the old inode; comparing timestamps has no such hole.
 
+### FR-4a Build identity
+
+Before applying a patch the runtime MUST compare the build identity it
+was given against the one the daemon published for the running process,
+and refuse the patch when they differ.
+
+This is the runtime half of `DESIGN.md` section 6.3. The daemon has
+always sent the identity; nothing checked it until the review that
+noticed the refusal path it feeds was unreachable.
+
 ### FR-4 Compatibility analysis
 
 Before loading a patch, the system MUST determine whether the change is

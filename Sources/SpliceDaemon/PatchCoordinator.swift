@@ -23,6 +23,8 @@ public actor PatchCoordinator {
     /// could no longer describe -- reporting later reloads as successful on
     /// top of a state nobody could vouch for.
     private var uncertain: SpliceError?
+    /// The process the flag is about. Clearing needs a different one.
+    private var uncertainProcess: Int32?
 
     private var baselines: [URL: String] = [:]
     /// The baseline's parsed form, kept because it only changes when a patch
@@ -89,11 +91,19 @@ public actor PatchCoordinator {
 
     public var isUncertain: Bool { uncertain != nil }
 
-    /// Called when an app connects. A new process is a known state, whatever
-    /// happened to the last one, so this is the only thing that clears the
-    /// flag -- and it is why the runtime dials rather than listens.
-    public func sessionDidRestart() {
+    /// Called when an app connects, with the pid it reported.
+    ///
+    /// A reconnect is not a restart. The runtime re-dials whenever its socket
+    /// drops -- a suspend and resume in the simulator is enough -- and the same
+    /// process coming back says nothing about the state that poisoned the
+    /// session. Only a different pid is evidence of a new process, which is
+    /// the one state this daemon can vouch for without having watched it
+    /// become that way.
+    public func sessionDidConnect(processId: Int32) {
+        guard uncertain != nil else { return }
+        guard processId != uncertainProcess else { return }
         uncertain = nil
+        uncertainProcess = nil
     }
 
     /// Records the failure as the reason the session can no longer be
@@ -105,12 +115,40 @@ public actor PatchCoordinator {
     /// come through here.
     private func poison(_ error: SpliceError) -> SpliceError {
         uncertain = error
+        uncertainProcess = server.currentSession?.hello.processId
         return error
     }
 
-    public func handle(change url: URL) async -> Outcome {
-        if let uncertain { return .sessionUncertain(uncertain) }
+    /// Whether a failure leaves a process nobody can describe.
+    ///
+    /// Narrower than it first was, because a review showed the old rule
+    /// poisoned the everyday case of saving with no app running. The question
+    /// is only ever "could this patch have taken effect", and there are two
+    /// ways for the answer to be unknown: the request was sent and no answer
+    /// came back, or the runtime answered at a stage where it cannot vouch for
+    /// what happened.
+    ///
+    /// Everything the runtime does answer today means nothing took effect --
+    /// a missing image was never opened, and `dlopen` unmaps an image it could
+    /// not finish binding -- so those do not poison. The stages reserved for
+    /// "cannot vouch" are REGISTER and VERIFY, which nothing emits yet; naming
+    /// them here is what lets a future failure mode say so.
+    private static func cannotDescribeProcess(after error: any Error) -> Bool {
+        switch error {
+        case IPCServer.IPCError.timedOut, IPCServer.IPCError.disconnected:
+            true            // sent; the outcome is unknown
+        case IPCServer.IPCError.notConnected:
+            false           // never left the daemon
+        default:
+            true            // an unrecognised failure around the send
+        }
+    }
 
+    private static func cannotDescribeProcess(afterRuntimeStage stage: Stage) -> Bool {
+        stage == .register || stage == .verify
+    }
+
+    public func handle(change url: URL) async -> Outcome {
         let url = url.standardizedFileURL
         let baseline = baselines[url] ?? ""
         guard let current = try? String(contentsOf: url, encoding: .utf8) else { return .ignored }
@@ -140,6 +178,11 @@ public actor PatchCoordinator {
             declarations = changed
         }
 
+        // After the filters. Checked first, a poisoned session printed the
+        // whole paragraph for every touched file -- and a build or a checkout
+        // touches many, none of which would have been patched anyway.
+        if let uncertain { return .sessionUncertain(uncertain) }
+
         do {
             let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
@@ -164,11 +207,14 @@ public actor PatchCoordinator {
                                                   expecting: LoadPatchResult.self)
             } catch {
                 timeline.record(.load, since: start, success: false)
-                // No answer is not the same as no load. The request may have
-                // been carried out and the reply lost, so the process cannot
-                // be described either way.
-                throw poison(SpliceError(stage: .load, subject: url.lastPathComponent,
-                                         reason: "\(error)", recovery: .restart))
+                let failure = SpliceError(stage: .load, subject: url.lastPathComponent,
+                                          reason: "\(error)", recovery: .restart)
+                // No answer is not the same as no load: a request that was
+                // sent may have been carried out and its reply lost. One that
+                // never left the daemon, because nothing was connected, leaves
+                // the app exactly where it was -- and that is the ordinary case
+                // of saving a file before launching the app.
+                throw Self.cannotDescribeProcess(after: error) ? poison(failure) : failure
             }
 
             switch result {
@@ -182,10 +228,11 @@ public actor PatchCoordinator {
                                   reason: reason, recovery: .rebuild)
             case .failed(let stage, let message):
                 timeline.record(stage, since: start, success: false)
-                // A failure inside dlopen may leave the process half-patched,
-                // and section 17 says not to claim otherwise.
-                throw poison(SpliceError(stage: stage, subject: url.lastPathComponent,
-                                         reason: message, recovery: .restart))
+                let uncertain = Self.cannotDescribeProcess(afterRuntimeStage: stage)
+                let failure = SpliceError(stage: stage, subject: url.lastPathComponent,
+                                          reason: message,
+                                          recovery: uncertain ? .restart : .editAndRetry)
+                throw uncertain ? poison(failure) : failure
             }
 
             generation = next

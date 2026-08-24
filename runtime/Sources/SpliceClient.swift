@@ -17,6 +17,9 @@ final class SpliceClient: @unchecked Sendable {
     }
 
     private let state: Splice.StateBox
+    /// What the session file said this process was built as. Compared against
+    /// every incoming patch.
+    private var expectedBuildIdentity = ""
     private let queue = DispatchQueue(label: "dev.swift-splice.runtime")
     private var connection: NWConnection?
     private var buffer = Data()
@@ -69,6 +72,8 @@ final class SpliceClient: @unchecked Sendable {
             retry()
             return
         }
+
+        expectedBuildIdentity = session.buildIdentity
 
         let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
         lock.withLock { self.connection = connection }
@@ -157,6 +162,20 @@ final class SpliceClient: @unchecked Sendable {
     }
 
     private func apply(_ request: LoadPatchRequest) -> LoadPatchResult {
+        // DESIGN.md section 6.3: a patch built against a different binary must
+        // not be applied. The daemon has always sent its build identity and
+        // nothing checked it, which also left `.rejected` -- the one answer
+        // meaning "declined without touching anything" -- unreachable, so the
+        // rule that some failures do not poison the session was untested
+        // against anything real.
+        if request.buildIdentity != expectedBuildIdentity {
+            state.note("refused g\(request.generation): built for a different binary")
+            return .rejected(reason: """
+                the patch was built for \(request.buildIdentity) and this process is \
+                \(expectedBuildIdentity); rebuild and relaunch
+                """)
+        }
+
         switch Splice.load(generation: request.generation, path: request.path) {
         case .loaded(let generation, let durationMs):
             let names = request.declarations.joined(separator: ", ")

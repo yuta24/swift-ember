@@ -75,6 +75,14 @@ public enum Splice {
     // MARK: - Loading
 
     /// Loads one image. The only decision made in the process.
+    ///
+    /// Both failures here mean nothing took effect: a missing file was never
+    /// opened, and a failed `dlopen` leaves the process running the previous
+    /// generation -- dyld unmaps an image it could not finish binding. The
+    /// daemon relies on that to tell "this reload did not happen" from "this
+    /// process can no longer be described", so a future failure mode that
+    /// cannot make the same promise must report a different stage rather than
+    /// reuse these.
     static func load(generation: UInt64, path: String) -> LoadOutcome {
         let start = DispatchTime.now().uptimeNanoseconds
         guard FileManager.default.fileExists(atPath: path) else {

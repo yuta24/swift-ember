@@ -12,8 +12,10 @@ public enum Watch {
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: work)
 
         server.onConnect = { hello in
-            // A new process is a known state whatever became of the last one.
-            Task { await coordinator.sessionDidRestart() }
+            // Carries the pid: a reconnect from the same process is not a
+            // restart, and clearing on one would resume patching exactly the
+            // process the flag exists to stop patching.
+            Task { await coordinator.sessionDidConnect(processId: hello.processId) }
             if hello.buildIdentity == context.identity {
                 print("connected  pid \(hello.processId), \(hello.moduleName)")
             } else {

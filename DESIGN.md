@@ -1230,15 +1230,33 @@ process being the only state it can vouch for without having watched it
 become that way. Repeated rather than said once, because the developer
 is editing, watching nothing happen, and the reason scrolled away.
 
-Which failures count is decided at the three sites that know, not
-derived from the stage or from `recovery`. A load that was answered
-`failed`, and a request that was never answered at all, both leave a
-process that cannot be described --- silence is not the same as "nothing
-loaded". A runtime that answers `rejected` loaded nothing and says so, a
-classifier refusal never reached the process, and "could not find the
-app container" also recommends a restart while leaving the app
-untouched. None of those poison the session, and demanding a relaunch
-for an ordinary rejected edit would train people to ignore the message.
+The question is only ever "could this patch have taken effect", and
+there are exactly two ways for the answer to be unknown:
+
+-   the request was sent and no answer came back, whether it timed out
+    or the socket went away. Silence is not the same as nothing having
+    loaded;
+-   the runtime answered at a stage where it cannot vouch for what
+    happened, which is REGISTER or VERIFY.
+
+Everything else is known. A request that never left the daemon --- the
+ordinary case of saving before launching the app --- leaves the process
+exactly as built. A classifier refusal never reached it. A failure to
+find the app container never reached it. And every failure the runtime
+answers today means nothing took effect: a missing image was never
+opened, and `dlopen` unmaps an image it could not finish binding. The
+runtime documents that promise next to the two stages it uses, so a
+future failure mode that cannot make it has to say so with a different
+stage rather than inherit the benefit of the doubt.
+
+An earlier version of this poisoned on any failure that recommended a
+restart, which made saving a file with no app running mark the session
+undescribable and then hide every later error behind that message.
+
+Clearing needs evidence of a new process, not of a new socket. The
+runtime re-dials whenever its connection drops --- a suspend and resume in
+the simulator is enough --- so `hello` carries the pid and only a
+different one clears the flag.
 
 ## 18. Observability
 

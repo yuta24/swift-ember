@@ -133,7 +133,7 @@ public final class IPCServer: @unchecked Sendable {
 
         listener.cancel()
         lock.withLock { connection }?.cancel()
-        failAllPending(IPCError.notConnected)
+        failAllPending(IPCError.disconnected)
     }
 
     // MARK: - Connection lifecycle
@@ -154,7 +154,7 @@ public final class IPCServer: @unchecked Sendable {
         // that can settle what it was carrying; without it a request waits out
         // the full timeout while `watch`, which awaits each save in turn,
         // stalls for that whole window.
-        failAllPending(IPCError.notConnected)
+        failAllPending(IPCError.disconnected)
         incoming.stateUpdateHandler = { [weak self] state in
             switch state {
             case .cancelled, .failed: self?.handleDisconnect(generation)
@@ -185,7 +185,7 @@ public final class IPCServer: @unchecked Sendable {
         // Anything still in flight will never be answered by a socket that is
         // gone. Leaving those continuations suspended is what turned an app
         // crash into a permanently wedged daemon.
-        failAllPending(IPCError.notConnected)
+        failAllPending(IPCError.disconnected)
         if had { onDisconnect?() }
     }
 
@@ -265,12 +265,17 @@ public final class IPCServer: @unchecked Sendable {
     }
 
     public enum IPCError: Error, CustomStringConvertible {
+        /// The request never left the daemon.
         case notConnected
+        /// The request was sent and the socket went away before an answer.
+        case disconnected
+        /// The request was sent and nothing came back in time.
         case timedOut
 
         public var description: String {
             switch self {
             case .notConnected: "no app is connected"
+            case .disconnected: "the app went away before answering"
             case .timedOut: "the app did not answer"
             }
         }
