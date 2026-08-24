@@ -1024,6 +1024,16 @@ internals.
 
 ### 14.1 Why it is deferred
 
+Measured, in section 18.1: `ld` is 38% of a reload and is fixed
+overhead rather than work that grows. Replacing it is the largest single
+saving available, and JITLink is the only proposal here that would.
+
+It is still deferred, because the target it would beat is already met
+and because it is the only option here that adds an LLVM dependency.
+
+The original reasoning, which the measurement confirms rather than
+contradicts:
+
 If MVP is:
 
 ``` text
@@ -1098,6 +1108,12 @@ If step 5 fails, retain dylib loading.
 ## 15. Persistent compiler phase
 
 Once linking is optimized, frontend startup may dominate.
+
+Measured, in section 18.1: the frontend's own work is 21% of a reload
+and process launches are another 28%, most of which a resident compiler
+would also remove. That makes it comparable to JITLink in value and
+cheaper in dependencies, which is the opposite of the ordering sections
+14 and 15 assumed.
 
 Potential architecture:
 
@@ -1225,7 +1241,72 @@ total                  609 ms
 ```
 
 This data determines whether ORC or persistent compiler work is
-justified.
+justified. It has now been collected; section 18.1 has it.
+
+### 18.1 Measured
+
+`Sources/SpliceBench` generates a synthetic application of a given size,
+builds it, and drives the real classifier, generator, and compiler
+through an edit. Median of five patches, milliseconds:
+
+``` text
+module size    full build    classify  generate  compile  link   total
+4 decls               423           1         0      165    167    334
+200 decls           1,100           1         0      166    167    333
+1,000 decls         4,481           1         0      165    167    333
+4,000 decls        17,982           1         0      165    168    334
+10,000 decls       50,122           1         0      168    173    343
+```
+
+**Patch latency does not grow with the project.** A full build goes from
+0.4 s to 50 s across that range, 119 times slower, while the patch
+pipeline moves from 334 ms to 343 ms. At the top of the range a reload
+is 146 times faster than a build, and the absolute number is the same as
+it was at the bottom.
+
+That undercuts the premise both section 14 and section 15 were written
+on. Neither was proposed because 350 ms is too slow; both were proposed
+in case the pipeline scaled badly. It does not.
+
+Where the 385 ms of a real reload actually goes, decomposed by running
+each layer directly:
+
+``` text
+ld                                   145 ms   38%
+process and driver overhead          109 ms   28%
+Swift frontend, real work             81 ms   21%
+dlopen and registration               27 ms    7%
+classification                        15 ms    4%
+```
+
+The overhead line is three drivers and two process launches: `swiftc`
+costs about 60 ms before it does anything, and the link invocation pays
+another 34 ms of `swiftc` driver plus 15 ms of `clang` driver before
+reaching `ld`.
+
+`ld` is the single largest item and it is fixed cost, not work: it does
+not grow with the module it links against, so it is the SDK's tbds and
+the linker's own startup rather than anything about the patch.
+
+### 18.2 What this says about sections 14 and 15
+
+Defer both.
+
+The long-term target in PRD.md section 10 is under 500 ms for a simple
+patch compile and load. That is met, at 385 ms, on a module of ten
+thousand declarations.
+
+If either is picked up later, the numbers point at them roughly equally
+and for different reasons. JITLink (section 14) addresses the 38% in
+`ld` and nothing else. A persistent compiler (section 15) addresses the
+21% of frontend work plus most of the 28% of process overhead, so about
+37%, and needs no new dependency on LLVM.
+
+The cheapest available win needs neither: merging the compile and link
+invocations back into one saves about 60 ms. It is deliberately not
+taken --- two invocations are what make section 9.2's separate timing
+possible, and stage attribution currently costs 16% of the loop. That is
+a trade worth revisiting only when something else has made 60 ms matter.
 
 ## 19. Testing strategy
 

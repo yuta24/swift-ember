@@ -54,6 +54,20 @@ public enum Watch {
         print("listening on 127.0.0.1:\(port)")
         print("")
 
+        // While nothing is connected, keep republishing where to dial. A
+        // reinstall moves the app to a new container, and the session file in
+        // the old one is unreachable from the new process -- so without this
+        // the daemon waits forever for a connection the app cannot make.
+        let reannounce = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                if server.currentSession == nil {
+                    try? await coordinator.announceSession()
+                }
+            }
+        }
+        defer { reannounce.cancel() }
+
         let changes = AsyncStream<[URL]> { continuation in
             watcher.start { continuation.yield($0) }
         }

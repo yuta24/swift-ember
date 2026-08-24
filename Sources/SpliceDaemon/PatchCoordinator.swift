@@ -37,7 +37,15 @@ public actor PatchCoordinator {
         }
     }
 
+    /// Publishes where to reach the daemon into the app's container.
+    ///
+    /// Re-runs the lookup rather than trusting the cache, because the usual
+    /// reason to call this again is that the app was reinstalled and now lives
+    /// somewhere else. Without that, a reinstall left the session file in the
+    /// old container, the app never found it, and the daemon waited for a
+    /// connection that could not happen.
     public func announceSession() throws {
+        container.invalidate()
         try container.writeSession(port: server.port, token: server.token,
                                    buildIdentity: context.identity)
     }
@@ -135,10 +143,30 @@ public actor PatchCoordinator {
 
 /// Everything that depends on the app living in a simulator container.
 /// Isolated here so that the rest of the daemon does not learn about `simctl`.
-struct SimulatorContainer: Sendable {
+final class SimulatorContainer: @unchecked Sendable {
     let bundleIdentifier: String
+    private let lock = NSLock()
+    private var cached: URL?
 
+    init(bundleIdentifier: String) {
+        self.bundleIdentifier = bundleIdentifier
+    }
+
+    /// Forgets the cached path. Called when the app goes away, because a
+    /// reinstall gives it a new container.
+    func invalidate() {
+        lock.withLock { cached = nil }
+    }
+
+    /// Cached, because asking is expensive and the answer does not change
+    /// while an install stays put.
+    ///
+    /// Measured at about 106 ms per call against 11 ms for the copy it exists
+    /// to locate, so a third of the whole reload was spent launching `simctl`
+    /// to be told the same path again.
     private func dataContainer() throws -> URL {
+        if let cached = lock.withLock({ cached }) { return cached }
+
         let result = try Subprocess.run("/usr/bin/xcrun",
                                         arguments: ["simctl", "get_app_container", "booted", bundleIdentifier, "data"])
         let path = result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -147,7 +175,9 @@ struct SimulatorContainer: Sendable {
                               reason: "could not find the app container: \(path)",
                               recovery: .restart)
         }
-        return URL(fileURLWithPath: path)
+        let url = URL(fileURLWithPath: path)
+        lock.withLock { cached = url }
+        return url
     }
 
     /// The daemon publishes where to reach it into the app's own Documents

@@ -33,6 +33,12 @@ let package = Package(
         .target(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon", "SpliceGen"]),
         .executableTarget(name: "swift-splice", dependencies: ["SpliceCLI"],
                           path: "Sources/SpliceCLIMain"),
+        // A development tool, deliberately not part of the swift-splice
+        // product. It calls the real classifier, generator, and compiler, so
+        // the numbers cannot drift from what the daemon actually does.
+        .executableTarget(name: "splice-bench",
+                          dependencies: ["SpliceCore", "SpliceGen", "SpliceDaemon"],
+                          path: "Sources/SpliceBench"),
         .testTarget(name: "SpliceGenTests", dependencies: ["SpliceGen"]),
         .testTarget(name: "SpliceDaemonTests", dependencies: ["SpliceCore", "SpliceDaemon", "SpliceCLI"]),
         .testTarget(name: "SpliceEndToEndTests", dependencies: ["SpliceCore", "SpliceGen"]),

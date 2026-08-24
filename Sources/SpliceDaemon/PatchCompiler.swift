@@ -18,29 +18,69 @@ public struct PatchCompiler: Sendable {
         public let imageURL: URL
     }
 
+    /// Two invocations, not one.
+    ///
+    /// DESIGN.md section 9.2 asks for compile and link timing kept separate,
+    /// and section 14 cannot be decided without it: whether to pursue JITLink
+    /// or a persistent compiler depends entirely on which of the two dominates.
+    /// A single `-emit-library` reports one number for both and guesses at
+    /// stage attribution by grepping the output.
     public func compile(source: String, generation: UInt64, timeline: StageTimeline) throws -> Artifact {
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
 
         let name = String(format: "Patch_%03llu", generation)
         let sourceURL = workDirectory.appendingPathComponent("\(name).swift")
+        let objectURL = workDirectory.appendingPathComponent("\(name).o")
         let imageURL = workDirectory.appendingPathComponent("\(name).dylib")
         try source.write(to: sourceURL, atomically: true, encoding: .utf8)
 
+        try run(frontendArguments(source: sourceURL, object: objectURL, name: name),
+                stage: .compile, subject: sourceURL.lastPathComponent,
+                recovery: .editAndRetry, timeline: timeline)
+
+        try run(linkArguments(object: objectURL, image: imageURL, name: name),
+                stage: .link, subject: sourceURL.lastPathComponent,
+                recovery: .rebuild, timeline: timeline)
+
+        return Artifact(generation: generation, sourceURL: sourceURL, imageURL: imageURL)
+    }
+
+    private func run(_ arguments: [String], stage: Stage, subject: String,
+                     recovery: SpliceError.Recovery, timeline: StageTimeline) throws {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)
+        guard result.exitCode == 0 else {
+            timeline.record(stage, since: start, success: false)
+            throw SpliceError(stage: stage, subject: subject,
+                              reason: trim(result.combinedOutput), recovery: recovery)
+        }
+        timeline.record(stage, since: start, success: true)
+    }
+
+    private var common: [String] {
         var arguments = [
             "-Onone",
             "-target", context.targetTriple,
             "-sdk", context.sdkPath,
-            "-Xclang-linker", "-isysroot", "-Xclang-linker", context.sdkPath,
-            "-emit-library", "-o", imageURL.path,
-            "-module-name", name,
         ]
         for path in context.moduleSearchPaths { arguments += ["-I", path] }
         for path in context.frameworkSearchPaths { arguments += ["-F", path] }
-        arguments += context.extraCompilerFlags
-        arguments.append(sourceURL.path)
+        return arguments
+    }
+
+    private func frontendArguments(source: URL, object: URL, name: String) -> [String] {
+        common + ["-c", "-o", object.path, "-module-name", name]
+            + context.extraCompilerFlags + [source.path]
+    }
+
+    private func linkArguments(object: URL, image: URL, name: String) -> [String] {
+        var arguments = common + [
+            "-Xclang-linker", "-isysroot", "-Xclang-linker", context.sdkPath,
+            "-emit-library", "-o", image.path, "-module-name", name, object.path,
+        ]
         // Linking against the running binary resolves the replacement keys now
-        // rather than at dlopen, so an ineligible declaration fails at LINK
-        // with "Undefined symbols" instead of inside the app.
+        // rather than at dlopen, so an ineligible declaration fails here with
+        // "Undefined symbols" instead of inside the app.
         let target = context.linkTarget
         if target.hasSuffix(".dylib") {
             // An Xcode 16 debug dylib: a plain linker input, since
@@ -50,24 +90,7 @@ public struct PatchCompiler: Sendable {
             arguments += ["-Xlinker", "-bundle",
                           "-Xlinker", "-bundle_loader", "-Xlinker", target]
         }
-
-        let start = DispatchTime.now().uptimeNanoseconds
-        let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)
-
-        guard result.exitCode == 0 else {
-            // The linker owns the second half of this invocation, so attribute
-            // the failure to whichever stage actually produced it.
-            let isLink = result.combinedOutput.contains("Undefined symbols")
-                || result.combinedOutput.contains("linker command failed")
-            let stage: Stage = isLink ? .link : .compile
-            timeline.record(stage, since: start, success: false)
-            throw SpliceError(stage: stage, subject: sourceURL.lastPathComponent,
-                              reason: trim(result.combinedOutput),
-                              recovery: isLink ? .rebuild : .editAndRetry)
-        }
-        timeline.record(.compile, since: start, success: true)
-
-        return Artifact(generation: generation, sourceURL: sourceURL, imageURL: imageURL)
+        return arguments
     }
 
     private func trim(_ output: String) -> String {

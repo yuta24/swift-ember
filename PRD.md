@@ -665,17 +665,27 @@ moment a patched method used a type from an import.
 
 ### M5 --- Performance
 
-Profile:
+Complete. `DESIGN.md` section 18.1 has the numbers.
 
-``` text
-change detection
--> source analysis
--> swift frontend
--> object generation
--> linker
--> load
--> runtime activation
-```
+-   [x] Profile every stage separately, compile and link included.
+-   [x] Measure how each scales with the size of the application.
+
+The result that matters: **patch latency does not grow with the
+project**. Across modules from 4 to 10,000 declarations a full build
+goes from 0.4 s to 50 s while a patch stays between 333 and 343 ms. At
+the top of that range a reload is 146 times faster than a build.
+
+Against the section 10 targets, on the 10,000-declaration module:
+
+  Metric                        Target       Measured
+  --------------------------- ------------ -----------
+  File change detection         \< 100 ms      ~150 ms
+  Simple patch compile + load      \< 2 s       385 ms
+  Runtime activation            \< 200 ms        27 ms
+
+The long-term targets are 50 ms, 500 ms, and 50 ms. Two of the three are
+already met. Detection is the one that is not, and it is a deliberate
+150 ms polling interval rather than a cost --- see FR-3.
 
 Only after measurement, evaluate:
 
@@ -683,6 +693,19 @@ Only after measurement, evaluate:
 -   object-file caching,
 -   LLVM ORC/JITLink,
 -   out-of-process JIT linking.
+
+**Evaluated: defer all four.** None was proposed because 350 ms is slow;
+all were proposed in case the pipeline scaled badly, and it does not.
+`ld` is the largest single item at 38% and is fixed overhead, so
+object-file caching would save nothing. `DESIGN.md` section 18.2 has the
+reasoning.
+
+One thing the profile did find was worth fixing immediately. The
+transfer stage was 105 ms, of which 11 ms was the copy and 94 ms was
+launching `simctl` to be told the same container path as last time. It
+is cached now, which took the loop from 533 ms to 385 ms, and the same
+change fixed a bug: a reinstall moves the app to a new container, and
+the daemon had been writing its session file into the old one forever.
 
 ## 16. Open questions
 
