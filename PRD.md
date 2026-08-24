@@ -481,10 +481,15 @@ This is a local developer tool.
 -   Permissive license preferred; final license decision before first
     public release.
 -   Repository MUST contain reproducible build/test instructions.
+    `scripts/ci.sh` is both, which is the only arrangement that stays
+    true: steps that exist only inside a CI provider's configuration
+    cannot be run before pushing and cannot be read out of a log.
 -   Architecture and compatibility assumptions MUST be documented.
 -   Compiler-private dependencies MUST be clearly marked.
 -   Toolchain compatibility tests SHOULD run against multiple supported
-    Xcode versions where CI availability permits.
+    Xcode versions where CI availability permits. The workflow runs the
+    newest toolchain on each runner image plus, separately and without
+    failing the build, the oldest at or above the tested floor.
 -   Contributions adding toolchain-specific workarounds MUST include
     tests or fixtures.
 

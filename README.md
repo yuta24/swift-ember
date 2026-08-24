@@ -1,5 +1,7 @@
 # swift-splice
 
+[![CI](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml/badge.svg)](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml)
+
 Apply Swift implementation changes to a running iOS Simulator app without
 restarting it or losing its state.
 
@@ -138,6 +140,19 @@ DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
 ```
 
 `DESIGN.md` section 20 keeps the matrix.
+
+## Checking your changes
+
+```
+scripts/ci.sh                     everything, about ten minutes
+scripts/ci.sh --skip-simulator    host only
+scripts/ci.sh --only tests        one stage
+```
+
+CI runs that script and nothing else, so a red build is something you can
+reproduce. `scripts/select-xcode.sh` picks the toolchain, newest at or above the
+tested floor, which is why the workflow does not pin an Xcode version — an image
+rotating should not look like the code breaking.
 
 ## What it will not do
 

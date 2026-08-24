@@ -1,0 +1,78 @@
+name: CI
+
+# The point of this is the compatibility matrix in DESIGN.md section 20. That
+# document only claims what has actually been run, and until this existed the
+# only thing that had run it was one laptop.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Images rotate what they ship. Choosing here, against the floor recorded
+      # beside the measurements that justify it, keeps a red build meaningful:
+      # it means the code broke, not that a runner image moved.
+      - name: Select a toolchain
+        run: |
+          scripts/select-xcode.sh --list
+          developer_dir="$(scripts/select-xcode.sh)"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          version="$(DEVELOPER_DIR=$developer_dir xcrun swiftc --version 2>/dev/null \
+            | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          echo "SWIFT_VERSION=$version" >> "$GITHUB_ENV"
+
+      # Keyed on the compiler as well as the manifest. Modules built by one
+      # toolchain are not reusable by another, and a cache that ignores that
+      # produces failures nobody can reproduce.
+      - name: Cache the package build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ matrix.runner }}-swift${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: ${{ matrix.runner }}-swift${{ env.SWIFT_VERSION }}-
+
+      # One script, the same one a contributor runs before pushing. Steps that
+      # live only in a workflow file cannot be reproduced and cannot be
+      # debugged from a log.
+      - name: Run the suite
+        run: scripts/ci.sh
+
+      - name: Upload the measured matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixtures-${{ matrix.runner }}
+          path: fixtures/results-*.yaml
+          if-no-files-found: ignore
+
+  # Deliberately separate. If the newest image cannot run this, that is worth
+  # knowing without turning the whole build red, because the floor is a claim
+  # about what was tested rather than about what must work.
+  oldest-supported:
+    name: oldest available toolchain
+    runs-on: macos-26
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the oldest toolchain at or above the floor
+        run: |
+          scripts/select-xcode.sh --list
+          echo "DEVELOPER_DIR=$(scripts/select-xcode.sh --oldest)" >> "$GITHUB_ENV"
+      - name: Run the suite without the simulator
+        run: scripts/ci.sh --skip-simulator

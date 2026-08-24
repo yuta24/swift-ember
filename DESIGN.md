@@ -1868,7 +1868,9 @@ A release candidate is ready when all are true:
 -   [ ] An opaque-result-type change is rejected rather than loaded.
 -   [ ] Supported Xcode/Swift versions are explicitly documented.
 -   [ ] End-to-end timing is reported.
--   [ ] CI/unit/fixture tests are documented and runnable.
+-   [x] CI/unit/fixture tests are documented and runnable.
+    `scripts/ci.sh` is what CI runs and what a contributor runs; the
+    workflow contains no steps of its own.
 
 ## Appendix A: measured toolchain behavior
 
