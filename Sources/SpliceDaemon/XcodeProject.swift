@@ -82,11 +82,36 @@ public struct XcodeProject: Sendable {
         // rather than a lookup.
         let triple = try targetTriple(from: settings)
 
-        // Compilation conditions have to reach the patch compile too, or a
-        // `#if` inside a patched body takes the other branch.
-        let conditions = (settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "")
+        // Everything that changes how the patched body is *interpreted* has to
+        // reach the patch compile. A `#if` taking the other branch is the
+        // obvious one; the language mode is the dangerous one, because a body
+        // written for Swift 6 and type-checked under Swift 5 loses isolation
+        // inference and sendability checking, and the replacement can then
+        // introduce a data race the original could not have had.
+        var flags = (settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "")
             .split(whereSeparator: \.isWhitespace)
             .flatMap { ["-D", String($0)] }
+
+        if let version = settings["SWIFT_VERSION"], !version.isEmpty {
+            // Xcode says "5.0" and "6.0"; the compiler accepts only 4, 4.2, 5,
+            // and 6, so the trailing .0 has to go. Passing it through verbatim
+            // failed every patch compile with "invalid value '5.0'".
+            let normalised = version.hasSuffix(".0") ? String(version.dropLast(2)) : version
+            flags += ["-swift-version", normalised]
+        }
+        if let strictness = settings["SWIFT_STRICT_CONCURRENCY"], !strictness.isEmpty {
+            flags += ["-strict-concurrency=\(strictness)"]
+        }
+        for (key, value) in settings.sorted(by: { $0.key < $1.key })
+        where key.hasPrefix("SWIFT_UPCOMING_FEATURE_") && value == "YES" {
+            flags += ["-enable-upcoming-feature",
+                      key.replacingOccurrences(of: "SWIFT_UPCOMING_FEATURE_", with: "")]
+        }
+
+        // Authoritative, unlike the file being present: a dylib from an
+        // earlier build outlives the setting that produced it.
+        let executable = builtProducts + "/" + executablePath
+        let debugDylib = settings["ENABLE_DEBUG_DYLIB"] == "YES" ? executable + ".debug.dylib" : nil
 
         let context = BuildContext(
             moduleName: module,
@@ -95,12 +120,13 @@ public struct XcodeProject: Sendable {
             targetTriple: triple,
             sdkPath: try require("SDKROOT"),
             sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
-            appBinaryPath: builtProducts + "/" + executablePath,
+            appBinaryPath: executable,
             // The application's own .swiftmodule is what a patch imports.
             moduleSearchPaths: [builtProducts, builtProducts + "/\(module).swiftmodule"],
-            extraCompilerFlags: conditions,
+            extraCompilerFlags: flags,
             sourceRoots: sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots,
-            bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"))
+            bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
+            debugDylibPath: debugDylib)
 
         return Resolved(context: context, settings: settings)
     }
@@ -114,17 +140,22 @@ public struct XcodeProject: Sendable {
                       "-destination", destination,
                       "-showBuildSettings", "-json"]
 
-        let result = try Subprocess.run("/usr/bin/xcrun", arguments: arguments)
+        // Separate pipes. Merging them and hunting for the first bracket found
+        // the one inside `2026-08-24 08:54:10.308 xcodebuild[27960:9171152]`,
+        // and any stray notice on stderr made a healthy project unreadable.
+        let result = try Subprocess.runSeparated("/usr/bin/xcrun", arguments: arguments)
         guard result.exitCode == 0 else {
             throw SpliceError(stage: .watch, subject: scheme,
                               reason: "xcodebuild could not resolve the build settings:\n"
-                                + result.combinedOutput.split(separator: "\n").suffix(15).joined(separator: "\n"),
+                                + result.standardError.split(separator: "\n").suffix(15).joined(separator: "\n"),
                               recovery: .rebuild)
         }
 
-        // xcodebuild prints warnings before the JSON, so start at the array.
-        guard let start = result.combinedOutput.firstIndex(of: "["),
-              let data = String(result.combinedOutput[start...]).data(using: .utf8),
+        // xcodebuild still prefixes stdout with its own notices, so find the
+        // line the array starts on rather than the first bracket anywhere.
+        let lines = result.standardOutput.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let arrayStart = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "[" }),
+              let data = lines[arrayStart...].joined(separator: "\n").data(using: .utf8),
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else {
             throw SpliceError(stage: .watch, subject: scheme,
@@ -133,31 +164,50 @@ public struct XcodeProject: Sendable {
         }
 
         // With several targets in the scheme the application is the one that
-        // produces an executable.
+        // produces an app wrapper. Falling back to "whatever came first" meant
+        // a framework-only scheme yielded that framework's module name and
+        // bundle identifier, and the mistake surfaced much later as an
+        // unrelated container or link failure.
         let applications = entries.compactMap { $0["buildSettings"] as? [String: Any] }
             .filter { ($0["WRAPPER_EXTENSION"] as? String) == "app" }
-        guard let chosen = applications.first ?? entries.first?["buildSettings"] as? [String: Any] else {
+
+        guard !applications.isEmpty else {
             throw SpliceError(stage: .watch, subject: scheme,
                               reason: "scheme '\(scheme)' does not build an application",
                               recovery: .rebuild)
         }
-        return chosen.compactMapValues { $0 as? String }
+        guard applications.count == 1 else {
+            let names = applications.compactMap { $0["PRODUCT_NAME"] as? String }.sorted()
+            throw SpliceError(stage: .watch, subject: scheme,
+                              reason: "scheme '\(scheme)' builds more than one application (\(names.joined(separator: ", "))); name a scheme with one",
+                              recovery: .rebuild)
+        }
+        return applications[0].compactMapValues { $0 as? String }
     }
 
     private func targetTriple(from settings: [String: String]) throws -> String {
+        // CURRENT_ARCH resolves to the literal "undefined_arch" outside a real
+        // build, so it is not in this chain.
         let arch = settings["NATIVE_ARCH"]
-            ?? settings["CURRENT_ARCH"]
             ?? settings["ARCHS"]?.split(separator: " ").first.map(String.init)
             ?? "arm64"
         let platform = settings["PLATFORM_NAME"] ?? "iphonesimulator"
-        let deployment = settings["IPHONEOS_DEPLOYMENT_TARGET"]
-            ?? settings["MACOSX_DEPLOYMENT_TARGET"]
-            ?? "17.0"
+
+        // Projects routinely define deployment targets for several platforms
+        // at once, so the right one has to be chosen by platform rather than
+        // by whichever key happens to exist.
+        func deployment(_ key: String, default fallback: String) throws -> String {
+            guard let value = settings[key], !value.isEmpty else { return fallback }
+            return value
+        }
 
         return switch platform {
-        case "iphonesimulator": "\(arch)-apple-ios\(deployment)-simulator"
-        case "iphoneos": "\(arch)-apple-ios\(deployment)"
-        case "macosx": "\(arch)-apple-macosx\(deployment)"
+        case "iphonesimulator":
+            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "17.0"))-simulator"
+        case "iphoneos":
+            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "17.0"))"
+        case "macosx":
+            "\(arch)-apple-macosx\(try deployment("MACOSX_DEPLOYMENT_TARGET", default: "14.0"))"
         default:
             throw SpliceError(stage: .watch, subject: platform,
                               reason: "only the iOS Simulator is supported in v0.x (PRD.md section 11); this scheme builds for \(platform)",

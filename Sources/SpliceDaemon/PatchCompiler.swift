@@ -81,6 +81,33 @@ enum Subprocess {
         let combinedOutput: String
     }
 
+    struct SeparatedResult {
+        let exitCode: Int32
+        let standardOutput: String
+        let standardError: String
+    }
+
+    /// For callers that must not have the two streams interleaved, such as
+    /// anything parsing structured output.
+    static func runSeparated(_ executable: String, arguments: [String]) throws -> SeparatedResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        try process.run()
+        // Read before waiting: a full pipe buffer would otherwise block the
+        // child forever while the parent waits for it to exit.
+        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return SeparatedResult(exitCode: process.terminationStatus,
+                               standardOutput: String(data: outData, encoding: .utf8) ?? "",
+                               standardError: String(data: errData, encoding: .utf8) ?? "")
+    }
+
     @discardableResult
     static func run(_ executable: String, arguments: [String]) throws -> Result {
         let process = Process()

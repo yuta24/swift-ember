@@ -369,9 +369,31 @@ and the symptom is indistinguishable from a project that was never
 configured: `doctor` reports zero keys for a build whose settings are
 entirely correct.
 
-`BuildContext.linkTarget` resolves this on each use rather than storing
-it, because which of the two exists depends on how the app was last
-built.
+`BuildContext.debugDylibPath` is set from the build's own
+`ENABLE_DEBUG_DYLIB`, never inferred from the file being present. A
+dylib from an earlier build is still on disk after the setting is turned
+off, and preferring it would be worse than useless: the patch would link
+against a binary the process is not running, and `dlopen` would resolve
+the load command by bringing a second copy of the whole app module into
+the live process. Replacements would bind into the copy, the running
+code would be untouched, and the tool would report success.
+
+### 6.5 What else has to reach the patch
+
+Anything that changes how the patched body is *interpreted*, not only
+what it can see. Conditional compilation flags are the obvious case: a
+`#if` inside a patched body must take the branch the app took.
+
+The dangerous one is the language mode. A body written for Swift 6 and
+type-checked under Swift 5 loses isolation inference and sendability
+checking, so the replacement can introduce a data race the original
+could not have had --- and it fails in the permissive direction, which
+is the one that matters. `SWIFT_VERSION`, `SWIFT_STRICT_CONCURRENCY`,
+and any `SWIFT_UPCOMING_FEATURE_*` are forwarded alongside the
+conditions.
+
+Xcode reports the language mode as `5.0` and `6.0`; the compiler accepts
+only `4`, `4.2`, `5`, and `6`.
 
 ### 6.3 Validation
 

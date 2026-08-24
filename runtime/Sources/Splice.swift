@@ -32,31 +32,17 @@ public enum Splice {
 
     public static var status: Status { state.snapshot }
 
-    #if SPLICE_ENABLED
-
-    // MARK: - Loading
-
-    /// Loads one image. The only decision made in the process.
-    static func load(generation: UInt64, path: String) -> LoadOutcome {
-        let start = DispatchTime.now().uptimeNanoseconds
-        guard FileManager.default.fileExists(atPath: path) else {
-            return .failed(stage: "TRANSFER", message: "no image at \(path)")
-        }
-        guard dlopen(path, RTLD_NOW) != nil else {
-            // dlopen failing means nothing took effect, so the process is still
-            // coherently running the previous generation.
-            return .failed(stage: "LOAD", message: String(cString: dlerror()))
-        }
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        state.recordLoaded(generation)
-        return .loaded(generation: generation, durationMs: ms)
-    }
-
     /// Scans the inbox and loads anything not yet loaded.
     ///
     /// A debugging affordance for driving the runtime without a daemon, which
     /// is how M1 worked. The daemon does not use it: it names the image it
     /// wants loaded, so nothing has to be inferred from a directory listing.
+    ///
+    /// Declared outside the conditional section for the same reason `start()`
+    /// is: a call site should not need an `#if` of its own. Nested inside it,
+    /// the inner guard below was unreachable and the symbol simply vanished
+    /// from a Release build, so an app calling this compiled in Debug and
+    /// failed to compile shipping.
     @discardableResult
     public static func loadPendingPatches() -> [String] {
         #if !SPLICE_ENABLED
@@ -82,6 +68,26 @@ public enum Splice {
         if reported.isEmpty { state.note("nothing pending") }
         return reported
         #endif
+    }
+
+    #if SPLICE_ENABLED
+
+    // MARK: - Loading
+
+    /// Loads one image. The only decision made in the process.
+    static func load(generation: UInt64, path: String) -> LoadOutcome {
+        let start = DispatchTime.now().uptimeNanoseconds
+        guard FileManager.default.fileExists(atPath: path) else {
+            return .failed(stage: "TRANSFER", message: "no image at \(path)")
+        }
+        guard dlopen(path, RTLD_NOW) != nil else {
+            // dlopen failing means nothing took effect, so the process is still
+            // coherently running the previous generation.
+            return .failed(stage: "LOAD", message: String(cString: dlerror()))
+        }
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        state.recordLoaded(generation)
+        return .loaded(generation: generation, durationMs: ms)
     }
 
     enum LoadOutcome {

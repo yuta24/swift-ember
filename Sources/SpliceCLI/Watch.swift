@@ -2,8 +2,8 @@ import Foundation
 import SpliceCore
 import SpliceDaemon
 
-enum Watch {
-    static func run(context: BuildContext) async throws {
+public enum Watch {
+    public static func run(context: BuildContext) async throws {
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
         let work = URL(fileURLWithPath: ".splice/patches")
 

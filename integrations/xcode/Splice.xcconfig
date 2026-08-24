@@ -24,8 +24,15 @@ SWIFT_ENABLE_TESTABILITY = YES
 // DESIGN.md 3 and 5.1.
 OTHER_SWIFT_FLAGS = $(inherited) -Xfrontend -enable-implicit-dynamic
 
-// Compiles the runtime's dialling and loading code into the app. Without it
-// the SpliceRuntime entry point is present but inert.
+// Only for the app target's own code. If you link the SpliceRuntime package
+// product, its dialling and loading code is enabled by the package manifest
+// for Debug and this setting has nothing to do with it -- Xcode does not
+// propagate an app target's compilation conditions into package targets. Keep
+// it if your own sources guard anything on SPLICE_ENABLED, or if you compile
+// the runtime sources directly rather than linking the product.
+//
+// The daemon does forward it to the patch compile, so a `#if SPLICE_ENABLED`
+// inside a patched body takes the same branch it did in the app.
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SPLICE_ENABLED
 
 // Read back by `swift-splice doctor` to tell "this project was configured" from

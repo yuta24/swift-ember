@@ -61,10 +61,6 @@ public final class IPCServer: @unchecked Sendable {
 
     /// Starts listening and returns the port actually bound.
     public func start() async throws -> UInt16 {
-        // A listener that was already cancelled will never report anything to a
-        // handler installed afterwards, so there is nothing to wait for.
-        if lock.withLock({ stopped }) { throw StartupError.cancelledBeforeReady }
-
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -82,11 +78,21 @@ public final class IPCServer: @unchecked Sendable {
                 self?.lock.withLock { self?.startupFinish = nil }
                 continuation.resume(with: result)
             }
-            // Handing this to stop() is what keeps a concurrent shutdown from
-            // stranding the caller: relying on the listener to report
-            // .cancelled is a race, because a cancel that lands before the
-            // handler is installed is never delivered.
-            lock.withLock { startupFinish = finish }
+
+            // Testing `stopped` and publishing `finish` have to be one critical
+            // section. Split in two, a stop() landing between them sets the
+            // flag, finds nothing to settle, and cancels the listener -- and
+            // the handler installed a moment later never hears about a cancel
+            // that already happened, so the caller waits forever.
+            let alreadyStopped = lock.withLock { () -> Bool in
+                if stopped { return true }
+                startupFinish = finish
+                return false
+            }
+            if alreadyStopped {
+                finish(.failure(StartupError.cancelledBeforeReady))
+                return
+            }
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
@@ -143,6 +149,12 @@ public final class IPCServer: @unchecked Sendable {
             buffer = Data()
             return connectionGeneration
         }
+        // The socket being replaced will never answer. Its teardown is now a
+        // no-op for the current generation, so this is the only place left
+        // that can settle what it was carrying; without it a request waits out
+        // the full timeout while `watch`, which awaits each save in turn,
+        // stalls for that whole window.
+        failAllPending(IPCError.notConnected)
         incoming.stateUpdateHandler = { [weak self] state in
             switch state {
             case .cancelled, .failed: self?.handleDisconnect(generation)

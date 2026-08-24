@@ -5,7 +5,7 @@ let package = Package(
     name: "swift-splice",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
-        .executable(name: "swift-splice", targets: ["SpliceCLI"]),
+        .executable(name: "swift-splice", targets: ["swift-splice"]),
         // What an application links. Everything else in this package is host
         // tooling and never reaches a device or simulator.
         .library(name: "SpliceRuntime", targets: ["SpliceRuntime"]),
@@ -28,9 +28,13 @@ let package = Package(
             .product(name: "SwiftParser", package: "swift-syntax"),
         ]),
         .target(name: "SpliceDaemon", dependencies: ["SpliceCore", "SpliceGen"]),
-        .executableTarget(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon"]),
+        // The CLI is a library plus a thin main so that argument parsing can be
+        // tested; an executable target cannot be imported.
+        .target(name: "SpliceCLI", dependencies: ["SpliceCore", "SpliceDaemon"]),
+        .executableTarget(name: "swift-splice", dependencies: ["SpliceCLI"],
+                          path: "Sources/SpliceCLIMain"),
         .testTarget(name: "SpliceGenTests", dependencies: ["SpliceGen"]),
-        .testTarget(name: "SpliceDaemonTests", dependencies: ["SpliceCore", "SpliceDaemon"]),
+        .testTarget(name: "SpliceDaemonTests", dependencies: ["SpliceCore", "SpliceDaemon", "SpliceCLI"]),
         .testTarget(name: "SpliceEndToEndTests", dependencies: ["SpliceCore", "SpliceGen"]),
     ]
 )

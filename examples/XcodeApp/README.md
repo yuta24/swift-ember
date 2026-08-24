@@ -45,15 +45,21 @@ of its own:
 }
 ```
 
-## Two things that surprised us
+## Three things that surprised us
 
 **Xcode 16 and later split a Debug app in two.** The executable in the bundle
 is a thin launcher; the code lives in `XcodeApp.app/XcodeApp.debug.dylib`. All
 20 replacement keys are in the dylib and the executable has none, so linking a
 patch against the executable resolves nothing. `doctor` reported a correctly
-configured project as having no keys until this was understood. `BuildContext`
-resolves the link target on each use rather than storing it, because which of
-the two exists depends on how the app was last built.
+configured project as having no keys until this was understood.
+
+Which of the two to use comes from the build's `ENABLE_DEBUG_DYLIB`, not from
+the file being there. A dylib from an earlier build outlives the setting that
+produced it, and picking it up would be worse than picking nothing: the patch
+would link against a binary the process is not running, and `dlopen` would
+resolve the load command by pulling a second copy of the whole app module into
+the live process. Replacements would land in the copy, the running code would
+be untouched, and the reload would be reported as successful.
 
 **Build settings come from `xcodebuild -showBuildSettings -json`.**
 `DESIGN.md` section 6.2 argued for capturing the literal compile invocation
@@ -63,6 +69,14 @@ when the build is already up to date. Asking Xcode for its resolved settings
 avoids all three, and the reason 6.2 wanted the invocation -- not guessing --
 is met a different way: nothing derived is trusted on its own, and `doctor`
 reads the built binary back to check it really does export keys.
+
+**The language mode has to travel with the patch.** Xcode reports
+`SWIFT_VERSION = 5.0`, the compiler accepts only `5`, and a body written for
+Swift 6 but type-checked under Swift 5 loses isolation inference and
+sendability checking. That fails in the permissive direction: the replacement
+can introduce a data race the original could not have had. `SWIFT_VERSION`,
+`SWIFT_STRICT_CONCURRENCY`, and `SWIFT_UPCOMING_FEATURE_*` are forwarded to the
+patch compile alongside the compilation conditions.
 
 ## The project file
 

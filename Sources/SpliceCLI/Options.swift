@@ -7,20 +7,20 @@ import SpliceDaemon
 /// Top-level code is main-actor isolated while a global function is not, so
 /// parsing in place means every helper has to be annotated or every global read
 /// has to be justified. A value type has neither problem.
-struct Options {
-    enum Command: String {
+public struct Options {
+    public enum Command: String {
         case doctor, watch, status
     }
 
-    var command: Command
-    var contextPath = "splice-context.json"
-    var project: String?
-    var workspace: String?
-    var scheme: String?
-    var configuration = "Debug"
-    var sourceRoots: [String] = []
+    public var command: Command
+    public var contextPath = "splice-context.json"
+    public var project: String?
+    public var workspace: String?
+    public var scheme: String?
+    public var configuration = "Debug"
+    public var sourceRoots: [String] = []
 
-    static let usage = """
+    public static let usage = """
     swift-splice <command> [options]
 
       doctor    check the project, the toolchain, and the running app
@@ -42,14 +42,14 @@ struct Options {
     section 6.
     """
 
-    enum ParseError: Error, CustomStringConvertible {
+    public enum ParseError: Error, CustomStringConvertible {
         case usage
         case missingValue(String)
         case unknown(String)
         case bothContainers
         case schemeRequired
 
-        var description: String {
+        public var description: String {
             switch self {
             case .usage: Options.usage
             case .missingValue(let flag): "\(flag) needs a value"
@@ -60,7 +60,7 @@ struct Options {
         }
     }
 
-    static func parse(_ arguments: [String]) throws -> Options {
+    public static func parse(_ arguments: [String]) throws -> Options {
         var command: Command?
         var options = Options(command: .status)
         var index = 0
@@ -105,7 +105,7 @@ struct Options {
     }
 
     /// Resolves the Xcode project, if one was named.
-    func resolveProject() throws -> XcodeProject.Resolved? {
+    public func resolveProject() throws -> XcodeProject.Resolved? {
         let container: XcodeProject.Container
         if let project { container = .project(project) }
         else if let workspace { container = .workspace(workspace) }
@@ -117,7 +117,7 @@ struct Options {
     }
 
     /// The project when there is one, the manifest otherwise.
-    func buildContext(project: XcodeProject.Resolved?) throws -> BuildContext {
+    public func buildContext(project: XcodeProject.Resolved?) throws -> BuildContext {
         if let project { return project.context }
 
         let url = URL(fileURLWithPath: contextPath)

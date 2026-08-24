@@ -24,7 +24,9 @@ public struct BuildContext: Codable, Sendable {
     public init(moduleName: String, swiftCompilerPath: String, swiftCompilerVersion: String,
                 targetTriple: String, sdkPath: String, sdkName: String, appBinaryPath: String,
                 moduleSearchPaths: [String], extraCompilerFlags: [String],
-                sourceRoots: [String], bundleIdentifier: String) {
+                sourceRoots: [String], bundleIdentifier: String,
+                debugDylibPath: String? = nil) {
+        self.debugDylibPath = debugDylibPath
         self.moduleName = moduleName
         self.swiftCompilerPath = swiftCompilerPath
         self.swiftCompilerVersion = swiftCompilerVersion
@@ -38,18 +40,26 @@ public struct BuildContext: Codable, Sendable {
         self.bundleIdentifier = bundleIdentifier
     }
 
-    /// What a patch must link against, which is not always the executable.
+    /// What a patch must link against, when that is not the executable.
     ///
     /// Xcode 16 and later build Debug configurations as a thin launcher plus a
     /// `.debug.dylib` holding the actual code. The replacement keys live in the
     /// dylib; the executable has none at all, so linking a patch against it
     /// resolves nothing and `doctor` reports a correctly configured project as
-    /// having no keys. Resolved on each use rather than stored, because whether
-    /// the dylib exists depends on how the app was last built.
-    public var linkTarget: String {
-        let debugDylib = appBinaryPath + ".debug.dylib"
-        return FileManager.default.fileExists(atPath: debugDylib) ? debugDylib : appBinaryPath
-    }
+    /// having no keys.
+    ///
+    /// Set from the build's own `ENABLE_DEBUG_DYLIB`, never inferred from the
+    /// file being there. A dylib left behind by an earlier build is still on
+    /// disk after the setting is turned off, and preferring it would be worse
+    /// than useless: the patch would link against a binary the process is not
+    /// running, and `dlopen` would resolve its load command by bringing a
+    /// second copy of the whole app module into the live process. Replacements
+    /// would bind into the copy, the running code would be untouched, and the
+    /// tool would report success.
+    public var debugDylibPath: String?
+
+    /// The binary a patch links against.
+    public var linkTarget: String { debugDylibPath ?? appBinaryPath }
 
     /// The fields section 6.3 requires to match between the running binary and
     /// a patch. Compared as one opaque string so a mismatch is one message

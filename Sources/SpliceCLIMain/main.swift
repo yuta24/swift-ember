@@ -1,6 +1,7 @@
 import Foundation
 import SpliceCore
 import SpliceDaemon
+import SpliceCLI
 
 // DESIGN.md section 21. `attach` is not here yet: one runtime dials a port the
 // daemon publishes, so there is nothing to attach to that `watch` does not do.

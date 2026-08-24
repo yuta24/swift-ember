@@ -4,8 +4,8 @@ import SpliceDaemon
 
 /// DESIGN.md section 21. Every check reports what it looked at, so a failure
 /// tells the developer where to go rather than only that something is wrong.
-enum Doctor {
-    static func run(context: BuildContext, project: XcodeProject.Resolved? = nil) -> Bool {
+public enum Doctor {
+    public static func run(context: BuildContext, project: XcodeProject.Resolved? = nil) -> Bool {
         var ok = true
 
         func check(_ label: String, _ detail: String?, passed: Bool) {
@@ -57,10 +57,18 @@ enum Doctor {
                   ? "-Xfrontend -enable-implicit-dynamic"
                   : "add -Xfrontend -enable-implicit-dynamic to OTHER_SWIFT_FLAGS",
                   passed: project.implicitDynamicEnabled)
-            check("Runtime", project.runtimeEnabled
-                  ? "SPLICE_ENABLED is defined"
-                  : "add SPLICE_ENABLED to SWIFT_ACTIVE_COMPILATION_CONDITIONS, or the runtime stays inert",
-                  passed: project.runtimeEnabled)
+            // Not a pass/fail. When the runtime arrives as the SpliceRuntime
+            // package product it is enabled by the package manifest, not by
+            // the app's own conditions -- Xcode does not propagate an app
+            // target's compilation conditions into package targets. Failing on
+            // this told projects with a perfectly working runtime that they
+            // were not ready. It still matters for an app that compiles the
+            // runtime sources itself, or that guards its own call sites.
+            print("\("Conditions".padding(toLength: 22, withPad: " ", startingAt: 0))"
+                  + "\("--".padding(toLength: 6, withPad: " ", startingAt: 0))"
+                  + (project.runtimeEnabled
+                     ? "SPLICE_ENABLED is defined for the app target"
+                     : "SPLICE_ENABLED is not set; only needed if the app has its own #if"))
             if !project.declaredConfigured {
                 print("""
 
