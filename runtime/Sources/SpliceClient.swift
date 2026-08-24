@@ -52,7 +52,12 @@ final class SpliceClient: @unchecked Sendable {
 
         // Drop whatever came before. A half-closed socket left behind keeps a
         // descriptor and confuses anyone reading `lsof`.
-        lock.withLock { connection }?.cancel()
+        //
+        // `self.` is not decoration. Written with an implicit self, this line
+        // crashes the type checker in Swift 6.3.2 and earlier -- signal 5 while
+        // type-checking `dial()` -- which is every released toolchain at the
+        // time of writing. Explicit self compiles everywhere.
+        lock.withLock { self.connection }?.cancel()
         lock.withLock { self.connection = nil; self.buffer = Data() }
 
         guard let data = try? Data(contentsOf: sessionURL),

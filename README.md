@@ -125,9 +125,19 @@ PRD.md                 scope, tiers, milestones
 
 ## Requirements
 
-Xcode 27.0 Beta 4 with Swift 6.4, and an arm64 macOS host. Other toolchains
-are untested rather than unsupported; `fixtures/run.sh` is how you find out
-where a new one stands. `DESIGN.md` section 20 keeps the matrix.
+Xcode 26.2 or later, and an arm64 macOS host. Verified on Xcode 26.2, 26.3,
+26.5, and 27.0 Beta 4 — every fixture and every test passes on all four, and
+nothing measured differs between them.
+
+Other toolchains are untested rather than unsupported. `fixtures/run.sh` is how
+you find out where a new one stands:
+
+```
+DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
+  ./fixtures/run.sh --platform simulator
+```
+
+`DESIGN.md` section 20 keeps the matrix.
 
 ## What it will not do
 

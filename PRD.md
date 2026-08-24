@@ -432,6 +432,9 @@ Every pipeline stage SHOULD emit timing telemetry locally for profiling.
 
 -   A patch MUST be produced using the same selected Xcode/Swift
     toolchain as the original build.
+-   Verified on Xcode 26.2 through 27.0 Beta 4. Nothing measured differs
+    between them; see `DESIGN.md` section 20 for the matrix and for the
+    one toolchain-specific workaround the exercise turned up.
 -   Cross-toolchain patching is unsupported.
 -   Underscored compiler/runtime behavior is treated as
     version-sensitive.

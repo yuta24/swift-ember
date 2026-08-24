@@ -1480,13 +1480,48 @@ toolchains:
       swiftui: experimental
 ```
 
-First measured data point, on the macOS host and an arm64 iOS Simulator
+Four toolchains measured, three of them shipping releases. Every entry
+below is `fixtures/run.sh` and `swift test` actually run, not inferred:
+
+``` text
+toolchain          swift    host fixtures  simulator fixtures  swift test
+Xcode 26.2         6.2.3           26/26     26/26 (iOS 26.2)     109/109
+Xcode 26.3         6.2.4           26/26          not run         109/109
+Xcode 26.5         6.3.2           26/26     26/26 (iOS 26.5)     109/109
+Xcode 27.0 Beta 4  6.4             26/26     26/26 (iOS 27.0)     109/109
+```
+
+Nothing measured differs between them. The unsafe cases produce SIGSEGV
+on all four, the SwiftUI erasure to `DebugReplaceableView` is present on
+all four, and a full reload of the sample app works on Xcode 26.5 at
+434 ms.
+
+Reproduce a row with:
+
+``` text
+DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
+  ./fixtures/run.sh --platform simulator
+```
+
+One toolchain-specific workaround exists, in
+`runtime/Sources/SpliceClient.swift`. Written with an implicit `self`,
+
+``` swift
+lock.withLock { connection }?.cancel()
+```
+
+crashes the type checker with signal 5 on Swift 6.3.2 and earlier, which
+is every shipping toolchain at the time of writing. Spelling `self.`
+explicitly compiles everywhere. It was found by building the package
+under each toolchain rather than by reading anything.
+
+The earlier data point, on the macOS host and an arm64 iOS Simulator
 (see Appendix A):
 
 ``` yaml
 toolchains:
-  - xcode: "27.0 Beta 4"
-    swift: "6.4 (swiftlang-6.4.0.27.1)"
+  - xcode: "26.2 / 26.3 / 26.5 / 27.0 Beta 4"
+    swift: "6.2.3 / 6.2.4 / 6.3.2 / 6.4"
     host: arm64-apple-macosx26.0
     simulator:
       arm64: tested
