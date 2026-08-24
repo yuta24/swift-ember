@@ -1494,12 +1494,21 @@ Four toolchains measured, three of them shipping releases. Every entry
 below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 
 ``` text
-toolchain          swift    host fixtures  simulator fixtures  swift test
-Xcode 26.2         6.2.3           26/26     26/26 (iOS 26.2)     109/109
-Xcode 26.3         6.2.4           26/26          not run         109/109
-Xcode 26.5         6.3.2           26/26     26/26 (iOS 26.5)     109/109
-Xcode 27.0 Beta 4  6.4             26/26     26/26 (iOS 27.0)     109/109
+                     swift   host target   host   simulator          tests
+local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
+local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
+local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
+local, Xcode 27.0b4  6.4     macosx26.0    26/26  26/26 (iOS 27.0)   109/109
+CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
+CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
+
+The last two rows come from `.ci-results/*.yaml` uploaded by the run,
+not from anything committed here, and they cover two things no machine
+here can: Swift 6.3.3, which is not installed locally, and a macOS 15
+deployment target, which is where `some View` erases to `AnyView`
+instead of `DebugReplaceableView`. That difference is what the first CI
+run caught.
 
 Nothing measured differs between them. The unsafe cases produce SIGSEGV
 on all four, the SwiftUI erasure to `DebugReplaceableView` is present on
