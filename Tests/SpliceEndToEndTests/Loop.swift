@@ -61,12 +61,12 @@ enum Loop {
         let currentIndex = DeclarationIndexer.index(source: current)
         let classification = ChangeClassifier.classify(
             before: DeclarationIndexer.index(source: baseline), after: currentIndex)
-        guard case .hotPatch(let declarations) = classification else {
+        guard case .hotPatch(let plan) = classification else {
             throw Failure.notHotPatchable(classification)
         }
 
         let generated = try ReplacementGenerator.generate(module: module, generation: 1,
-                                                          declarations: declarations,
+                                                          plan: plan,
                                                           imports: currentIndex.imports)
         let patchSource = work.appendingPathComponent("Patch.swift")
         try generated.write(to: patchSource, atomically: true, encoding: .utf8)
@@ -158,4 +158,25 @@ enum Loop {
         process.waitUntilExit()
         return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
+}
+
+/// Runs one edit and asserts what the process printed before and after.
+///
+/// Shared rather than private to one file: the declaration-kind cases and the
+/// carried-declaration cases assert the same shape, and two copies would drift.
+func expectReload(_ baseline: String, _ current: String,
+                  before expectedBefore: [String], after expectedAfter: [String],
+                  sourceLocation: SourceLocation = #_sourceLocation) {
+    do {
+        let outcome = try Loop.run(baseline: baseline, current: current)
+        #expect(outcome.before == expectedBefore.map { "g0: \($0)" }, sourceLocation: sourceLocation)
+        #expect(outcome.after.suffix(expectedAfter.count) == expectedAfter.map { "g1: \($0)" }[...],
+                "full output: \(outcome.after)", sourceLocation: sourceLocation)
+    } catch {
+        Issue.record("\(error)", sourceLocation: sourceLocation)
+    }
+}
+
+func probe(_ body: String) -> String {
+    "func probe() async throws -> [String] { \(body) }"
 }

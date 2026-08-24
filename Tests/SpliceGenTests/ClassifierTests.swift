@@ -42,13 +42,14 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
 @Test func methodBodyChangeIsHotPatchable() throws {
     let current = bodyEdit(baseline, #"func formatted() -> String { "\(value)" }"#,
                            #"func formatted() -> String { "$\(value)" }"#)
-    guard case .hotPatch(let declarations) = ChangeClassifier.classify(baseline: baseline, current: current) else {
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: baseline, current: current) else {
         Issue.record("expected hotPatch")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations.map(\.identity) == ["Price.formatted()[]"])
 
-    let source = try ReplacementGenerator.generate(module: "Demo", generation: 7, declarations: declarations)
+    let source = try ReplacementGenerator.generate(module: "Demo", generation: 7, plan: plan)
     #expect(source.contains("@testable import Demo"))
     #expect(source.contains("extension Price {"))
     #expect(source.contains("@_dynamicReplacement(for: formatted())"))
@@ -58,22 +59,24 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
 
 @Test func computedPropertyBodyChangeIsHotPatchable() throws {
     let current = bodyEdit(baseline, "var doubled: Int { value * 2 }", "var doubled: Int { value * 3 }")
-    guard case .hotPatch(let declarations) = ChangeClassifier.classify(baseline: baseline, current: current) else {
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: baseline, current: current) else {
         Issue.record("expected hotPatch")
         return
     }
-    let source = try ReplacementGenerator.generate(module: "Demo", generation: 1, declarations: declarations)
+    let declarations = plan.replacements
+    let source = try ReplacementGenerator.generate(module: "Demo", generation: 1, plan: plan)
     #expect(source.contains("@_dynamicReplacement(for: doubled)"))
     #expect(source.contains("value * 3"))
 }
 
 @Test func genericsEffectsAndWhereClauseSurvive() throws {
     let current = bodyEdit(baseline, "    x == y", "    x != y")
-    guard case .hotPatch(let declarations) = ChangeClassifier.classify(baseline: baseline, current: current) else {
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: baseline, current: current) else {
         Issue.record("expected hotPatch")
         return
     }
-    let source = try ReplacementGenerator.generate(module: "Demo", generation: 2, declarations: declarations)
+    let declarations = plan.replacements
+    let source = try ReplacementGenerator.generate(module: "Demo", generation: 2, plan: plan)
     #expect(source.contains("@_dynamicReplacement(for: topLevel(_:with:))"))
     #expect(source.contains("<T: Equatable>"))
     #expect(source.contains("async throws -> Bool"))
@@ -85,12 +88,13 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
 @Test func globalActorAttributeIsCarriedByTheType() throws {
     let current = bodyEdit(baseline, #"func title() -> String { "old" }"#,
                            #"func title() -> String { "new" }"#)
-    guard case .hotPatch(let declarations) = ChangeClassifier.classify(baseline: baseline, current: current) else {
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: baseline, current: current) else {
         Issue.record("expected hotPatch")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations.map(\.identity) == ["Screen.title()[]"])
-    let source = try ReplacementGenerator.generate(module: "Demo", generation: 3, declarations: declarations)
+    let source = try ReplacementGenerator.generate(module: "Demo", generation: 3, plan: plan)
     #expect(source.contains("extension Screen {"))
 }
 
@@ -129,14 +133,18 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
     #expect(reason.contains("@inlinable"))
 }
 
-@Test func privateBodyChangeRequiresRebuild() {
+/// Nothing in the baseline calls `secret()`, so changing it changes nothing a
+/// running process could observe. The edit is real and is not lost: the
+/// baseline only advances when a patch lands, so it is still pending when the
+/// call that uses it arrives. `CarriedDeclarationTests` covers the case where
+/// something does call it.
+@Test func aPrivateChangeNothingCallsIsNoChange() {
     let current = bodyEdit(baseline, "private func secret() -> Int { value }",
                            "private func secret() -> Int { value * 2 }")
-    guard case .rebuildRequired(let reason) = ChangeClassifier.classify(baseline: baseline, current: current) else {
-        Issue.record("expected rebuildRequired")
+    guard case .noChange = ChangeClassifier.classify(baseline: baseline, current: current) else {
+        Issue.record("expected noChange")
         return
     }
-    #expect(reason.contains("private"))
 }
 
 @Test func addedImportRequiresRebuild() {

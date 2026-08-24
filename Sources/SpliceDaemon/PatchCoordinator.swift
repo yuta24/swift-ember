@@ -95,7 +95,8 @@ public actor PatchCoordinator {
     public enum Outcome: Sendable {
         case ignored
         case rejected(SpliceError)
-        case applied(generation: UInt64, declarations: [String], timeline: StageTimeline)
+        case applied(generation: UInt64, declarations: [String], carried: [String],
+                     timeline: StageTimeline)
         /// Refused without being examined, because the running process can no
         /// longer be described. Carries the failure that caused it.
         case sessionUncertain(SpliceError)
@@ -179,16 +180,17 @@ public actor PatchCoordinator {
             return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex))
         }
 
-        let declarations: [PatchableDeclaration]
+        let plan: PatchPlan
         switch classification {
         case .noChange:
             return .ignored
         case .rebuildRequired(let reason):
             return .rejected(SpliceError(stage: .classify, subject: url.lastPathComponent,
                                          reason: reason, recovery: .rebuild))
-        case .hotPatch(let changed):
-            declarations = changed
+        case .hotPatch(let planned):
+            plan = planned
         }
+        let declarations = plan.replacements
 
         // After the filters. Checked first, a poisoned session printed the
         // whole paragraph for every touched file -- and a build or a checkout
@@ -225,7 +227,7 @@ public actor PatchCoordinator {
             let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
                 try ReplacementGenerator.generate(module: module,
-                                                  generation: next, declarations: declarations,
+                                                  generation: next, plan: plan,
                                                   imports: imports)
             }
 
@@ -276,7 +278,8 @@ public actor PatchCoordinator {
             generation = next
             baselines[url] = current
             baselineIndexes[url] = currentIndex
-            return .applied(generation: next, declarations: declarations.map(\.displayName), timeline: timeline)
+            return .applied(generation: next, declarations: declarations.map(\.displayName),
+                            carried: plan.carried.map(\.displayName), timeline: timeline)
         } catch let error as SpliceError {
             return .rejected(error)
         } catch {

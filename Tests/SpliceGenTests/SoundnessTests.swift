@@ -19,8 +19,8 @@ private func expectRebuild(_ baseline: String, _ current: String,
     switch classify(baseline, current) {
     case .rebuildRequired(let reason):
         #expect(reason.contains(fragment), "reason was: \(reason)", sourceLocation: sourceLocation)
-    case .hotPatch(let declarations):
-        Issue.record("accepted as hot patchable: \(declarations.map(\.identity))",
+    case .hotPatch(let plan):
+        Issue.record("accepted as hot patchable: \(plan.replacements.map(\.identity))",
                      sourceLocation: sourceLocation)
     case .noChange:
         Issue.record("reported no change at all", sourceLocation: sourceLocation)
@@ -73,10 +73,11 @@ private func expectRebuild(_ baseline: String, _ current: String,
     extension Store { func describe() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: #""old""#, with: #""new""#)
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("a default implementation is an ordinary body")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations.count == 1)
 }
 
@@ -92,10 +93,11 @@ private func expectRebuild(_ baseline: String, _ current: String,
     }
     """
     let current = baseline.replacingOccurrences(of: #""int""#, with: #""int-changed""#)
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected the Int overload to be recognised")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations.count == 1)
     #expect(declarations[0].identity.contains("Int"))
 }
@@ -117,11 +119,12 @@ private func expectRebuild(_ baseline: String, _ current: String,
     extension Array where Element == String { func sum2() -> Int { 2 } }
     """
     let current = baseline.replacingOccurrences(of: "{ 1 }", with: "{ 9 }")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected the Int-constrained extension to be recognised")
         return
     }
-    let source = try! ReplacementGenerator.generate(module: "M", generation: 1, declarations: declarations)
+    let declarations = plan.replacements
+    let source = try! ReplacementGenerator.generate(module: "M", generation: 1, plan: plan)
     // Generating into a bare `extension Array` would drop the constraint the
     // body relies on and the patch would not compile.
     #expect(source.contains("extension Array where Element == Int {"))
@@ -202,12 +205,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     }
     """
     let current = baseline.replacingOccurrences(of: "{ 1 }", with: "{ 2 }")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a nested method to be patchable")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations[0].contextPath == "Outer.Inner")
-    let source = try! ReplacementGenerator.generate(module: "M", generation: 1, declarations: declarations)
+    let source = try! ReplacementGenerator.generate(module: "M", generation: 1, plan: plan)
     #expect(source.contains("extension Outer.Inner {"))
 }
 
@@ -230,18 +234,19 @@ private func expectRebuild(_ baseline: String, _ current: String,
     let baseline = "import SwiftUI\nstruct Screen: View { var body: some View { Text(\"old\") } }"
     let current = baseline.replacingOccurrences(of: "old", with: "new")
     let policy = ClassifierPolicy(allowOpaqueResultTypes: true)
-    guard case .hotPatch(let declarations) = ChangeClassifier.classify(
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(
         baseline: baseline, current: current, policy: policy) else {
         Issue.record("the switch did not take effect")
         return
     }
+    let declarations = plan.replacements
     #expect(declarations.map(\.displayName) == ["Screen.body"])
 
     // The generated patch has to carry the file's imports, or a body mentioning
     // VStack fails to compile on its own.
     let imports = DeclarationIndexer.index(source: current).imports
     let source = try ReplacementGenerator.generate(module: "M", generation: 1,
-                                                   declarations: declarations, imports: imports)
+                                                   plan: plan, imports: imports)
     #expect(source.contains("import SwiftUI"))
 }
 
@@ -252,12 +257,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     struct S { func f() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: "old", with: "new")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a hot patch")
         return
     }
+    let declarations = plan.replacements
     let source = try ReplacementGenerator.generate(
-        module: "M", generation: 1, declarations: declarations,
+        module: "M", generation: 1, plan: plan,
         imports: DeclarationIndexer.index(source: current).imports)
     #expect(source.contains("import Foundation"))
     #expect(source.contains("import SwiftUI"))
@@ -316,12 +322,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     struct S { func f() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: "old", with: "new")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a hot patch")
         return
     }
+    let declarations = plan.replacements
     let source = try ReplacementGenerator.generate(
-        module: "Fixture", generation: 1, declarations: declarations,
+        module: "Fixture", generation: 1, plan: plan,
         imports: DeclarationIndexer.index(source: current).imports)
     #expect(source.contains("import FixtureKit"))
     // The app module itself arrives as @testable and must not be repeated.
@@ -338,12 +345,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     struct S { func f() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: "old", with: "new")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a hot patch")
         return
     }
+    let declarations = plan.replacements
     let source = try ReplacementGenerator.generate(
-        module: "M", generation: 1, declarations: declarations,
+        module: "M", generation: 1, plan: plan,
         imports: DeclarationIndexer.index(source: current).imports)
     // Compared as whole lines. `contains("#if canImport(UIKit)")` was
     // satisfied by the "##if canImport(UIKit)" a hand-assembled `#if` head
@@ -368,12 +376,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     struct S { func f() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: "old", with: "new")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a hot patch")
         return
     }
+    let declarations = plan.replacements
     let source = try ReplacementGenerator.generate(
-        module: "M", generation: 1, declarations: declarations,
+        module: "M", generation: 1, plan: plan,
         imports: DeclarationIndexer.index(source: current).imports)
     let lines = source.split(separator: "\n").map(String.init)
     #expect(lines.filter { $0 == "#endif" }.count == 1)
@@ -387,12 +396,13 @@ private func expectRebuild(_ baseline: String, _ current: String,
     struct S { func f() -> String { "old" } }
     """
     let current = baseline.replacingOccurrences(of: "old", with: "new")
-    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
         Issue.record("expected a hot patch")
         return
     }
+    let declarations = plan.replacements
     let source = try ReplacementGenerator.generate(
-        module: "M", generation: 1, declarations: declarations,
+        module: "M", generation: 1, plan: plan,
         imports: DeclarationIndexer.index(source: current).imports)
     #expect(source.contains("import struct Foundation.Data"))
 }

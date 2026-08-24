@@ -5,23 +5,6 @@ import Testing
 /// prove that the patch the generator writes actually compiles, loads, and
 /// takes effect. A verdict nobody executes is a guess.
 
-private func expectReload(_ baseline: String, _ current: String,
-                          before expectedBefore: [String], after expectedAfter: [String],
-                          sourceLocation: SourceLocation = #_sourceLocation) {
-    do {
-        let outcome = try Loop.run(baseline: baseline, current: current)
-        #expect(outcome.before == expectedBefore.map { "g0: \($0)" }, sourceLocation: sourceLocation)
-        #expect(outcome.after.suffix(expectedAfter.count) == expectedAfter.map { "g1: \($0)" }[...],
-                "full output: \(outcome.after)", sourceLocation: sourceLocation)
-    } catch {
-        Issue.record("\(error)", sourceLocation: sourceLocation)
-    }
-}
-
-private func probe(_ body: String) -> String {
-    "func probe() async throws -> [String] { \(body) }"
-}
-
 @Test func topLevelFunction() {
     let baseline = """
     func subject() -> String { "old" }
@@ -225,4 +208,52 @@ private func probe(_ body: String) -> String {
     """
     expectReload(baseline, baseline.replacingOccurrences(of: "old-", with: "new-"),
                  before: ["old-1"], after: ["new-1"])
+}
+
+// MARK: - Overrides
+//
+// The replacement is a separate declaration bound to the original's key, so it
+// goes in an extension without being an override itself. What has to be shown
+// here is that the original is still reached: through the subclass, through the
+// base class, and from a body that calls `super`.
+
+@Test func overriddenMethod() {
+    let baseline = """
+    class Screen { func title() -> String { "base" } }
+    final class Detail: Screen {
+        var visits = 0
+        override func title() -> String { visits += 1; return "old" }
+    }
+    nonisolated(unsafe) let detail = Detail()
+    \(probe(#"[detail.title(), (detail as Screen).title(), "visits=\(detail.visits)"]"#))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: #"return "old""#, with: #"return "new""#),
+                 before: ["old", "old", "visits=2"],
+                 after: ["new", "new", "visits=4"])
+}
+
+@Test func overriddenComputedProperty() {
+    let baseline = """
+    class Screen { var subtitle: String { "base" } }
+    final class Detail: Screen {
+        override var subtitle: String { "old" }
+    }
+    nonisolated(unsafe) let detail = Detail()
+    \(probe("[detail.subtitle, (detail as Screen).subtitle]"))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: #"{ "old" }"#, with: #"{ "new" }"#),
+                 before: ["old", "old"], after: ["new", "new"])
+}
+
+@Test func overrideCallingSuper() {
+    let baseline = """
+    class Screen { func setUp() -> String { "base" } }
+    final class Detail: Screen {
+        override func setUp() -> String { super.setUp() + "+old" }
+    }
+    nonisolated(unsafe) let detail = Detail()
+    \(probe("[detail.setUp()]"))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: #""+old""#, with: #""+new""#),
+                 before: ["base+old"], after: ["base+new"])
 }

@@ -120,13 +120,20 @@ public enum Watch {
                     \(cause.reason)
                     """)
                     print("")
-                case .applied(let generation, let declarations, let timeline):
+                case .applied(let generation, let declarations, let carried, let timeline):
                     let count = declarations.count
                     let noun = count == 1 ? "declaration" : "declarations"
                     print("")
                     print(String(format: "hot reloaded %d %@ in %.0f ms  (g%llu)",
                                  count, noun, timeline.totalMs, generation))
                     for name in declarations { print("  \(name)") }
+                    // Named rather than counted. A carried declaration is one
+                    // the patch had to bring with it -- a private helper, or one
+                    // that did not exist in the build -- and seeing which is the
+                    // difference between "that is why it worked" and a mystery.
+                    if !carried.isEmpty {
+                        print("  carried: \(carried.joined(separator: ", "))")
+                    }
                     print(timeline.summary())
                     print("")
                 }

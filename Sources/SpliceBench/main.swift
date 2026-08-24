@@ -181,10 +181,10 @@ func measure(size: Size, padding: Int) throws -> (build: Double, stages: [Stage:
             baselineIndex = before
             return (after, ChangeClassifier.classify(before: before, after: after))
         }
-        guard case .hotPatch(let declarations) = classification else { return nil }
+        guard case .hotPatch(let plan) = classification else { return nil }
         let generated = try timeline.measure(.generate) {
             try ReplacementGenerator.generate(module: module, generation: UInt64(repetition + 1),
-                                              declarations: declarations, imports: index.imports)
+                                              plan: plan, imports: index.imports)
         }
         _ = try compiler.compile(source: generated, generation: UInt64(repetition + 1), timeline: timeline)
 

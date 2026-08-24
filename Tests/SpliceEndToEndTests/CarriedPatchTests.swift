@@ -1,0 +1,153 @@
+import Testing
+@testable import SpliceGen
+
+/// What a patch carries with it, run rather than argued about.
+///
+/// A carried declaration is one the running binary cannot reach: `private`, so
+/// invisible outside its file and to the patch module alike, or new, so absent
+/// when the binary was linked. The patch emits its own copy under the same
+/// name, and Swift resolves a replaced body's reference to that copy.
+///
+/// `fixtures/Cases/private-via-caller` and `patch-local-declaration` pin the
+/// toolchain behaviour by hand. These pin that the generator produces it.
+
+private let order = """
+private func discount(_ cents: Int) -> Int { cents }
+
+struct Order {
+    var cents = 1000
+    func total() -> String { "\\(discount(cents))" }
+}
+
+let order = Order()
+\(probe("[order.total()]"))
+"""
+
+@Test func aPrivateHelperChangeReachesItsCaller() {
+    // Only the private helper changed. Its caller is replaced anyway, because
+    // that is the only way the new implementation reaches a running process.
+    expectReload(order,
+                 order.replacingOccurrences(of: "-> Int { cents }", with: "-> Int { cents - 100 }"),
+                 before: ["1000"], after: ["900"])
+}
+
+/// The failure this fixed rather than added. Before the patch carried private
+/// declarations, editing *any* body that called one produced a patch that
+/// failed at COMPILE with "cannot find 'discount' in scope" -- an everyday edit
+/// that looked like a bug in the tool, because it was.
+@Test func aPatchedBodyCanCallAnUnchangedPrivateHelper() {
+    expectReload(order,
+                 order.replacingOccurrences(of: #"{ "\(discount(cents))" }"#,
+                                            with: #"{ "total \(discount(cents))" }"#),
+                 before: ["1000"], after: ["total 1000"])
+}
+
+@Test func aPrivateComputedPropertyIsCarried() {
+    let baseline = """
+    struct Order {
+        var cents = 1000
+        private var fee: Int { 0 }
+        func total() -> String { "\\(cents + fee)" }
+    }
+    let order = Order()
+    \(probe("[order.total()]"))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: "private var fee: Int { 0 }",
+                                                         with: "private var fee: Int { 25 }"),
+                 before: ["1000"], after: ["1025"])
+}
+
+@Test func aRenamedPrivateHelperWorks() {
+    expectReload(order, order.replacingOccurrences(of: "discount", with: "reduction"),
+                 before: ["1000"], after: ["1000"])
+}
+
+@Test func anAddedHelperIsCallableFromAPatchedBody() {
+    let baseline = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { "\\(cents)" }
+    }
+    let order = Order()
+    \(probe("[order.total()]"))
+    """
+    let current = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { dollars(cents) }
+        func dollars(_ cents: Int) -> String { "$\\(cents / 100)" }
+    }
+    let order = Order()
+    \(probe("[order.total()]"))
+    """
+    expectReload(baseline, current, before: ["1000"], after: ["$10"])
+}
+
+@Test func aPrivateHelperCallingAnotherPrivateHelperIsCarriedWhole() {
+    let baseline = """
+    private func rate() -> Int { 10 }
+    private func discount(_ cents: Int) -> Int { cents - rate() }
+
+    struct Order {
+        var cents = 1000
+        func total() -> String { "\\(discount(cents))" }
+    }
+    let order = Order()
+    \(probe("[order.total()]"))
+    """
+    // Only `rate` changes. `discount` calls it and is itself private, so the
+    // patch has to carry both and replace the one declaration above them that
+    // it can.
+    expectReload(baseline, baseline.replacingOccurrences(of: "private func rate() -> Int { 10 }",
+                                                         with: "private func rate() -> Int { 250 }"),
+                 before: ["990"], after: ["750"])
+}
+
+// MARK: - What the generator must not mangle
+//
+// Each of these produced a patch that did not build. They fail closed, so no
+// process was ever at risk, but the developer is shown a compile error against
+// generated source they did not write and told to fix their own file.
+
+/// `@objc(name)` copied verbatim onto the replacement declares a second method
+/// with the same Objective-C selector as the original. A bare `@objc` binds
+/// through the replacement key just as well, and calls through the original
+/// custom selector still arrive.
+@Test func aCustomObjCSelectorIsNotCopiedOntoTheReplacement() {
+    let baseline = """
+    import Foundation
+    class Thing: NSObject { @objc(labelText) func label() -> String { "a" } }
+    nonisolated(unsafe) let thing = Thing()
+    \(probe(#"["direct=\(thing.label())", "sel=\(thing.perform(Selector(("labelText")))?.takeUnretainedValue() as? String ?? "nil")"]"#))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: #""a""#, with: #""b""#),
+                 before: ["direct=a", "sel=a"], after: ["direct=b", "sel=b"])
+}
+
+/// The generator emits the original source, comments included. An earlier
+/// version compared declarations by rewriting the tree with comments removed
+/// and then generated from that tree, which turned `1 +/*x*/+2` into `1 ++2`.
+@Test func aCommentSeparatingTwoOperatorsSurvivesIntoThePatch() {
+    let baseline = "struct S { func total() -> Int { 1 +/*x*/+2 } }\nlet s = S()\n"
+        + probe(#"["\(s.total())"]"#)
+    expectReload(baseline, baseline.replacingOccurrences(of: "+2", with: "+3"),
+                 before: ["3"], after: ["4"])
+}
+
+/// A member of a `private extension` is file-local without saying so. Filed as
+/// patchable, it claimed a replacement key it does not have and the patch was
+/// rejected at COMPILE with "replaced function could not be found".
+@Test func aPrivateExtensionMemberIsCarriedAndReaches() {
+    let baseline = """
+    struct Cart { var cents = 1 }
+    private extension Cart {
+        func fee() -> Int { 1 }
+    }
+    extension Cart { func total() -> Int { cents + fee() } }
+    let cart = Cart()
+    \(probe(#"["\(cart.total())"]"#))
+    """
+    expectReload(baseline, baseline.replacingOccurrences(of: "func fee() -> Int { 1 }",
+                                                         with: "func fee() -> Int { 5 }"),
+                 before: ["2"], after: ["6"])
+}

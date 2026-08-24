@@ -13,8 +13,8 @@ private func mustRebuild(_ baseline: String, _ current: String,
     switch ChangeClassifier.classify(baseline: baseline, current: current) {
     case .rebuildRequired:
         return
-    case .hotPatch(let declarations):
-        Issue.record("accepted as hot patchable: \(declarations.map(\.displayName))",
+    case .hotPatch(let plan):
+        Issue.record("accepted as hot patchable: \(plan.replacements.map(\.displayName))",
                      sourceLocation: sourceLocation)
     case .noChange:
         Issue.record("saw no change at all", sourceLocation: sourceLocation)
@@ -117,9 +117,19 @@ private func mustRebuild(_ baseline: String, _ current: String,
 
 // MARK: - Module shape
 
-@Test func declarationAdded() {
-    mustRebuild(#"struct S { func f() -> String { "x" } }"#,
-                #"struct S { func f() -> String { "x" }\#n func g() -> String { "y" } }"#)
+// Adding an ordinary declaration is no longer here: a patch can carry one,
+// because nothing in the running binary could already be calling it. What
+// still fails closed is adding one the patch cannot carry, since the only
+// place a patch can put a member is an extension.
+
+@Test func addedOverrideRequiresRebuild() {
+    mustRebuild(#"class B { func f() -> String { "x" } }\#nclass C: B { }"#,
+                #"class B { func f() -> String { "x" } }\#nclass C: B { override func f() -> String { "y" } }"#)
+}
+
+@Test func addedObjCMemberRequiresRebuild() {
+    mustRebuild(#"class B: NSObject { }"#,
+                #"class B: NSObject { @objc func f() -> String { "y" } }"#)
 }
 
 @Test func declarationRemoved() {
