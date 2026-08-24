@@ -1224,6 +1224,22 @@ The runtime should remain usable after compile/link failures.
 A load/registration failure may put the process into an uncertain state;
 mark the session "restart recommended" unless proven recoverable.
 
+Implemented. After such a failure the daemon stops patching that process
+and says so on every subsequent save, until the app reconnects --- a new
+process being the only state it can vouch for without having watched it
+become that way. Repeated rather than said once, because the developer
+is editing, watching nothing happen, and the reason scrolled away.
+
+Which failures count is decided at the three sites that know, not
+derived from the stage or from `recovery`. A load that was answered
+`failed`, and a request that was never answered at all, both leave a
+process that cannot be described --- silence is not the same as "nothing
+loaded". A runtime that answers `rejected` loaded nothing and says so, a
+classifier refusal never reached the process, and "could not find the
+app container" also recommends a restart while leaving the app
+untouched. None of those poison the session, and demanding a relaunch
+for an ordinary rejected edit would train people to ignore the message.
+
 ## 18. Observability
 
 Emit one structured event per stage:

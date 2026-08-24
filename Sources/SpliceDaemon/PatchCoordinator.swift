@@ -13,6 +13,17 @@ public actor PatchCoordinator {
     private let server: IPCServer
     private let compiler: PatchCompiler
     private let container: SimulatorContainer
+    /// Set when a patch may have been partly applied and cleared only by a
+    /// fresh process.
+    ///
+    /// DESIGN.md section 17: a load or registration failure may leave the
+    /// process in an uncertain state, and the session should say "restart
+    /// recommended" unless recovery is proven. Until this existed the daemon
+    /// printed the failure and went on patching a process whose contents it
+    /// could no longer describe -- reporting later reloads as successful on
+    /// top of a state nobody could vouch for.
+    private var uncertain: SpliceError?
+
     private var baselines: [URL: String] = [:]
     /// The baseline's parsed form, kept because it only changes when a patch
     /// lands. Re-parsing it on every save doubled the cost of classification,
@@ -21,12 +32,21 @@ public actor PatchCoordinator {
     private var baselineIndexes: [URL: FileIndex] = [:]
     private var generation: UInt64 = 0
 
-    public init(context: BuildContext, server: IPCServer, workDirectory: URL) {
+    /// `deliver` exists so the load path can be reached without a simulator.
+    ///
+    /// Not gratuitous: a test for what happens *after* a load has to get past
+    /// the copy into the app container, and without this every such test
+    /// stopped at TRANSFER and asserted nothing while passing.
+    public init(context: BuildContext, server: IPCServer, workDirectory: URL,
+                deliver: (@Sendable (URL) throws -> URL)? = nil) {
         self.context = context
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
         self.container = SimulatorContainer(bundleIdentifier: context.bundleIdentifier)
+        self.deliverOverride = deliver
     }
+
+    private let deliverOverride: (@Sendable (URL) throws -> URL)?
 
     /// Snapshots the sources as they were when the running binary was built.
     /// Everything afterwards is diffed against this, and the baseline advances
@@ -62,9 +82,35 @@ public actor PatchCoordinator {
         case ignored
         case rejected(SpliceError)
         case applied(generation: UInt64, declarations: [String], timeline: StageTimeline)
+        /// Refused without being examined, because the running process can no
+        /// longer be described. Carries the failure that caused it.
+        case sessionUncertain(SpliceError)
+    }
+
+    public var isUncertain: Bool { uncertain != nil }
+
+    /// Called when an app connects. A new process is a known state, whatever
+    /// happened to the last one, so this is the only thing that clears the
+    /// flag -- and it is why the runtime dials rather than listens.
+    public func sessionDidRestart() {
+        uncertain = nil
+    }
+
+    /// Records the failure as the reason the session can no longer be
+    /// described, and returns it so the call site still throws normally.
+    ///
+    /// Deliberately not derived from `recovery` or from the stage. "Could not
+    /// find the app container" also recommends a restart and leaves the
+    /// process untouched; only the paths where a load may have half-happened
+    /// come through here.
+    private func poison(_ error: SpliceError) -> SpliceError {
+        uncertain = error
+        return error
     }
 
     public func handle(change url: URL) async -> Outcome {
+        if let uncertain { return .sessionUncertain(uncertain) }
+
         let url = url.standardizedFileURL
         let baseline = baselines[url] ?? ""
         guard let current = try? String(contentsOf: url, encoding: .utf8) else { return .ignored }
@@ -105,7 +151,7 @@ public actor PatchCoordinator {
             let artifact = try compiler.compile(source: source, generation: next, timeline: timeline)
 
             let delivered = try timeline.measure(.transfer) {
-                try container.deliver(artifact.imageURL)
+                try deliverOverride?(artifact.imageURL) ?? container.deliver(artifact.imageURL)
             }
 
             let start = DispatchTime.now().uptimeNanoseconds
@@ -118,8 +164,11 @@ public actor PatchCoordinator {
                                                   expecting: LoadPatchResult.self)
             } catch {
                 timeline.record(.load, since: start, success: false)
-                throw SpliceError(stage: .load, subject: url.lastPathComponent,
-                                  reason: "\(error)", recovery: .restart)
+                // No answer is not the same as no load. The request may have
+                // been carried out and the reply lost, so the process cannot
+                // be described either way.
+                throw poison(SpliceError(stage: .load, subject: url.lastPathComponent,
+                                         reason: "\(error)", recovery: .restart))
             }
 
             switch result {
@@ -127,14 +176,16 @@ public actor PatchCoordinator {
                 timeline.record(.load, since: start, success: true)
             case .rejected(let reason):
                 timeline.record(.load, since: start, success: false)
+                // The runtime declined before loading anything, so the process
+                // is exactly where it was. This one does not poison.
                 throw SpliceError(stage: .load, subject: url.lastPathComponent,
                                   reason: reason, recovery: .rebuild)
             case .failed(let stage, let message):
                 timeline.record(stage, since: start, success: false)
                 // A failure inside dlopen may leave the process half-patched,
                 // and section 17 says not to claim otherwise.
-                throw SpliceError(stage: stage, subject: url.lastPathComponent,
-                                  reason: message, recovery: .restart)
+                throw poison(SpliceError(stage: stage, subject: url.lastPathComponent,
+                                         reason: message, recovery: .restart))
             }
 
             generation = next

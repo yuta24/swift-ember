@@ -384,6 +384,12 @@ Errors MUST be surfaced with:
 A failed patch MUST NOT intentionally corrupt the running process. When
 safe recovery is uncertain, the tool MUST request a rebuild/restart.
 
+Requesting it is not enough on its own: after a load failure the daemon
+also stops patching that process, because anything it reported
+afterwards would be a guess layered on a state nobody can describe. It
+resumes when the app reconnects. `DESIGN.md` section 17 has which
+failures count and why the others do not.
+
 ### FR-12 Symbol visibility
 
 The application MUST be built with `-enable-testing`

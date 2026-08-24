@@ -12,6 +12,8 @@ public enum Watch {
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: work)
 
         server.onConnect = { hello in
+            // A new process is a known state whatever became of the last one.
+            Task { await coordinator.sessionDidRestart() }
             if hello.buildIdentity == context.identity {
                 print("connected  pid \(hello.processId), \(hello.moduleName)")
             } else {
@@ -98,6 +100,23 @@ public enum Watch {
                 case .rejected(let error):
                     print("")
                     print(error.description)
+                    print("")
+                case .sessionUncertain(let cause):
+                    // Repeated on every save rather than said once and
+                    // forgotten: the developer is editing, watching nothing
+                    // happen, and the reason scrolled off some time ago.
+                    print("")
+                    print("""
+                    Not patching: this process cannot be described any more.
+
+                    \(cause.stage.rawValue) failed earlier and the patch may
+                    have been partly applied, so anything reported after it
+                    would be a guess. Relaunch the app; the daemon reconnects
+                    on its own and starts a fresh session.
+
+                    The failure was:
+                    \(cause.reason)
+                    """)
                     print("")
                 case .applied(let generation, let declarations, let timeline):
                     let count = declarations.count
