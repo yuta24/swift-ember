@@ -75,6 +75,13 @@ cases:
     state_preserved: false
     result: pass
     note: "no native Tx key is emitted; replacement still applies"
+  - id: opaque-inside-a-type
+    supported: false
+    kind: unsafe
+    state_preserved: false
+    result: pass
+    observed: "signal 11"
+    note: "some View is erased to DebugReplaceableView; (some View)? is not, and patching it is undefined"
   - id: opaque-result-type-changed
     supported: false
     kind: unsafe

@@ -934,9 +934,19 @@ result type changes when the view tree changes.
 @preconcurrency @MainActor public protocol View
 ```
 
-Every `some View` is therefore already erased to a concrete type, and
-`type(of: screen.body)` reports `DebugReplaceableView` regardless of what
-the body returns. The undefined behaviour in section 12.7 comes from a
+A *whole* opaque return type spelled `some View` is therefore already
+erased to a concrete type, and `type(of: screen.body)` reports
+`DebugReplaceableView` regardless of what the body returns.
+
+The word whole is load-bearing. Erasure does not reach an opaque
+position nested inside a type: `func f() -> (some View)?` measures as
+`Optional<Text>`, unerased, and replacing it with a different tree
+crashes the process exactly as section 12.7 describes. The exception is
+recognised by matching the return type against `some View` at the root
+and requiring the file to import SwiftUI, because the guarantee comes
+from `@_typeEraser` on Apple's `View` and not from the spelling --- a
+`some ViewModelProtocol`, or a protocol of one's own named `View`, has no
+eraser at all. The undefined behaviour in section 12.7 comes from a
 caller holding stale metadata for a type that changed; here there is no
 such type. Changing a view tree's shape in a patch is safe. A fixture
 pins this, and a second one pins that the replacement dispatches: a

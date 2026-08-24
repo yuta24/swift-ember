@@ -263,3 +263,105 @@ private func expectRebuild(_ baseline: String, _ current: String,
     #expect(source.contains("import SwiftUI"))
     #expect(source.contains("@testable import M"))
 }
+
+// MARK: - Which opaque types the SwiftUI exception covers
+
+@Test func onlyAWholeSomeViewCountsAsErased() {
+    // `(some View)?` is an opaque position inside a type, not an opaque return
+    // type, and it is not erased: it measures as Optional<Text>, and replacing
+    // it crashes the process. Calling that harmless would have been the worst
+    // possible message, since the harmless wording is what invites the switch.
+    expectRebuild(
+        "import SwiftUI\nstruct H { func maybe() -> (some View)? { Text(\"old\") } }",
+        "import SwiftUI\nstruct H { func maybe() -> (some View)? { Text(\"new\") } }",
+        because: "undefined at runtime")
+}
+
+@Test func aProtocolMerelySpelledWithViewIsNotTheSafeCase() {
+    // The guarantee comes from @_typeEraser on Apple's View, not from the name.
+    expectRebuild(
+        "protocol P {}\nstruct A: P {}\nstruct B: P {}\nstruct S { var vm: some P { A() } }",
+        "protocol P {}\nstruct A: P {}\nstruct B: P {}\nstruct S { var vm: some P { B() } }",
+        because: "undefined at runtime")
+}
+
+@Test func someViewWithoutSwiftUIIsNotTheSafeCase() {
+    // A View of one's own has no eraser.
+    expectRebuild(
+        "protocol View {}\nstruct S: View {}\nstruct T: View {}\nstruct H { var body: some View { S() } }",
+        "protocol View {}\nstruct S: View {}\nstruct T: View {}\nstruct H { var body: some View { T() } }",
+        because: "undefined at runtime")
+}
+
+@Test func theSwitchDoesNotLiftTheUnsafeShapes() {
+    // The experimental switch exists for `some View` and nothing else.
+    let policy = ClassifierPolicy(allowOpaqueResultTypes: true)
+    let baseline = "import SwiftUI\nstruct H { func maybe() -> (some View)? { Text(\"old\") } }"
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .rebuildRequired = ChangeClassifier.classify(
+        baseline: baseline, current: current, policy: policy) else {
+        Issue.record("the switch lifted a shape that is not erased")
+        return
+    }
+}
+
+// MARK: - Imports
+
+@Test func aModuleWhoseNameIsAPrefixIsNotMistakenForTheAppModule() throws {
+    // `contains(" Fixture")` dropped `import FixtureKit`, which is exactly the
+    // "cannot find type in scope" failure carrying imports is meant to prevent.
+    let baseline = """
+    import Foundation
+    import FixtureKit
+    struct S { func f() -> String { "old" } }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+        Issue.record("expected a hot patch")
+        return
+    }
+    let source = try ReplacementGenerator.generate(
+        module: "Fixture", generation: 1, declarations: declarations,
+        imports: DeclarationIndexer.index(source: current).imports)
+    #expect(source.contains("import FixtureKit"))
+    // The app module itself arrives as @testable and must not be repeated.
+    let plainSelfImport = source.split(separator: "\n").filter { $0 == "import Fixture" }
+    #expect(plainSelfImport.isEmpty)
+}
+
+@Test func conditionalImportsAreCarriedWithTheirCondition() throws {
+    let baseline = """
+    import Foundation
+    #if canImport(UIKit)
+    import UIKit
+    #endif
+    struct S { func f() -> String { "old" } }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+        Issue.record("expected a hot patch")
+        return
+    }
+    let source = try ReplacementGenerator.generate(
+        module: "M", generation: 1, declarations: declarations,
+        imports: DeclarationIndexer.index(source: current).imports)
+    #expect(source.contains("#if canImport(UIKit)"))
+    #expect(source.contains("import UIKit"))
+    #expect(source.contains("#endif"))
+}
+
+@Test func submoduleImportsSurvive() throws {
+    let baseline = """
+    import struct Foundation.Data
+    struct S { func f() -> String { "old" } }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch(let declarations) = classify(baseline, current) else {
+        Issue.record("expected a hot patch")
+        return
+    }
+    let source = try ReplacementGenerator.generate(
+        module: "M", generation: 1, declarations: declarations,
+        imports: DeclarationIndexer.index(source: current).imports)
+    #expect(source.contains("import struct Foundation.Data"))
+}

@@ -35,6 +35,7 @@ public struct PatchCompiler: Sendable {
             "-module-name", name,
         ]
         for path in context.moduleSearchPaths { arguments += ["-I", path] }
+        for path in context.frameworkSearchPaths { arguments += ["-F", path] }
         arguments += context.extraCompilerFlags
         arguments.append(sourceURL.path)
         // Linking against the running binary resolves the replacement keys now

@@ -20,8 +20,15 @@ public enum ChangeClassification: Sendable {
 public enum ChangeClassifier {
     public static func classify(baseline: String, current: String,
                                 policy: ClassifierPolicy = .default) -> ChangeClassification {
-        let before = DeclarationIndexer.index(source: baseline, policy: policy)
-        let after = DeclarationIndexer.index(source: current, policy: policy)
+        classify(before: DeclarationIndexer.index(source: baseline, policy: policy),
+                 after: DeclarationIndexer.index(source: current, policy: policy))
+    }
+
+    /// For callers that already have the indexes and need something else from
+    /// them, such as the imports the generator has to copy. Parsing the file a
+    /// second time to read those was both wasted work and a place for the two
+    /// parses to disagree about the policy.
+    public static func classify(before: FileIndex, after: FileIndex) -> ChangeClassification {
 
         if before.residue != after.residue {
             return .rebuildRequired(reason: "something outside a replaceable declaration changed, such as a type's declaration, an import, or a stored property")
@@ -83,9 +90,18 @@ public enum ReplacementGenerator {
             "@testable import \(module)",
         ]
 
-        // The original file's imports, minus any that would duplicate the
-        // module's own. A patched body sees exactly what it saw in place.
-        for statement in imports where !statement.contains(" \(module)") {
+        // The original file's imports, minus one that would duplicate the
+        // module's own. Compared by module name: a `contains` test on the name
+        // dropped `import FixtureKit` from a module called Fixture, and
+        // `import CoreData` from one called Core, reintroducing the very
+        // "cannot find type in scope" failure carrying imports exists to
+        // prevent. Lines that are `#if` scaffolding pass through untouched.
+        for statement in imports {
+            guard statement.hasPrefix("import") || statement.contains(" import ") else {
+                lines.append(statement)   // #if / #else / #endif
+                continue
+            }
+            if DeclarationIndexer.moduleName(of: statement) == module { continue }
             lines.append(statement)
         }
         lines.append("")

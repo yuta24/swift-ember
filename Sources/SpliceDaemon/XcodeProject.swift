@@ -122,13 +122,30 @@ public struct XcodeProject: Sendable {
             sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
             appBinaryPath: executable,
             // The application's own .swiftmodule is what a patch imports.
-            moduleSearchPaths: [builtProducts, builtProducts + "/\(module).swiftmodule"],
+            moduleSearchPaths: [builtProducts, builtProducts + "/\(module).swiftmodule"]
+                + searchPaths(settings["SWIFT_INCLUDE_PATHS"]),
             extraCompilerFlags: flags,
             sourceRoots: sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots,
             bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
-            debugDylibPath: debugDylib)
+            debugDylibPath: debugDylib,
+            // Without these, copying an import of a framework the app finds by
+            // -F turns every patch from that file into "no such module".
+            frameworkSearchPaths: [builtProducts]
+                + searchPaths(settings["FRAMEWORK_SEARCH_PATHS"]))
 
         return Resolved(context: context, settings: settings)
+    }
+
+    /// Xcode reports search paths as one space-separated string, with any
+    /// entry containing spaces quoted.
+    private func searchPaths(_ value: String?) -> [String] {
+        guard let value, !value.isEmpty else { return [] }
+        return value.split(separator: "\"")
+            .enumerated()
+            .flatMap { index, part -> [String] in
+                index % 2 == 1 ? [String(part)] : part.split(separator: " ").map(String.init)
+            }
+            .filter { !$0.isEmpty }
     }
 
     // MARK: - xcodebuild

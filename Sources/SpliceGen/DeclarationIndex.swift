@@ -87,14 +87,12 @@ public enum DeclarationIndexer {
         var unsupported: [String: UnsupportedDeclaration] = [:]
         var residue: [String] = []
 
-        walk(members: file.statements.map(\.item), context: [], policy: policy, into: &patchable,
-             unsupported: &unsupported, residue: &residue)
+        let imports = collectImports(file.statements.map(\.item))
+        let importsSwiftUI = imports.contains { moduleName(of: $0) == "SwiftUI" }
 
-        let imports = file.statements.compactMap { statement -> String? in
-            guard case .decl(let decl) = statement.item,
-                  let importDecl = decl.as(ImportDeclSyntax.self) else { return nil }
-            return importDecl.trimmedDescription
-        }
+        walk(members: file.statements.map(\.item), context: [], policy: policy,
+             importsSwiftUI: importsSwiftUI, into: &patchable,
+             unsupported: &unsupported, residue: &residue)
 
         // Not sorted: order is part of the fingerprint. Sorting made a pure
         // reordering of declarations -- enum cases, say -- invisible.
@@ -104,7 +102,7 @@ public enum DeclarationIndexer {
     }
 
     private static func walk(members: [CodeBlockItemSyntax.Item], context: [String],
-                             policy: ClassifierPolicy,
+                             policy: ClassifierPolicy, importsSwiftUI: Bool,
                              into patchable: inout [String: PatchableDeclaration],
                              unsupported: inout [String: UnsupportedDeclaration],
                              residue: inout [String]) {
@@ -113,13 +111,13 @@ public enum DeclarationIndexer {
                 residue.append(normalise(item.description))
                 continue
             }
-            visit(decl, context: context, policy: policy, into: &patchable,
+            visit(decl, context: context, policy: policy, importsSwiftUI: importsSwiftUI, into: &patchable,
                   unsupported: &unsupported, residue: &residue)
         }
     }
 
     private static func visit(_ decl: DeclSyntax, context: [String],
-                              policy: ClassifierPolicy,
+                              policy: ClassifierPolicy, importsSwiftUI: Bool,
                               into patchable: inout [String: PatchableDeclaration],
                               unsupported: inout [String: UnsupportedDeclaration],
                               residue: inout [String]) {
@@ -141,7 +139,7 @@ public enum DeclarationIndexer {
             let name = type.name.text
             residue.append(normalise(head(of: type)))
             walk(members: type.memberBlock.members.map { .decl($0.decl) },
-                 context: context + [name], policy: policy, into: &patchable,
+                 context: context + [name], policy: policy, importsSwiftUI: importsSwiftUI, into: &patchable,
                  unsupported: &unsupported, residue: &residue)
             return
         }
@@ -157,19 +155,19 @@ public enum DeclarationIndexer {
             }
             residue.append(normalise(head(of: ext)))
             walk(members: ext.memberBlock.members.map { .decl($0.decl) },
-                 context: [name], policy: policy, into: &patchable,
+                 context: [name], policy: policy, importsSwiftUI: importsSwiftUI, into: &patchable,
                  unsupported: &unsupported, residue: &residue)
             return
         }
 
         if let function = decl.as(FunctionDeclSyntax.self) {
-            record(function: function, context: context, policy: policy, into: &patchable,
+            record(function: function, context: context, policy: policy, importsSwiftUI: importsSwiftUI, into: &patchable,
                    unsupported: &unsupported, residue: &residue)
             return
         }
 
         if let variable = decl.as(VariableDeclSyntax.self) {
-            record(variable: variable, context: context, policy: policy, into: &patchable,
+            record(variable: variable, context: context, policy: policy, importsSwiftUI: importsSwiftUI, into: &patchable,
                    unsupported: &unsupported, residue: &residue)
             return
         }
@@ -177,10 +175,43 @@ public enum DeclarationIndexer {
         residue.append(normalise(decl.description))
     }
 
+    /// Imports, including those inside `#if`.
+    ///
+    /// A file that reaches UIKit through `#if canImport(UIKit)` still needs the
+    /// import in its patch. The conditional wrapper is preserved rather than
+    /// flattened, because the patch compile is given the same `-D` set as the
+    /// app and will resolve it the same way.
+    private static func collectImports(_ items: [CodeBlockItemSyntax.Item]) -> [String] {
+        items.flatMap { item -> [String] in
+            guard case .decl(let decl) = item else { return [] }
+            if let importDecl = decl.as(ImportDeclSyntax.self) {
+                return [importDecl.trimmedDescription]
+            }
+            if let conditional = decl.as(IfConfigDeclSyntax.self) {
+                return conditional.clauses.flatMap { clause -> [String] in
+                    guard case .statements(let statements)? = clause.elements else { return [] }
+                    let inner = collectImports(statements.map(\.item))
+                    guard !inner.isEmpty else { return [] }
+                    let head = "#\(clause.poundKeyword.text)"
+                        + (clause.condition.map { " \($0.trimmedDescription)" } ?? "")
+                    return [head] + inner + ["#endif"]
+                }
+            }
+            return []
+        }
+    }
+
+    /// The module an import statement names, ignoring any `import struct Foo.Bar`
+    /// specifier and any attributes.
+    static func moduleName(of statement: String) -> String {
+        guard let path = statement.split(separator: " ").last else { return statement }
+        return String(path.split(separator: ".").first ?? path)
+    }
+
     // MARK: - Functions
 
     private static func record(function: FunctionDeclSyntax, context: [String],
-                               policy: ClassifierPolicy,
+                               policy: ClassifierPolicy, importsSwiftUI: Bool,
                                into patchable: inout [String: PatchableDeclaration],
                                unsupported: inout [String: UnsupportedDeclaration],
                                residue: inout [String]) {
@@ -225,10 +256,13 @@ public enum DeclarationIndexer {
         }
 
         let returnType = function.signature.returnClause?.type
-        if !policy.allowOpaqueResultTypes, containsOpaqueType(returnType) {
-            reject(identity, mentionsView(returnType) ? swiftUIBodyReason : opaqueReason,
-                   fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
-            return
+        if containsOpaqueType(returnType) {
+            let erasedView = isErasedSwiftUIView(returnType, importsSwiftUI: importsSwiftUI)
+            if !(erasedView && policy.allowOpaqueResultTypes) {
+                reject(identity, erasedView ? swiftUIBodyReason : opaqueReason,
+                       fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
+                return
+            }
         }
 
         let display = (context + [target]).joined(separator: ".")
@@ -248,7 +282,7 @@ public enum DeclarationIndexer {
     // MARK: - Properties
 
     private static func record(variable: VariableDeclSyntax, context: [String],
-                               policy: ClassifierPolicy,
+                               policy: ClassifierPolicy, importsSwiftUI: Bool,
                                into patchable: inout [String: PatchableDeclaration],
                                unsupported: inout [String: UnsupportedDeclaration],
                                residue: inout [String]) {
@@ -290,10 +324,13 @@ public enum DeclarationIndexer {
         }
 
         let declaredType = binding.typeAnnotation?.type
-        if !policy.allowOpaqueResultTypes, containsOpaqueType(declaredType) {
-            reject(identity, mentionsView(declaredType) ? swiftUIBodyReason : opaqueReason,
-                   fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
-            return
+        if containsOpaqueType(declaredType) {
+            let erasedView = isErasedSwiftUIView(declaredType, importsSwiftUI: importsSwiftUI)
+            if !(erasedView && policy.allowOpaqueResultTypes) {
+                reject(identity, erasedView ? swiftUIBodyReason : opaqueReason,
+                       fingerprint, into: &patchable, unsupported: &unsupported, residue: &residue)
+                return
+            }
         }
 
         insert(PatchableDeclaration(
@@ -340,11 +377,29 @@ public enum DeclarationIndexer {
         SwiftUI does not evaluate a view body through the replacement
         """
 
-    /// Syntactic and deliberately loose: a type named `View` from somewhere
-    /// else lands on the SwiftUI wording, which costs a slightly wrong
-    /// explanation and never a wrong verdict, since both are refusals.
-    private static func mentionsView(_ type: TypeSyntax?) -> Bool {
-        type?.trimmedDescription.contains("View") ?? false
+    /// Whether this is the one shape measured to be erased, and therefore the
+    /// only one the experimental switch may lift.
+    ///
+    /// Exact, not a substring test, and both halves are load-bearing.
+    ///
+    /// The type must be `some View` at the root. Erasure applies to a whole
+    /// opaque return type, not to an opaque position inside one:
+    /// `func f() -> (some View)?` measures as `Optional<Text>`, unerased, and
+    /// replacing it with a different tree crashes the process. Treating it as
+    /// the safe case would have told the developer their edit was harmless and
+    /// then handed them a SIGSEGV.
+    ///
+    /// And the file must import SwiftUI, because the guarantee comes from
+    /// `@_typeEraser` on Apple's `View`, not from the spelling. A protocol of
+    /// one's own named `View`, or a `some ViewModelProtocol`, has no eraser and
+    /// is the undefined-behaviour case. Calling either of them harmless is an
+    /// invitation to turn the switch on.
+    private static func isErasedSwiftUIView(_ type: TypeSyntax?, importsSwiftUI: Bool) -> Bool {
+        guard importsSwiftUI, let type else { return false }
+        guard let opaque = type.as(SomeOrAnyTypeSyntax.self),
+              opaque.someOrAnySpecifier.tokenKind == .keyword(.some) else { return false }
+        return opaque.constraint.trimmedDescription == "View"
+            || opaque.constraint.trimmedDescription == "SwiftUI.View"
     }
 
     /// Two declarations that reduce to the same identity cannot be told apart,

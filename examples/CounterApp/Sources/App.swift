@@ -43,13 +43,17 @@ struct ContentView: View {
                     }
                 }
 
-                // Both rows come from patchable methods on Cart. Edit their
-                // bodies in Sources/Cart.swift while `swift-splice watch` is
-                // running and these change without the app restarting.
+                // Banner's body is the M4 subject and the counterexample: a
+                // patch to it loads and reports success, and this row does not
+                // change, because SwiftUI does not evaluate a body through the
+                // replacement. See DESIGN.md 13.
                 Section("SwiftUI") {
                     Banner()
                 }
 
+                // Both rows come from patchable methods on Cart. Edit their
+                // bodies in Sources/Cart.swift while `swift-splice watch` is
+                // running and these change without the app restarting.
                 Section("Patched output") {
                     LabeledContent("Subtotal", value: cart.subtotalLabel())
                     LabeledContent("Discount", value: cart.discountLabel())

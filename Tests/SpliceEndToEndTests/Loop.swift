@@ -54,13 +54,20 @@ enum Loop {
 
         let before = try execute(binary, arguments: [])
 
-        guard case .hotPatch(let declarations) =
-                ChangeClassifier.classify(baseline: baseline, current: current) else {
-            throw Failure.notHotPatchable(ChangeClassifier.classify(baseline: baseline, current: current))
+        // Indexed and generated exactly as PatchCoordinator does it, imports
+        // included. Calling the generator a shorter way here meant the suite
+        // that exists to prove a patch actually compiles was not exercising
+        // the path the daemon takes.
+        let currentIndex = DeclarationIndexer.index(source: current)
+        let classification = ChangeClassifier.classify(
+            before: DeclarationIndexer.index(source: baseline), after: currentIndex)
+        guard case .hotPatch(let declarations) = classification else {
+            throw Failure.notHotPatchable(classification)
         }
 
         let generated = try ReplacementGenerator.generate(module: module, generation: 1,
-                                                          declarations: declarations)
+                                                          declarations: declarations,
+                                                          imports: currentIndex.imports)
         let patchSource = work.appendingPathComponent("Patch.swift")
         try generated.write(to: patchSource, atomically: true, encoding: .utf8)
 

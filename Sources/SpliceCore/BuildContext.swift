@@ -15,6 +15,7 @@ public struct BuildContext: Codable, Sendable {
     public var sdkName: String
     public var appBinaryPath: String
     public var moduleSearchPaths: [String]
+    public var frameworkSearchPaths: [String] = []
     public var extraCompilerFlags: [String]
     public var sourceRoots: [String]
     /// Bundle identifier of the running application, used to find its data
@@ -25,8 +26,9 @@ public struct BuildContext: Codable, Sendable {
                 targetTriple: String, sdkPath: String, sdkName: String, appBinaryPath: String,
                 moduleSearchPaths: [String], extraCompilerFlags: [String],
                 sourceRoots: [String], bundleIdentifier: String,
-                debugDylibPath: String? = nil) {
+                debugDylibPath: String? = nil, frameworkSearchPaths: [String] = []) {
         self.debugDylibPath = debugDylibPath
+        self.frameworkSearchPaths = frameworkSearchPaths
         self.moduleName = moduleName
         self.swiftCompilerPath = swiftCompilerPath
         self.swiftCompilerVersion = swiftCompilerVersion
@@ -66,6 +68,34 @@ public struct BuildContext: Codable, Sendable {
     /// rather than a field-by-field audit.
     public var identity: String {
         [moduleName, targetTriple, sdkName, swiftCompilerVersion].joined(separator: "|")
+    }
+
+    /// Tolerant of fields it does not know and of ones it has gained.
+    ///
+    /// The manifest is written by someone else's build script, so adding a
+    /// property must not invalidate every file already on disk. Adding
+    /// `frameworkSearchPaths` as a plain stored property did exactly that: the
+    /// synthesized decoder demanded the key, every existing manifest failed to
+    /// load, and the error said "no project and no build context" -- which
+    /// points at the wrong thing entirely.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func required(_ key: CodingKeys) throws -> String {
+            try container.decode(String.self, forKey: key)
+        }
+        moduleName = try required(.moduleName)
+        swiftCompilerPath = try required(.swiftCompilerPath)
+        swiftCompilerVersion = try required(.swiftCompilerVersion)
+        targetTriple = try required(.targetTriple)
+        sdkPath = try required(.sdkPath)
+        sdkName = try required(.sdkName)
+        appBinaryPath = try required(.appBinaryPath)
+        bundleIdentifier = try required(.bundleIdentifier)
+        moduleSearchPaths = try container.decodeIfPresent([String].self, forKey: .moduleSearchPaths) ?? []
+        frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
+        extraCompilerFlags = try container.decodeIfPresent([String].self, forKey: .extraCompilerFlags) ?? []
+        sourceRoots = try container.decodeIfPresent([String].self, forKey: .sourceRoots) ?? []
+        debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
     }
 
     public static func load(from url: URL) throws -> BuildContext {

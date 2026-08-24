@@ -56,9 +56,13 @@ public actor PatchCoordinator {
         let next = generation + 1
         let timeline = StageTimeline(generation: next)
 
-        let classification = timeline.measure(.classify) {
-            ChangeClassifier.classify(baseline: baseline, current: current,
-                                      policy: .fromEnvironment)
+        let policy = ClassifierPolicy.fromEnvironment
+        // One measurement: indexing is the bulk of classification, and two
+        // rows in the summary read as two stages.
+        let (currentIndex, classification) = timeline.measure(.classify) {
+            let currentIndex = DeclarationIndexer.index(source: current, policy: policy)
+            let baselineIndex = DeclarationIndexer.index(source: baseline, policy: policy)
+            return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex))
         }
 
         let declarations: [PatchableDeclaration]
@@ -73,7 +77,7 @@ public actor PatchCoordinator {
         }
 
         do {
-            let imports = DeclarationIndexer.index(source: current).imports
+            let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
                 try ReplacementGenerator.generate(module: context.moduleName,
                                                   generation: next, declarations: declarations,

@@ -75,12 +75,19 @@ cases:
     state_preserved: false
     result: pass
     note: "no native Tx key is emitted; replacement still applies"
+  - id: opaque-inside-a-type
+    supported: false
+    kind: unsafe
+    state_preserved: false
+    result: pass
+    observed: "signal 11"
+    note: "some View is erased to DebugReplaceableView; (some View)? is not, and patching it is undefined"
   - id: opaque-result-type-changed
     supported: false
     kind: unsafe
     state_preserved: false
     result: pass
-    observed: "exit 0; g0: old g1: 42"
+    observed: "signal 11"
     note: "compiles and loads with no diagnostic; runtime outcome is undefined and has been observed as the new value, as garbage, and as SIGSEGV"
   - id: opaque-result-type-stable
     supported: true

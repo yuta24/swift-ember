@@ -126,8 +126,10 @@ where a new one stands. `DESIGN.md` section 20 keeps the matrix.
 Release builds, physical devices, and anything that changes a type's layout.
 
 SwiftUI `body` is a rebuild too, though not for the reason you would guess.
-`View` carries a type eraser, so `some View` is already concrete and patching
-one is perfectly safe — it just does nothing. SwiftUI reaches a body through
+`View` carries a type eraser, so a return type of exactly `some View` is
+already concrete and patching one is safe — it just does nothing. Nested
+opaque positions such as `(some View)?` are not erased and remain genuinely
+unsafe. SwiftUI reaches a body through
 code generated at compile time rather than through the replacement, so the
 reload reports success and the screen does not change. A reload that lies is
 worse than a refusal. `DESIGN.md` section 13 has the measurements.
