@@ -1870,7 +1870,14 @@ A release candidate is ready when all are true:
 -   [ ] End-to-end timing is reported.
 -   [x] CI/unit/fixture tests are documented and runnable.
     `scripts/ci.sh` is what CI runs and what a contributor runs; the
-    workflow contains no steps of its own.
+    workflow contains no steps of its own, including the choice of
+    toolchain.
+
+    Three properties are worth stating because the first version of it
+    had none of them. An unknown stage name is an error rather than a
+    silent skip of everything. A fixture run that matches no cases fails
+    rather than reporting a clean pass. And the artifact CI publishes is
+    what that run measured, not the results file checked into git.
 
 ## Appendix A: measured toolchain behavior
 

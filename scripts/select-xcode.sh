@@ -15,7 +15,11 @@
 
 set -uo pipefail
 
-MINIMUM=${SPLICE_MINIMUM_SWIFT:-6.2}
+# The oldest Swift the matrix in DESIGN.md section 20 has actually been run
+# against. Not 6.2: Xcode 26.0 and 26.1 ship 6.2.x and have never been measured,
+# and a floor that admits them would let CI report a pass for something the
+# documentation does not claim.
+MINIMUM=${SPLICE_MINIMUM_SWIFT:-6.2.3}
 
 swift_version_of() {
     local developer_dir="$1"
@@ -35,16 +39,19 @@ for app in /Applications/Xcode*.app; do
     candidates+=("$version|$app/Contents/Developer")
 done
 
+# Before any expansion of the array: bash 3.2 treats "${empty[@]}" under set -u
+# as an unbound variable, and inside a pipeline the error does not reach the
+# exit status -- so --list reported success while printing a bash error.
+if [ ${#candidates[@]} -eq 0 ]; then
+    echo "no usable Xcode found under /Applications" >&2
+    exit 1
+fi
+
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${candidates[@]}" | sort -V | while IFS='|' read -r version dir; do
         printf 'swift %-8s %s\n' "$version" "$dir"
     done
     exit 0
-fi
-
-if [ ${#candidates[@]} -eq 0 ]; then
-    echo "no usable Xcode found under /Applications" >&2
-    exit 1
 fi
 
 # Version-sorted, so "oldest" and "newest" mean what they say. A string

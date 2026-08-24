@@ -3,9 +3,8 @@
 # Everything CI runs, in one script that also runs locally.
 #
 #   scripts/ci.sh                     everything
-#   scripts/ci.sh --skip-simulator    host only, no simulator boot
-#   scripts/ci.sh --only tests        one stage: toolchain|build|tests|fixtures|
-#                                     simulator|examples|xcode
+#   scripts/ci.sh --skip-simulator    only the stages that need no simulator
+#   scripts/ci.sh --only <stage>      one stage; --list-stages to see them
 #
 # Keeping this out of the workflow file is deliberate. PRD.md section 13 asks
 # for reproducible build and test instructions, and a set of steps that only
@@ -17,129 +16,214 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Stages that need a booted simulator are listed separately rather than
+# inferred, so that skipping "the simulator" does not quietly skip a build that
+# never needed one.
+ALWAYS_STAGES="toolchain build tests fixtures runtime-toolchains xcode-build"
+SIMULATOR_STAGES="simulator fixtures-simulator examples doctor"
+ALL_STAGES="$ALWAYS_STAGES $SIMULATOR_STAGES"
+
 SKIP_SIMULATOR=0
 ONLY=""
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-simulator) SKIP_SIMULATOR=1; shift ;;
-        --only) ONLY="$2"; shift 2 ;;
-        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --list-stages) printf '%s\n' $ALL_STAGES; exit 0 ;;
+        --only)
+            # Explicit, because `set -u` would otherwise kill the script with
+            # "$2: unbound variable" and exit 127 instead of saying anything.
+            if [ $# -lt 2 ]; then echo "--only needs a stage name" >&2; exit 64; fi
+            ONLY="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
 done
 
-failures=()
+# A name that matches no stage used to skip everything and report success,
+# which is the failure this whole script exists to make impossible elsewhere.
+if [ -n "$ONLY" ]; then
+    case " $ALL_STAGES " in
+        *" $ONLY "*) ;;
+        *) echo "unknown stage: $ONLY" >&2
+           echo "stages: $ALL_STAGES" >&2
+           exit 64 ;;
+    esac
+fi
+
+# Pick the toolchain here rather than in the workflow, so that a local run and
+# a CI run are the same run. An explicit DEVELOPER_DIR still wins.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+    DEVELOPER_DIR="$("$ROOT/scripts/select-xcode.sh")" || exit 1
+    export DEVELOPER_DIR
+fi
+
+ran=0
+failures=""
 
 step() {
     local name="$1"; shift
     if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then return 0; fi
     printf '\n\033[1m==> %s\033[0m\n' "$name"
+    ran=$((ran + 1))
     if "$@"; then
         printf '\033[32m    %s ok\033[0m\n' "$name"
     else
         printf '\033[31m    %s FAILED\033[0m\n' "$name"
-        failures+=("$name")
+        failures="$failures $name"
     fi
 }
 
 # --- toolchain -------------------------------------------------------------
 
-MINIMUM_SWIFT=6.2
-
 check_toolchain() {
-    echo "developer dir  $(xcode-select -p)"
+    echo "developer dir  $DEVELOPER_DIR"
     echo "xcodebuild     $(xcodebuild -version | head -1)"
     local version
     version="$(xcrun swiftc --version 2>/dev/null | head -1)"
     echo "swiftc         $version"
-
-    local numeric
-    numeric="$(sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' <<< "$version")"
-    if [ -z "$numeric" ]; then
-        echo "could not read the Swift version" >&2
-        return 1
-    fi
-    # DESIGN.md section 20 records what has actually been run. Anything older
-    # than the floor is not a failure of this script, but it must not be
-    # reported as a pass either.
-    if [ "$(printf '%s\n%s\n' "$MINIMUM_SWIFT" "$numeric" | sort -V | head -1)" != "$MINIMUM_SWIFT" ]; then
-        echo "Swift $numeric is below the tested floor of $MINIMUM_SWIFT" >&2
-        return 1
-    fi
+    [ -n "$version" ] || { echo "could not read the Swift version" >&2; return 1; }
 }
 
 # --- host ------------------------------------------------------------------
 
-# Release, not debug. Classification is SwiftSyntax parsing and costs about
-# fourteen times as much unoptimised, and a debug build has also hidden a
-# type-checker crash that only appears with optimisation off in some versions.
-build_package() { swift build -c release; }
+# Both configurations, and the debug one is not redundant. SPLICE_ENABLED is
+# defined only for debug, so a release build compiles the runtime's dialling
+# and loading code to nothing -- which is how a type-checker crash in that file
+# went unnoticed on three shipping toolchains.
+build_package() {
+    swift build || return 1
+    swift build -c release
+}
 
 run_tests() { swift test; }
 
 run_fixtures() { ./fixtures/run.sh; }
 
+# The regression guard for that crash. It only reproduces on Swift 6.3.2 and
+# earlier, so building on whichever toolchain happens to be newest proves
+# nothing; this compiles the runtime under every one installed.
+check_runtime_across_toolchains() {
+    local any=0 failed=0 work
+    work="$(mktemp -d)"
+    while read -r _ version dir; do
+        any=1
+        printf '  swift %-8s ' "$version"
+        if DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
+             -D SPLICE_ENABLED -emit-module \
+             -emit-module-path "$work/SpliceRuntime-$version.swiftmodule" \
+             -module-name SpliceRuntime runtime/Sources/*.swift > "$work/log" 2>&1; then
+            echo "ok"
+        else
+            echo "FAILED"
+            sed -n '1,6p' "$work/log"
+            failed=1
+        fi
+    done < <("$ROOT/scripts/select-xcode.sh" --list)
+    rm -rf "$work"
+    [ "$any" -eq 1 ] || { echo "no toolchains to check" >&2; return 1; }
+    return "$failed"
+}
+
+build_xcode_example() {
+    xcodebuild -project examples/XcodeApp/XcodeApp.xcodeproj -scheme XcodeApp \
+        -configuration Debug -destination 'generic/platform=iOS Simulator' \
+        build 2>&1 | tail -3 | grep -q 'BUILD SUCCEEDED'
+}
+
 # --- simulator -------------------------------------------------------------
 
+# Chosen to match the SDK of the selected toolchain. Taking whichever device
+# came first booted an iOS 26.2 runtime for an iOS 27.0 SDK, which fails in
+# dyld for a reason that has nothing to do with this project.
 boot_simulator() {
-    if xcrun simctl list devices | grep -q Booted; then
-        echo "already booted: $(xcrun simctl list devices | grep Booted | head -1 | sed 's/^ *//')"
-        return 0
-    fi
-    local device
-    device="$(xcrun simctl list devices available \
-        | grep -E '^\s+iPhone' | head -1 | sed 's/.*(\([A-F0-9-]*\)).*/\1/')"
-    if [ -z "$device" ]; then
-        echo "no iPhone simulator available" >&2
+    local wanted booted count
+    wanted="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+    booted="$(xcrun simctl list devices | grep Booted)"
+    count="$(printf '%s' "$booted" | grep -c . )"
+
+    if [ "$count" -gt 1 ]; then
+        # `simctl spawn booted` and `simctl install booted` are ambiguous with
+        # more than one, and pick for themselves.
+        echo "more than one simulator is booted; shut all but one down" >&2
+        printf '%s\n' "$booted" >&2
         return 1
     fi
-    echo "booting $device"
+    if [ "$count" -eq 1 ]; then
+        echo "already booted:$(printf '%s' "$booted" | sed 's/^ *//')"
+        return 0
+    fi
+
+    local device
+    device="$(xcrun simctl list devices available \
+        | awk -v want="-- iOS $wanted --" '
+            $0 == want { inside = 1; next }
+            /^-- / { inside = 0 }
+            inside && /iPhone/ { match($0, /\(([A-F0-9-]+)\)/, m); print m[1]; exit }' 2>/dev/null)"
+    if [ -z "$device" ]; then
+        device="$(xcrun simctl list devices available | sed -n "/-- iOS $wanted --/,/^-- /p" \
+            | grep iPhone | head -1 | sed 's/.*(\([A-F0-9-]*\)).*/\1/')"
+    fi
+    if [ -z "$device" ]; then
+        echo "no iPhone simulator on an iOS $wanted runtime, which is what this Xcode's SDK targets" >&2
+        xcrun simctl list devices available >&2
+        return 1
+    fi
+    echo "booting $device on iOS $wanted"
     xcrun simctl boot "$device" || return 1
-    xcrun simctl bootstatus "$device" -b > /dev/null 2>&1
+    xcrun simctl bootstatus "$device" -b > /dev/null 2>&1 || return 1
     xcrun simctl list devices | grep Booted | sed 's/^ *//'
 }
 
-run_simulator_fixtures() { ./fixtures/run.sh --platform simulator; }
-
-# --- examples --------------------------------------------------------------
+# Results are written where CI can collect them. Without --results the script
+# writes nothing, and the workflow was uploading the files checked into git as
+# though a runner had produced them.
+run_simulator_fixtures() { ./fixtures/run.sh --platform simulator --results "$RESULTS_DIR/simulator.yaml"; }
 
 build_examples() {
     ./examples/CounterApp/build.sh > /dev/null || return 1
     echo "CounterApp debug ok"
     # The check DESIGN.md section 5.3 asks for: the build fails if a Release
-    # binary exports any replacement key or carries the reload client.
-    ./examples/CounterApp/build.sh --release | grep -E 'release isolation|replacement keys' || return 1
+    # binary exports a replacement key or carries the reload client.
+    ./examples/CounterApp/build.sh --release | grep -E 'release isolation'
 }
 
-build_xcode_example() {
-    local project=examples/XcodeApp/XcodeApp.xcodeproj
-    xcodebuild -project "$project" -scheme XcodeApp -configuration Debug \
-        -destination 'generic/platform=iOS Simulator' \
-        build 2>&1 | tail -3 | grep -q 'BUILD SUCCEEDED' || return 1
-    echo "XcodeApp builds"
-    # doctor reads the built binary back, so this also proves the settings in
-    # integrations/xcode actually produce a patchable binary.
-    "$(swift build -c release --show-bin-path)/swift-splice" doctor \
-        --project "$project" --scheme XcodeApp --sources examples/XcodeApp/Sources
+# doctor reads the built binary back, so this proves the settings in
+# integrations/xcode produce something actually patchable.
+run_doctor() {
+    "$(swift build --show-bin-path)/swift-splice" doctor \
+        --project examples/XcodeApp/XcodeApp.xcodeproj --scheme XcodeApp \
+        --sources examples/XcodeApp/Sources
 }
 
 # --- run -------------------------------------------------------------------
 
+RESULTS_DIR="${SPLICE_RESULTS_DIR:-$ROOT/.ci-results}"
+mkdir -p "$RESULTS_DIR"
+
 step toolchain check_toolchain
 step build build_package
 step tests run_tests
-step fixtures run_fixtures
+step fixtures ./fixtures/run.sh --results "$RESULTS_DIR/macos.yaml"
+step runtime-toolchains check_runtime_across_toolchains
+step xcode-build build_xcode_example
 if [ "$SKIP_SIMULATOR" -eq 0 ]; then
     step simulator boot_simulator
     step fixtures-simulator run_simulator_fixtures
     step examples build_examples
-    step xcode build_xcode_example
+    step doctor run_doctor
 fi
 
 printf '\n'
-if [ ${#failures[@]} -eq 0 ]; then
-    printf '\033[32mall stages passed\033[0m\n'
+if [ "$ran" -eq 0 ]; then
+    echo "no stages ran" >&2
+    exit 1
+fi
+if [ -z "$failures" ]; then
+    printf '\033[32m%d stage(s) passed\033[0m\n' "$ran"
     exit 0
 fi
-printf '\033[31mfailed: %s\033[0m\n' "${failures[*]}"
+printf '\033[31mfailed:%s\033[0m\n' "$failures"
 exit 1

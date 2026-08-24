@@ -145,14 +145,20 @@ DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
 
 ```
 scripts/ci.sh                     everything, about ten minutes
-scripts/ci.sh --skip-simulator    host only
-scripts/ci.sh --only tests        one stage
+scripts/ci.sh --skip-simulator    the stages that need no simulator
+scripts/ci.sh --only tests        one stage; --list-stages to see them
 ```
 
 CI runs that script and nothing else, so a red build is something you can
-reproduce. `scripts/select-xcode.sh` picks the toolchain, newest at or above the
-tested floor, which is why the workflow does not pin an Xcode version — an image
-rotating should not look like the code breaking.
+reproduce. It picks the toolchain itself — newest at or above the floor that has
+actually been measured — which is why the workflow pins no Xcode version: an
+image rotating should not look like the code breaking.
+
+One stage is worth knowing about. `runtime-toolchains` compiles the in-app
+runtime under *every* installed Xcode, because the bug that made this project
+unusable on shipping toolchains was a type-checker crash that only reproduces
+below Swift 6.4. Building on whichever toolchain is newest would have proved
+nothing.
 
 ## What it will not do
 

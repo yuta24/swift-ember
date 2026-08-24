@@ -28,13 +28,17 @@ jobs:
       # Images rotate what they ship. Choosing here, against the floor recorded
       # beside the measurements that justify it, keeps a red build meaningful:
       # it means the code broke, not that a runner image moved.
-      - name: Select a toolchain
+      # ci.sh selects the toolchain itself; this only reports what is on the
+      # image and derives the cache key. A failure here has to be a failure of
+      # the step, which is why the assignment is separate from the echo:
+      # `echo "X=$(cmd)"` succeeds even when cmd does not.
+      - name: Report the toolchains on this image
         run: |
           scripts/select-xcode.sh --list
           developer_dir="$(scripts/select-xcode.sh)"
-          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
           version="$(DEVELOPER_DIR=$developer_dir xcrun swiftc --version 2>/dev/null \
             | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          test -n "$version" || { echo "could not read a Swift version"; exit 1; }
           echo "SWIFT_VERSION=$version" >> "$GITHUB_ENV"
 
       # Keyed on the compiler as well as the manifest. Modules built by one
@@ -53,26 +57,30 @@ jobs:
       - name: Run the suite
         run: scripts/ci.sh
 
+      # .ci-results is written by this run. fixtures/results-*.yaml is checked
+      # into git, and uploading those republished a laptop's numbers as though
+      # a runner had produced them.
       - name: Upload the measured matrix
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fixtures-${{ matrix.runner }}
-          path: fixtures/results-*.yaml
-          if-no-files-found: ignore
+          path: .ci-results/*.yaml
+          if-no-files-found: error
 
-  # Deliberately separate. If the newest image cannot run this, that is worth
-  # knowing without turning the whole build red, because the floor is a claim
-  # about what was tested rather than about what must work.
+  # Separate because the matrix jobs always take the newest toolchain on their
+  # image, and some things only break on older ones -- a type-checker crash in
+  # this project's own runtime did, on every shipping Xcode at the time. This
+  # job is allowed to fail the build: a floor that cannot fail is not a floor.
   oldest-supported:
     name: oldest available toolchain
     runs-on: macos-26
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Select the oldest toolchain at or above the floor
         run: |
           scripts/select-xcode.sh --list
-          echo "DEVELOPER_DIR=$(scripts/select-xcode.sh --oldest)" >> "$GITHUB_ENV"
-      - name: Run the suite without the simulator
+          oldest="$(scripts/select-xcode.sh --oldest)"
+          echo "DEVELOPER_DIR=$oldest" >> "$GITHUB_ENV"
+      - name: Run the stages that need no simulator
         run: scripts/ci.sh --skip-simulator

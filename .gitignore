@@ -1,5 +1,6 @@
 .build/
 .splice/
+.ci-results/
 fixtures/.build/
 examples/*/.build/
 examples/*/splice-context.json
