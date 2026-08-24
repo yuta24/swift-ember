@@ -1,0 +1,4 @@
+g0: direct=old
+g0: selector=old
+g1: direct=new
+g1: selector=new

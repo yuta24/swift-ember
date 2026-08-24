@@ -1,0 +1,6 @@
+g0: direct=old(1)
+g0: polymorphic=old(2)
+g0: calls=2
+g1: direct=new(1)
+g1: polymorphic=new(2)
+g1: calls=4

@@ -1,0 +1,4 @@
+g0: setUp=screen+old
+g0: trail=old
+g1: setUp=screen+new
+g1: trail=old,new

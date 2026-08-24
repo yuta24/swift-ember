@@ -24,7 +24,7 @@ maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
 Both checked-in result files come from Xcode 27.0 Beta 4; the Simulator run
-used an iPhone 17 Pro on iOS 27.0. All 24 cases pass on both targets.
+used an iPhone 17 Pro on iOS 27.0. All 32 cases pass on both targets.
 
 ## Case layout
 
@@ -85,6 +85,36 @@ Because the outcome is undefined, that case records what happened instead of
 asserting a specific result. Pinning an expectation to undefined behavior would
 only make the suite flaky. What is not undefined is the conclusion: the
 classifier must reject the edit before it ever reaches a process.
+
+## What the capability cases establish, and what they do not
+
+Five cases pin behavior the classifier does not yet use. They exist because the
+daemon refuses these edits, and it was not clear whether the refusals were about
+Swift or about this tool:
+
+- `override-method`, `override-objc-dispatch`, `override-super-call` --- an
+  override gets a replacement key of its own, and the replacement goes in an
+  extension because it is not itself an override. It is reached through the base
+  class, through `objc_msgSend`, and it may call `super`. That last one decides
+  the question in practice: an overridden method whose body opens with
+  `super.viewDidLoad()` would be out of reach even with the key present.
+- `patch-local-declaration` --- a declaration carried only in the patch is
+  callable from a replaced body. Nothing in the running binary can reach it,
+  since it did not exist when that binary was linked, which is what makes adding
+  one layout-neutral.
+- `private-via-caller` --- a private function's new implementation reaches the
+  process when the patch carries a copy and replaces the callers. `private` is
+  file-scoped, so the file is the whole closure. Replacing some callers and not
+  others would leave two versions live at once, so the case replaces all of them.
+
+All five are now what the classifier does, and `carried-two-generations` was
+added with them: two patches in a row may each carry a copy of the same private
+declaration without colliding, because each patch is its own module.
+
+These cases came first and the implementation followed, which is the order that
+made it cheap. Each one answered "is this Swift or is this us?" before any code
+was written to act on the answer --- and for overrides the answer had been
+assumed, wrongly, for the life of the project.
 
 ## Not covered here
 

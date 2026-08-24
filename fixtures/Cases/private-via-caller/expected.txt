@@ -1,0 +1,4 @@
+g0: receipt: 1000
+g0: total=1000
+g1: receipt: 900
+g1: total=900

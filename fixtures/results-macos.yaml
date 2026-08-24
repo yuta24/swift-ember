@@ -21,6 +21,12 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
+  - id: carried-two-generations
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "two patches carrying a private declaration of the same name do not collide"
   - id: class-method
     supported: true
     kind: replace
@@ -87,18 +93,48 @@ cases:
     kind: unsafe
     state_preserved: false
     result: pass
-    observed: "signal 11"
+    observed: "exit 0; g0: old g1: 42"
     note: "compiles and loads with no diagnostic; runtime outcome is undefined and has been observed as the new value, as garbage, and as SIGSEGV"
   - id: opaque-result-type-stable
     supported: true
     kind: replace
     state_preserved: false
     result: pass
+  - id: override-method
+    supported: true
+    kind: replace
+    state_preserved: true
+    result: pass
+    note: "the replacement is not itself an override, so an extension accepts it"
+  - id: override-objc-dispatch
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "an override reached through objc_msgSend is replaced; this is the UIKit lifecycle shape"
+  - id: override-super-call
+    supported: true
+    kind: replace
+    state_preserved: true
+    result: pass
+    note: "super is legal in an extension; only override is not"
+  - id: patch-local-declaration
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "declarations added by a patch are callable from replaced bodies; nothing in the old binary can reach them"
   - id: private-rejected
     supported: false
     kind: reject-compile
     state_preserved: false
     result: pass
+  - id: private-via-caller
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "a private change reaches the process by replacing its callers; the file is the whole closure"
   - id: protocol-extension-default
     supported: true
     kind: replace
