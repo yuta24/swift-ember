@@ -378,7 +378,33 @@ the load command by bringing a second copy of the whole app module into
 the live process. Replacements would bind into the copy, the running
 code would be untouched, and the tool would report success.
 
-### 6.5 What else has to reach the patch
+### 6.5 Which module a file belongs to
+
+An app is rarely one module, and the build system will not say which one a
+file is in: `xcodebuild -showBuildSettings` reports the scheme's targets
+and a local Swift package's targets are not among them.
+
+It is inferred from the path instead, using the layout SwiftPM requires
+--- a target's sources under `Sources/<TargetName>/` beneath a
+`Package.swift`. A wrong guess cannot pass silently, because the module
+has to appear in the built binary's replacement keys before anything is
+generated for it.
+
+That check is also the answer to a harder problem. Xcode propagates
+`SWIFT_OPTIMIZATION_LEVEL` and `SWIFT_ENABLE_TESTABILITY` into package
+targets but not `OTHER_SWIFT_FLAGS`, so a package in a correctly
+configured project compiles with no implicit dynamic and produces no
+replacement keys --- while every build setting the daemon can see still
+says the project is set up. Counting the keys the binary exports, per
+module, is the only check that notices, and it turns an edit that
+silently did nothing into a refusal that names the module and the one
+line of manifest that fixes it. `integrations/xcode/Package.md` has the
+measurement and the snippet.
+
+A local package's code links into the application binary, so the patch
+still links against the same target as an app-module patch does.
+
+### 6.6 What else has to reach the patch
 
 Anything that changes how the patched body is *interpreted*, not only
 what it can see. Conditional compilation flags are the obvious case: a

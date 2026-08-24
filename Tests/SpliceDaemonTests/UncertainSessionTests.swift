@@ -55,7 +55,12 @@ private func harness(answering answer: @escaping @Sendable () -> LoadPatchResult
 
     let coordinator = PatchCoordinator(context: context, server: server,
                                        workDirectory: root.appendingPathComponent("patches"),
-                                       deliver: { _ in image })
+                                       deliver: { _ in image },
+                                       // The tests have no built application,
+                                       // so the module check would refuse
+                                       // every edit before the stages they
+                                       // are about.
+                                       inventory: ModuleInventory(keys: ["Fixture": 1]))
     await coordinator.primeBaselines(from: [root])
 
     let runtime = FakeRuntime(port: port)

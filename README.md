@@ -59,7 +59,9 @@ before and after. `examples/CounterApp/README.md` walks through what happened.
 
 ## Adding it to your project
 
-Two steps, both in Xcode.
+Two steps, both in Xcode — plus one line per local package, since Xcode does
+not pass the app's compiler flags into package targets. See
+`integrations/xcode/Package.md`.
 
 Base your Debug configuration on `integrations/xcode/Splice.xcconfig`, then add
 this package and link `SpliceRuntime` to your app target. Call `Splice.start()`

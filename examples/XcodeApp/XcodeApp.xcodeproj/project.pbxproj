@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1000010 /* SpliceRuntime */ = {isa = PBXBuildFile; productRef = A1000009 /* SpliceRuntime */; };
+		A1000031 /* Feature */ = {isa = PBXBuildFile; productRef = A1000030 /* Feature */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +26,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000010 /* SpliceRuntime */,
+				A1000031 /* Feature */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -68,6 +70,7 @@
 			name = XcodeApp;
 			packageProductDependencies = (
 				A1000009 /* SpliceRuntime */,
+				A1000030 /* Feature */,
 			);
 			productName = XcodeApp;
 			productReference = A1000001 /* XcodeApp.app */;
@@ -94,6 +97,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1000019 /* XCLocalSwiftPackageReference "../.." */,
+				A1000032 /* XCLocalSwiftPackageReference "Feature" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1000005 /* Products */;
@@ -217,12 +221,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../..;
 		};
+		A1000032 /* XCLocalSwiftPackageReference "Feature" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Feature;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A1000009 /* SpliceRuntime */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SpliceRuntime;
+		};
+		A1000030 /* Feature */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Feature;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

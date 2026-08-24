@@ -1,5 +1,6 @@
 import SwiftUI
 import SpliceRuntime
+import Feature
 
 @main
 struct XcodeApp: App {
@@ -29,6 +30,13 @@ struct ContentView: View {
                 Section("Patched output") {
                     LabeledContent("Subtotal", value: cart.subtotalLabel())
                     LabeledContent("Discount", value: cart.discountLabel())
+                }
+
+                // From the local Feature package, a different module. It only
+                // reloads because that package asks for implicit dynamic in
+                // its own manifest; Xcode does not pass the app's flags down.
+                Section("From a package") {
+                    LabeledContent("Greeting", value: Greeter().greeting())
                 }
                 Section("Add") {
                     Button("Add Juice") { cart.add("Juice", cents: 500) }

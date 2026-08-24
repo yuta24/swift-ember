@@ -117,7 +117,12 @@ Full rebuild required.
 -   UIKit support.
 -   async/await and actor-aware replacement.
 -   Generic function support where ABI-compatible.
--   Multi-module projects and Swift packages.
+-   Multi-module projects and Swift packages. Local packages work: the
+    module is inferred from the path and verified against the keys the
+    built binary exports, and a package that has not opted in gets a
+    refusal naming it rather than silence. Binary and versioned
+    dependencies remain out of reach, since `unsafeFlags` is refused
+    there and their sources are not being edited anyway.
 -   Persistent compiler process to reduce frontend startup cost.
 -   Replace conventional dylib linking with LLVM ORC/JITLink if
     profiling shows meaningful benefit.

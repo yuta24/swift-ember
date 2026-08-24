@@ -39,6 +39,24 @@ public enum Doctor {
               : "none exported; the settings above may be right but the built binary disagrees, so rebuild",
               passed: keys > 0)
 
+        // Per module, because a project is rarely one. Xcode does not pass
+        // OTHER_SWIFT_FLAGS into Swift package targets, so a package can sit
+        // in a correctly configured project exporting nothing -- and an edit
+        // in it would otherwise just appear to do nothing.
+        if built {
+            let inventory = ModuleInventory.read(from: binary)
+            if inventory.patchableModules.isEmpty {
+                print("  no module exports replacement keys")
+            } else {
+                for module in inventory.patchableModules {
+                    print("  \(module.padding(toLength: 20, withPad: " ", startingAt: 0))"
+                          + "\(inventory.keys[module] ?? 0) keys")
+                }
+                print("  a module missing from this list cannot be patched; see")
+                print("  integrations/xcode/Package.md")
+            }
+        }
+
         let sourcesExist = context.sourceRoots.allSatisfy { FileManager.default.fileExists(atPath: $0) }
         check("Sources", context.sourceRoots.joined(separator: ", "), passed: sourcesExist)
 

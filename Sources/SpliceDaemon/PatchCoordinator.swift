@@ -13,6 +13,12 @@ public actor PatchCoordinator {
     private let server: IPCServer
     private let compiler: PatchCompiler
     private let container: SimulatorContainer
+    private let resolver: ModuleResolver
+    /// Read once per session from the running binary. A rebuild changes it,
+    /// and a rebuild means a relaunch, which is a new session.
+    private lazy var inventory = inventoryOverride
+        ?? ModuleInventory.read(from: context.linkTarget)
+    private let inventoryOverride: ModuleInventory?
     /// Set when a patch may have been partly applied and cleared only by a
     /// fresh process.
     ///
@@ -39,13 +45,19 @@ public actor PatchCoordinator {
     /// Not gratuitous: a test for what happens *after* a load has to get past
     /// the copy into the app container, and without this every such test
     /// stopped at TRANSFER and asserted nothing while passing.
+    /// `inventory`, like `deliver`, exists so the stages after it can be
+    /// reached without a built application. Both default to reading the real
+    /// thing.
     public init(context: BuildContext, server: IPCServer, workDirectory: URL,
-                deliver: (@Sendable (URL) throws -> URL)? = nil) {
+                deliver: (@Sendable (URL) throws -> URL)? = nil,
+                inventory: ModuleInventory? = nil) {
         self.context = context
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
         self.container = SimulatorContainer(bundleIdentifier: context.bundleIdentifier)
+        self.resolver = ModuleResolver(appModule: context.moduleName)
         self.deliverOverride = deliver
+        self.inventoryOverride = inventory
     }
 
     private let deliverOverride: (@Sendable (URL) throws -> URL)?
@@ -183,10 +195,36 @@ public actor PatchCoordinator {
         // touches many, none of which would have been patched anyway.
         if let uncertain { return .sessionUncertain(uncertain) }
 
+        // Which module owns this file decides what the patch imports and what
+        // it is compiled against. A module that exports no replacement keys
+        // cannot be patched at all, and saying so here is the difference
+        // between a refusal and an edit that silently does nothing -- which is
+        // what editing a Swift package used to do.
+        let module = resolver.module(for: url)
+        guard inventory.isPatchable(module) else {
+            return .rejected(SpliceError(
+                stage: .classify, subject: url.lastPathComponent,
+                reason: """
+                    \(module) exports no dynamic replacement keys, so nothing in it \
+                    can be replaced.
+
+                    Xcode does not pass OTHER_SWIFT_FLAGS into Swift package targets, \
+                    so a package needs the setting in its own manifest:
+
+                        .target(name: "\(module)", swiftSettings: [
+                            .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
+                                         .when(configuration: .debug))
+                        ])
+
+                    Patchable modules in this build: \(inventory.patchableModules.joined(separator: ", "))
+                    """,
+                recovery: .rebuild))
+        }
+
         do {
             let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
-                try ReplacementGenerator.generate(module: context.moduleName,
+                try ReplacementGenerator.generate(module: module,
                                                   generation: next, declarations: declarations,
                                                   imports: imports)
             }
