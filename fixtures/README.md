@@ -24,7 +24,7 @@ maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
 Both checked-in result files come from Xcode 27.0 Beta 4; the Simulator run
-used an iPhone 17 Pro on iOS 27.0. All 32 cases pass on both targets.
+used an iPhone 17 Pro on iOS 27.0. All 39 cases pass on both targets.
 
 ## Case layout
 
@@ -52,6 +52,7 @@ so the value predates the patch.
 | `KIND` | `replace` | `replace`, `reject-compile`, `crash`, or `unsafe` |
 | `PATCHES` | `Patch.swift` | patch sources, loaded in order |
 | `APP_TESTABILITY` | `yes` | build the application with `-enable-testing` |
+| `APP_PRIVATE_IMPORTS` | `yes` | build the application with `-enable-private-imports` |
 | `STATE_PRESERVED` | `no` | recorded in `results.yaml` |
 | `EXPECT_COMPILE_ERROR` | | substring the patch build must emit, for `reject-compile` |
 | `EXPECT_SIGNAL` | | signal number, for `crash` |
@@ -107,14 +108,37 @@ Swift or about this tool:
   file-scoped, so the file is the whole closure. Replacing some callers and not
   others would leave two versions live at once, so the case replaces all of them.
 
-All five are now what the classifier does, and `carried-two-generations` was
-added with them: two patches in a row may each carry a copy of the same private
-declaration without colliding, because each patch is its own module.
+The three `override-*` cases are what the classifier does. The other three are
+history: they pin a route to `private` declarations --- carry a copy, replace
+the callers --- that worked, shipped, and was then withdrawn in favour of
+`-enable-private-imports`, under which a private declaration simply has a
+replacement key. They stay because they document what the toolchain does, and
+because `patch-local-declaration` still describes how an *added* declaration
+reaches the process.
+
+The `private-*` cases below are the route that replaced them.
 
 These cases came first and the implementation followed, which is the order that
 made it cheap. Each one answered "is this Swift or is this us?" before any code
 was written to act on the answer --- and for overrides the answer had been
 assumed, wrongly, for the life of the project.
+
+## What the private-import cases establish
+
+Seven cases pin `-Xfrontend -enable-private-imports`, which the app build now
+carries and `fixtures/run.sh` passes by default:
+
+- `private-function-replaced`, `private-type-member`,
+  `private-stored-property-read` --- a private declaration has a replacement key
+  of its own, a private type can be extended by a patch, and private storage
+  can be read from one.
+- `private-default-argument`, `private-witness`, `private-override` --- the
+  three places a *copy* was reached wrongly, or not at all. A default
+  argument's generator, a witness table entry, and a vtable slot all find a
+  replacement, because it is bound at the key they already go through.
+- `no-private-imports-rejected` --- what a project that has not added the
+  setting sees. `APP_PRIVATE_IMPORTS=no` turns the flag off for that one case,
+  and the daemon translates this exact diagnostic into the setting.
 
 ## Not covered here
 

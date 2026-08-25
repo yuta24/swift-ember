@@ -66,6 +66,7 @@ for dir in "$ROOT"/Cases/*/; do
     KIND=replace
     PATCHES="Patch.swift"
     APP_TESTABILITY=yes
+    APP_PRIVATE_IMPORTS=yes
     STATE_PRESERVED=no
     EXPECT_COMPILE_ERROR=""
     EXPECT_SIGNAL=""
@@ -81,9 +82,16 @@ for dir in "$ROOT"/Cases/*/; do
     testflag=()
     [ "$APP_TESTABILITY" = yes ] && testflag=(-enable-testing)
 
+    # A patch reaches a `private` declaration only if the module it imports was
+    # built for private imports. On by default so the ordinary cases have it;
+    # `no-private-imports-rejected` turns it off to pin how that fails.
+    privflag=()
+    [ "$APP_PRIVATE_IMPORTS" = yes ] && privflag=(-Xfrontend -enable-private-imports)
+
     if ! xcrun swiftc -parse-as-library -Onone \
             -target "$TRIPLE" -sdk "$SDKROOT" \
             ${testflag[@]+"${testflag[@]}"} \
+            ${privflag[@]+"${privflag[@]}"} \
             -Xfrontend -enable-implicit-dynamic \
             -module-name "$MODULE" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \

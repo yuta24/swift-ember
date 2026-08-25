@@ -69,6 +69,12 @@ cases:
     kind: replace
     state_preserved: true
     result: pass
+  - id: no-private-imports-rejected
+    supported: false
+    kind: reject-compile
+    state_preserved: false
+    result: pass
+    note: "the diagnostic the daemon translates into a missing build setting"
   - id: no-testability-rejected
     supported: false
     kind: reject-compile
@@ -124,17 +130,53 @@ cases:
     state_preserved: false
     result: pass
     note: "declarations added by a patch are callable from replaced bodies; nothing in the old binary can reach them"
+  - id: private-default-argument
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "a default argument's generator reaches the replacement, which a copy could not"
+  - id: private-function-replaced
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "private declarations get replacement keys under -enable-private-imports; an unpatched caller sees the new one"
+  - id: private-override
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "replacing an overridden fileprivate member keeps dynamic dispatch; a carried copy did not"
   - id: private-rejected
     supported: false
     kind: reject-compile
     state_preserved: false
     result: pass
+  - id: private-stored-property-read
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "a patched body reads private stored properties it could not otherwise name"
+  - id: private-type-member
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "a private type can be extended by a patch, and its members replaced"
   - id: private-via-caller
     supported: true
     kind: replace
     state_preserved: false
     result: pass
     note: "a private change reaches the process by replacing its callers; the file is the whole closure"
+  - id: private-witness
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "an existential call through a private witness table reaches the replacement"
   - id: protocol-extension-default
     supported: true
     kind: replace
