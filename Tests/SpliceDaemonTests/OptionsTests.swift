@@ -160,3 +160,22 @@ private func parse(_ arguments: String...) throws -> Options {
     #expect(decoded.frameworkSearchPaths == original.frameworkSearchPaths)
     #expect(decoded.linkTarget == original.linkTarget)
 }
+
+// MARK: - Diagnostics that are really build settings
+
+/// The compiler says "module was not compiled for private import" and stops.
+/// Left alone, a project missing the setting is shown that against generated
+/// source it never wrote, at a line it cannot open.
+@Test func aMissingPrivateImportIsExplainedAsASetting() {
+    let output = """
+    /tmp/.splice/Patch_001.swift:3:54: error: module 'App' was not compiled for private import
+    """
+    let explanation = PatchCompiler.explain(output)
+    #expect(explanation?.contains("-enable-private-imports") == true)
+    #expect(explanation?.contains("unsafeFlags") == true)
+    #expect(explanation?.contains("rebuild") == true)
+}
+
+@Test func anOrdinaryCompileErrorIsLeftAlone() {
+    #expect(PatchCompiler.explain("error: cannot find 'x' in scope") == nil)
+}

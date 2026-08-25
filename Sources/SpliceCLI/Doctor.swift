@@ -55,6 +55,21 @@ public enum Doctor {
                 print("  a module missing from this list cannot be patched; see")
                 print("  integrations/xcode/Package.md")
             }
+
+            // Asked of the compiler rather than of the settings, and per module,
+            // because a local package needs the flag in its own manifest. A
+            // type-check of one import line answers it exactly; counting
+            // private keys would not, since a module with no private
+            // declarations exports none either way.
+            let missing = inventory.patchableModules.filter { !acceptsPrivateImport($0, context) }
+            check("Private imports", missing.isEmpty
+                  ? "every patchable module accepts @_private"
+                  : "missing from: \(missing.joined(separator: ", ")); add -Xfrontend -enable-private-imports and rebuild",
+                  passed: missing.isEmpty)
+            if !missing.isEmpty {
+                print("  without it a patch cannot reach a `private` declaration, and")
+                print("  most bodies in most types touch private state.")
+            }
         }
 
         let sourcesExist = context.sourceRoots.allSatisfy { FileManager.default.fileExists(atPath: $0) }
@@ -102,13 +117,42 @@ public enum Doctor {
         return ok
     }
 
+    /// Whether `module` was built for private imports, asked by compiling the
+    /// one line that needs it.
+    ///
+    /// The source file named does not have to exist: the import is rejected for
+    /// the module, not for the file, so any name answers the question.
+    private static func acceptsPrivateImport(_ module: String, _ context: BuildContext) -> Bool {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("splice-doctor-\(UUID().uuidString)")
+        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil
+        else { return true }
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let probe = directory.appendingPathComponent("Probe.swift")
+        guard (try? "@_private(sourceFile: \"Probe.swift\") @testable import \(module)\n"
+            .write(to: probe, atomically: true, encoding: .utf8)) != nil else { return true }
+
+        var arguments = ["-typecheck", "-Onone",
+                         "-target", context.targetTriple, "-sdk", context.sdkPath]
+        for path in context.moduleSearchPaths { arguments += ["-I", path] }
+        for path in context.frameworkSearchPaths { arguments += ["-F", path] }
+        arguments.append(probe.path)
+
+        let output = shell(context.swiftCompilerPath, arguments)
+        return !output.contains("was not compiled for private import")
+    }
+
     private static func shell(_ executable: String, _ arguments: [String]) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        // Merged: a diagnostic this reads -- "was not compiled for private
+        // import" -- arrives on stderr, and dropping it made the probe below
+        // report every project as configured.
+        process.standardError = pipe
         guard (try? process.run()) != nil else { return "" }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

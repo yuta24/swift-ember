@@ -5,18 +5,14 @@ import SwiftSyntax
 /// What one save turns into: declarations to replace in the running process,
 /// and declarations the patch has to bring with it.
 ///
-/// The second list is the one that is easy to misread. Nothing in the running
-/// binary can call a carried declaration -- either it is `private`, and so
-/// invisible to the patch module and to everything outside its file, or it is
-/// new, and so did not exist when the binary was linked. Carrying one changes
-/// no layout and displaces nothing; it only gives the replaced bodies something
-/// to call.
+/// Nothing in the running binary can call a carried declaration: it did not
+/// exist when that binary was linked. Carrying one changes no layout and
+/// displaces nothing; it only gives the replaced bodies something to call.
 public struct PatchPlan: Sendable {
     /// Bound to the original's replacement key by the Swift runtime.
     public let replacements: [PatchableDeclaration]
-    /// Emitted into the patch under their own names. Swift resolves a reference
-    /// from a replaced body to these rather than to the originals, which for a
-    /// `private` declaration is the only copy the patch module can see at all.
+    /// Declarations the edit introduced, emitted into the patch under their own
+    /// names so a replaced body can call them.
     public let carried: [PatchableDeclaration]
 
     public init(replacements: [PatchableDeclaration], carried: [PatchableDeclaration]) {
@@ -36,9 +32,16 @@ public enum ChangeClassification: Sendable {
 /// applied to a running process.
 ///
 /// The rule is deliberately narrow: nothing outside the indexed declarations
-/// may differ, every surviving declaration must keep its signature, and every
-/// consequence of an edit must land somewhere this tool can reach. Anything
-/// else is a rebuild. An over-conservative false negative costs a rebuild; a
+/// may differ, every surviving declaration must keep its signature, and a
+/// declaration that disappeared is a rebuild. Anything else is a rebuild.
+///
+/// It used to be much longer. Reaching a `private` declaration meant carrying a
+/// copy in the patch and replacing every caller, which needed a call-graph
+/// closure and three guards around the ways a copy can be reached, or not
+/// reached, by something the analysis could not see. Two reviews found ten
+/// defects in that, every one of them a consequence of copying. Under
+/// `-enable-private-imports` a private declaration has a replacement key like
+/// any other and is simply replaced, and all of it went away. An over-conservative false negative costs a rebuild; a
 /// false positive corrupts a running process, so the asymmetry is the whole
 /// design (PRD.md FR-4).
 public enum ChangeClassifier {
@@ -61,44 +64,27 @@ public enum ChangeClassifier {
         let beforeKeys = identities(before)
         let afterKeys = identities(after)
 
-        // Declarations the patch will emit under their own names, keyed by
-        // identity so the two closures below can grow the set without emitting
-        // anything twice.
-        var carried: [String: PatchableDeclaration] = [:]
-        var replacements: [String: PatchableDeclaration] = [:]
-
-        // A declaration that disappeared is a rebuild, with one exception: a
-        // file-local one that nothing in the file names any more. Its original
-        // stays in the binary, unreferenced and unreachable, which is what
-        // makes renaming a private helper -- a removal and an addition -- an
-        // ordinary edit rather than a rebuild.
-        let removedKeys = beforeKeys.subtracting(afterKeys)
-        for identity in removedKeys.sorted() {
-            guard let gone = before.local[identity] else {
-                return .rebuildRequired(reason: "the set of declarations changed: removed \(identity)")
-            }
-            if mentioned(gone.simpleName, in: after) {
-                return .rebuildRequired(reason: "\(identity) was removed but something still refers to \(gone.simpleName)")
-            }
+        if let removed = beforeKeys.subtracting(afterKeys).sorted().first {
+            return .rebuildRequired(reason: "the set of declarations changed: removed \(removed)")
         }
 
         // A declaration that appeared is carried rather than replaced: there is
         // no key to bind it to, and nothing that could already be calling it.
+        var carried: [PatchableDeclaration] = []
         for identity in afterKeys.subtracting(beforeKeys).sorted() {
             if let unsupported = after.unsupported[identity] {
                 return .rebuildRequired(reason: "\(identity) was added: \(unsupported.reason)")
             }
-            guard let declaration = after.patchable[identity] ?? after.local[identity] else {
+            guard let declaration = after.patchable[identity] else {
                 return .rebuildRequired(reason: "\(identity) was added and this index does not model it")
             }
             guard declaration.carryable else {
                 return .rebuildRequired(reason: "\(identity) was added; an override or an @objc member cannot be added by a patch, because an extension is not where it would have to go")
             }
-            carried[identity] = declaration
+            carried.append(declaration)
         }
 
         for (identity, old) in before.unsupported {
-            if removedKeys.contains(identity) { continue }
             guard let new = after.unsupported[identity] else {
                 return .rebuildRequired(reason: "\(identity) changed kind")
             }
@@ -107,118 +93,15 @@ public enum ChangeClassifier {
             }
         }
 
+        var replacements: [PatchableDeclaration] = []
         for (identity, old) in before.patchable {
-            if removedKeys.contains(identity) { continue }
             guard let new = after.patchable[identity] else {
                 return .rebuildRequired(reason: "\(identity) changed kind")
             }
             if old.signature != new.signature {
                 return .rebuildRequired(reason: "\(identity): the signature changed, which is ABI-relevant")
             }
-            if old.body != new.body { replacements[identity] = new }
-        }
-
-        var changedLocal: [PatchableDeclaration] = []
-        for (identity, old) in before.local {
-            if removedKeys.contains(identity) { continue }
-            guard let new = after.local[identity] else {
-                return .rebuildRequired(reason: "\(identity) changed kind")
-            }
-            if old.signature != new.signature {
-                return .rebuildRequired(reason: "\(identity): the signature changed, which is ABI-relevant")
-            }
-            if old.body != new.body {
-                changedLocal.append(new)
-                carried[identity] = new
-            }
-        }
-
-        if replacements.isEmpty && carried.isEmpty { return .noChange }
-
-        // Everything that calls a changed file-local declaration has to be
-        // replaced or carried too, or the old copy stays live for those callers
-        // and the same function means two things at once.
-        var pending = changedLocal
-        var closed: Set<String> = []
-        while let declaration = pending.popLast() {
-            let name = declaration.simpleName
-            guard closed.insert(name).inserted else { continue }
-
-            if after.residueMentions.contains(name) {
-                return .rebuildRequired(reason: "\(name) changed, and it is used outside any declaration this tool can replace, such as an initialiser, a stored property's initial value, or a top-level statement")
-            }
-            for (identity, candidate) in after.unsupported where candidate.mentions.contains(name) {
-                return .rebuildRequired(reason: "\(name) changed, and \(identity) uses it: \(candidate.reason)")
-            }
-            for (identity, candidate) in after.patchable
-            where identity != declaration.identity && candidate.mentions.contains(name) {
-                replacements[identity] = candidate
-            }
-            for (identity, candidate) in after.local
-            where identity != declaration.identity && candidate.mentions.contains(name)
-                && carried[identity] == nil {
-                carried[identity] = candidate
-                pending.append(candidate)
-            }
-        }
-
-        // Every body the patch emits has to be able to name what it calls, and
-        // a `private` declaration is not something `@testable import` can hand
-        // it. Before this, editing any body that called a private helper
-        // produced a patch that failed at COMPILE with "cannot find X in scope".
-        var queue = Array(replacements.values) + Array(carried.values)
-        while let declaration = queue.popLast() {
-            for (identity, candidate) in after.local
-            where identity != declaration.identity && carried[identity] == nil
-                && declaration.mentions.contains(candidate.simpleName) {
-                carried[identity] = candidate
-                queue.append(candidate)
-            }
-        }
-
-        // The guards below run here, on the finished sets, and not where they
-        // were first written --- above the two closures. Up there they saw only
-        // what the diff put in `carried` directly, and missed everything the
-        // closures added, which is most of it.
-        let carriedLocals = carried.values.filter { after.local[$0.identity] != nil }
-
-        // A file-local declaration can also be reached through a witness table,
-        // which is not a syntactic reference and so is invisible to the name
-        // analysis. Swift only permits that when the protocol is itself
-        // file-local (see `FileIndex.hasFileLocalProtocol`), so refusing that
-        // whole file is enough and costs nothing anywhere else.
-        if after.hasFileLocalProtocol && !carriedLocals.isEmpty {
-            return .rebuildRequired(reason: "the file declares a private protocol, so a file-local declaration may be reached through a witness table rather than by name")
-        }
-
-        // A carried copy lives in an extension, where it is statically
-        // dispatched. If the name is overridden anywhere in the file, a
-        // replaced caller that used to reach the subclass's version through the
-        // vtable would reach the copy instead --- measured as a process quietly
-        // running the base class's implementation while the tool reported a
-        // successful reload.
-        for declaration in carriedLocals.sorted(by: { $0.identity < $1.identity })
-        where after.overriddenNames.contains(declaration.simpleName) {
-            return .rebuildRequired(reason: "\(declaration.simpleName) is overridden in this file, and a copy carried into an extension would not be")
-        }
-
-        // A body the patch emits may not name a file-local declaration there is
-        // no way to carry: a stored property, a type, a typealias, an `@objc`
-        // member. The patch would fail at COMPILE against generated source the
-        // developer never wrote, blaming their file for it.
-        // Sorted, both of them. Iterating the dictionaries and the mention set
-        // in whatever order they came out meant two runs of the same input
-        // blamed different names for the same refusal, which is not something a
-        // developer should have to reproduce.
-        if !after.uncarryableLocalNames.isEmpty {
-            let emitted = (Array(replacements.values) + Array(carried.values))
-                .sorted { $0.identity < $1.identity }
-            for declaration in emitted {
-                for name in declaration.mentions.sorted()
-                where after.uncarryableLocalNames.contains(name) {
-                    return .rebuildRequired(reason: "\(declaration.displayName) uses \(name), which is private and cannot be replaced or copied into a patch")
-                }
-            }
+            if old.body != new.body { replacements.append(new) }
         }
 
         // A patch that replaces nothing would load and do nothing observable,
@@ -229,19 +112,12 @@ public enum ChangeClassifier {
         if replacements.isEmpty { return .noChange }
 
         return .hotPatch(PatchPlan(
-            replacements: replacements.values.sorted { $0.identity < $1.identity },
-            carried: carried.values.sorted { $0.identity < $1.identity }))
+            replacements: replacements.sorted { $0.identity < $1.identity },
+            carried: carried.sorted { $0.identity < $1.identity }))
     }
 
     private static func identities(_ index: FileIndex) -> Set<String> {
-        Set(index.patchable.keys).union(index.local.keys).union(index.unsupported.keys)
-    }
-
-    private static func mentioned(_ name: String, in index: FileIndex) -> Bool {
-        if index.residueMentions.contains(name) { return true }
-        if index.patchable.values.contains(where: { $0.mentions.contains(name) }) { return true }
-        if index.local.values.contains(where: { $0.mentions.contains(name) }) { return true }
-        return index.unsupported.values.contains { $0.mentions.contains(name) }
+        Set(index.patchable.keys).union(index.unsupported.keys)
     }
 }
 
@@ -252,12 +128,24 @@ public enum ChangeClassifier {
 /// something eventually --- an ownership modifier, a global actor, a where
 /// clause --- and the failure would be silent. Copying the node cannot.
 public enum ReplacementGenerator {
+    /// `privateImportOf` is the name of the source file being patched, and is
+    /// passed only when that file declares something `private` or
+    /// `fileprivate`.
+    ///
+    /// `@_private(sourceFile:)` is what lets the patch name a file-local
+    /// declaration at all, and it requires the module to have been built with
+    /// `-enable-private-imports`. Emitting it only where it is needed means a
+    /// project that has not added that setting keeps working for every file
+    /// without private code, rather than failing everywhere at once.
     public static func generate(module: String, generation: UInt64,
-                                plan: PatchPlan, imports: [String] = []) throws -> String {
+                                plan: PatchPlan, imports: [String] = [],
+                                privateImportOf sourceFile: String? = nil) throws -> String {
+        let moduleImport = sourceFile.map { "@_private(sourceFile: \"\($0)\") @testable import \(module)" }
+            ?? "@testable import \(module)"
         var lines: [String] = [
             "// Generated by swift-splice for generation \(generation). Do not edit.",
             "",
-            "@testable import \(module)",
+            moduleImport,
         ]
 
         // The original file's imports, minus one that would duplicate the
@@ -280,9 +168,8 @@ public enum ReplacementGenerator {
         // compiler will need them and a human reading the patch sees what the
         // replacements below are calling.
         if !plan.carried.isEmpty {
-            lines.append("// Carried into the patch: private declarations the patch module cannot")
-            lines.append("// otherwise name, and declarations that did not exist when the app was")
-            lines.append("// built. Nothing already running can reach these.")
+            lines.append("// Carried into the patch: declarations that did not exist when the app")
+            lines.append("// was built, so nothing already running can reach them.")
             lines.append(contentsOf: try emit(plan.carried) { try copy($0) })
         }
 
@@ -340,13 +227,8 @@ public enum ReplacementGenerator {
                           recovery: .rebuild)
     }
 
-    /// A carried declaration keeps its own name, and its access level with it.
-    ///
-    /// Keeping the name is what makes the whole approach work without rewriting
-    /// call sites: a replaced body that says `discount(cents)` resolves to the
-    /// copy in the patch, because the original is `private` and the patch module
-    /// cannot see it. Renaming would mean rewriting every reference, and getting
-    /// that wrong where a local variable shadows the name would be silent.
+    /// A carried declaration keeps its own name, and its access level with it,
+    /// so a replaced body calls it exactly as the edited source does.
     private static func copy(_ declaration: PatchableDeclaration) throws -> String {
         if var function = declaration.node.as(FunctionDeclSyntax.self) {
             function.modifiers = strip(function.modifiers)

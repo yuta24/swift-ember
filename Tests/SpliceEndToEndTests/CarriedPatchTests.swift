@@ -57,9 +57,17 @@ let order = Order()
                  before: ["1000"], after: ["1025"])
 }
 
-@Test func aRenamedPrivateHelperWorks() {
-    expectReload(order, order.replacingOccurrences(of: "discount", with: "reduction"),
-                 before: ["1000"], after: ["1000"])
+/// Renaming is a removal and an addition, and a removal is a rebuild: the
+/// original stays in the binary and nothing can say what still calls it.
+/// Allowing it needed a reference analysis that only existed to serve the carry
+/// route, and went with it.
+@Test func aRenamedPrivateHelperIsARebuild() {
+    do {
+        _ = try Loop.run(baseline: order, current: order.replacingOccurrences(of: "discount", with: "reduction"))
+        Issue.record("expected the classifier to refuse a rename")
+    } catch {
+        #expect("\(error)".contains("removed"))
+    }
 }
 
 @Test func anAddedHelperIsCallableFromAPatchedBody() {

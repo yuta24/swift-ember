@@ -133,18 +133,17 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
     #expect(reason.contains("@inlinable"))
 }
 
-/// Nothing in the baseline calls `secret()`, so changing it changes nothing a
-/// running process could observe. The edit is real and is not lost: the
-/// baseline only advances when a patch lands, so it is still pending when the
-/// call that uses it arrives. `CarriedDeclarationTests` covers the case where
-/// something does call it.
-@Test func aPrivateChangeNothingCallsIsNoChange() {
+/// A `private` declaration is replaced like any other under
+/// `-enable-private-imports`, whether or not anything in the file calls it: it
+/// has a replacement key of its own, so there is no caller analysis to do.
+@Test func aPrivateBodyChangeIsHotPatchable() {
     let current = bodyEdit(baseline, "private func secret() -> Int { value }",
                            "private func secret() -> Int { value * 2 }")
-    guard case .noChange = ChangeClassifier.classify(baseline: baseline, current: current) else {
-        Issue.record("expected noChange")
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: baseline, current: current) else {
+        Issue.record("expected hotPatch")
         return
     }
+    #expect(plan.replacements.map(\.displayName) == ["Price.secret()"])
 }
 
 @Test func addedImportRequiresRebuild() {

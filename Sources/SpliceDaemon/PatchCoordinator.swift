@@ -226,9 +226,12 @@ public actor PatchCoordinator {
         do {
             let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
-                try ReplacementGenerator.generate(module: module,
-                                                  generation: next, plan: plan,
-                                                  imports: imports)
+                try ReplacementGenerator.generate(
+                    module: module, generation: next, plan: plan, imports: imports,
+                    // Only when the file has private code to reach. A project
+                    // without -enable-private-imports then keeps working for
+                    // everything else, instead of failing on every save.
+                    privateImportOf: currentIndex.declaresFileLocal ? url.lastPathComponent : nil)
             }
 
             let artifact = try compiler.compile(source: source, generation: next, timeline: timeline)

@@ -65,9 +65,9 @@ enum Loop {
             throw Failure.notHotPatchable(classification)
         }
 
-        let generated = try ReplacementGenerator.generate(module: module, generation: 1,
-                                                          plan: plan,
-                                                          imports: currentIndex.imports)
+        let generated = try ReplacementGenerator.generate(
+            module: module, generation: 1, plan: plan, imports: currentIndex.imports,
+            privateImportOf: currentIndex.declaresFileLocal ? "App.swift" : nil)
         let patchSource = work.appendingPathComponent("Patch.swift")
         try generated.write(to: patchSource, atomically: true, encoding: .utf8)
 
@@ -106,6 +106,7 @@ enum Loop {
         var arguments = ["swiftc", "-parse-as-library", "-Onone",
                          "-enable-testing",
                          "-Xfrontend", "-enable-implicit-dynamic",
+                         "-Xfrontend", "-enable-private-imports",
                          "-module-name", module,
                          "-emit-module", "-emit-module-path",
                          directory.appendingPathComponent("\(module).swiftmodule").path,

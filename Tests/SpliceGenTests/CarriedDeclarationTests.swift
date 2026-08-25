@@ -1,9 +1,8 @@
 import Testing
 @testable import SpliceGen
 
-/// What the classifier does with the three edits it used to refuse: an
-/// `override` body, a declaration that did not exist in the build, and a
-/// `private` one.
+/// What the classifier does with the edits it used to refuse: an `override`
+/// body, a declaration that did not exist in the build, and a `private` one.
 ///
 /// The toolchain half of each is pinned in `fixtures/Cases`. These pin the
 /// decision and the source that comes out of it; `SpliceEndToEndTests` pins
@@ -88,6 +87,10 @@ final class Detail: Screen {
 }
 
 // MARK: - Private declarations
+//
+// Under `-enable-private-imports` these are ordinary replacements. Everything
+// below was a refusal, or a carried copy with a guard around it, until the
+// patch could simply name them.
 
 private let withPrivateHelper = """
 private func discount(_ cents: Int) -> Int { cents }
@@ -98,95 +101,159 @@ struct Order {
 }
 """
 
-@Test func aPrivateChangeReplacesItsCallers() throws {
+@Test func aPrivateFunctionIsReplacedLikeAnyOther() throws {
     let current = withPrivateHelper.replacingOccurrences(
         of: "private func discount(_ cents: Int) -> Int { cents }",
         with: "private func discount(_ cents: Int) -> Int { cents - 100 }")
     guard let plan = plan(withPrivateHelper, current) else { return }
 
-    // The caller's own body did not change. It is replaced anyway, because
-    // that is the only way the new implementation reaches anything: replacing
-    // some callers and not others would leave two versions live at once.
-    #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
-    #expect(plan.carried.map(\.displayName) == ["discount(_:) (Int)"])
+    // Only the declaration that changed. Its caller is untouched -- and still
+    // sees the new implementation, because the replacement is bound at the key
+    // the caller already goes through. A carried copy needed every caller
+    // replaced along with it, and three guards to be sure that was possible.
+    #expect(plan.replacements.map(\.displayName) == ["discount(_:) (Int)"])
+    #expect(plan.carried.isEmpty)
 
+    let source = try ReplacementGenerator.generate(module: "M", generation: 1, plan: plan,
+                                                   privateImportOf: "Order.swift")
+    #expect(source.contains(#"@_private(sourceFile: "Order.swift") @testable import M"#))
+    #expect(source.contains("@_dynamicReplacement(for: discount(_:))"))
+}
+
+@Test func theImportIsOnlyPrivateWhenTheFileHasPrivateCode() throws {
+    let plain = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { "\\(cents)" }
+    }
+    """
+    #expect(DeclarationIndexer.index(source: plain).declaresFileLocal == false)
+    #expect(DeclarationIndexer.index(source: withPrivateHelper).declaresFileLocal == true)
+
+    let current = plain.replacingOccurrences(of: #"{ "\#\(cents)" }"#, with: #"{ "x\#\(cents)" }"#)
+    guard let plan = plan(plain, current) else { return }
     let source = try ReplacementGenerator.generate(module: "M", generation: 1, plan: plan)
-    // Carried under its own name and its own access level: a replaced body
-    // that says `discount(cents)` then resolves to this copy, because the
-    // original is invisible to the patch module.
-    #expect(source.contains("private func discount(_ cents: Int) -> Int { cents - 100 }"))
-    #expect(source.contains("@_dynamicReplacement(for: total())"))
+    #expect(source.contains("@testable import M"))
+    #expect(!source.contains("@_private"))
 }
 
-/// The bug this machinery also fixes. Only the internal body changed; the
-/// private helper it calls did not. Without carrying the helper the patch
-/// failed at COMPILE with "cannot find 'discount' in scope", which is what
-/// editing any body that called a private helper used to do.
-@Test func aPatchedBodyCarriesThePrivateHelpersItCalls() throws {
-    let current = withPrivateHelper.replacingOccurrences(
-        of: #"{ "\(discount(cents))" }"#, with: #"{ "total \(discount(cents))" }"#)
-    guard let plan = plan(withPrivateHelper, current) else { return }
-    #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
-    #expect(plan.carried.map(\.displayName) == ["discount(_:) (Int)"])
-}
-
-@Test func aPrivateChangeReachedFromAnInitialiserIsRefused() {
+/// A default argument compiles into a generator function of its own. A carried
+/// copy was invisible to it and the edit changed nothing while reporting
+/// success; a replacement is bound at the key, so the generator finds it.
+@Test func aPrivateHelperInADefaultArgumentIsPatchable() {
     let baseline = """
-    private func discount(_ cents: Int) -> Int { cents }
-
-    struct Order {
-        var cents: Int
-        init() { cents = discount(1000) }
-        func total() -> String { "\\(cents)" }
+    private func base() -> Int { 10 }
+    struct Cart {
+        func total(_ n: Int = base()) -> Int { n }
     }
     """
-    let current = baseline.replacingOccurrences(of: "{ cents }", with: "{ cents - 100 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("discount"))
-    #expect(reason.contains("initialiser"))
+    let current = baseline.replacingOccurrences(of: "-> Int { 10 }", with: "-> Int { 20 }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.simpleNameForTest) == ["base"])
 }
 
-@Test func aPrivateChangeReachedFromAStoredPropertyIsRefused() {
+/// A body that reads private storage is the shape that decides reach in real
+/// code, and it was the largest single cause of refusals.
+@Test func aBodyReadingAPrivateStoredPropertyIsPatchable() {
     let baseline = """
-    private func discount(_ cents: Int) -> Int { cents }
-
-    struct Order {
-        var cents = discount(1000)
-        func total() -> String { "\\(cents)" }
+    struct Cart {
+        private var cents = 100
+        func total() -> Int { cents }
     }
     """
-    let current = baseline.replacingOccurrences(of: "{ cents }", with: "{ cents - 100 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("discount"))
+    let current = baseline.replacingOccurrences(of: "{ cents }", with: "{ cents + 1 }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Cart.total()"])
 }
 
-@Test func aFileWithAPrivateProtocolWillNotCarry() {
+@Test func aMemberOfAPrivateTypeIsPatchable() throws {
+    let baseline = """
+    private struct Helper {
+        func compute() -> Int { 1 }
+    }
+    struct Cart { func total() -> Int { Helper().compute() } }
+    """
+    let current = baseline.replacingOccurrences(of: "func compute() -> Int { 1 }",
+                                                with: "func compute() -> Int { 2 }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Helper.compute()"])
+
+    let source = try ReplacementGenerator.generate(module: "M", generation: 1, plan: plan,
+                                                   privateImportOf: "Helper.swift")
+    #expect(source.contains("extension Helper {"))
+}
+
+@Test func aMemberOfAPrivateExtensionIsPatchable() {
+    let baseline = """
+    struct Cart { var cents = 1 }
+    private extension Cart {
+        func fee() -> Int { 1 }
+    }
+    """
+    let current = baseline.replacingOccurrences(of: "func fee() -> Int { 1 }",
+                                                with: "func fee() -> Int { 5 }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Cart.fee()"])
+}
+
+/// A fileprivate member overridden in the same file. Carrying a copy put it in
+/// an extension, where it is statically dispatched, and the subclass's version
+/// silently stopped running. Replacement binds at the key the vtable already
+/// points at.
+@Test func anOverriddenFileLocalMemberIsPatchable() {
+    let baseline = """
+    class Base {
+        fileprivate func tick() -> String { "base" }
+        func run() -> String { "run " + tick() }
+    }
+    class Sub: Base {
+        override fileprivate func tick() -> String { "sub" }
+    }
+    """
+    let current = baseline.replacingOccurrences(of: #""sub""#, with: #""SUB""#)
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Sub.tick()"])
+}
+
+@Test func aWitnessOfAPrivateProtocolIsPatchable() {
     let baseline = """
     private protocol Rule { func check() -> Bool }
 
-    struct Order {
-        private func discount() -> Int { 0 }
-        func total() -> String { "\\(discount())" }
+    struct Impl: Rule {
+        private func check() -> Bool { true }
     }
     """
-    let current = baseline.replacingOccurrences(of: "{ 0 }", with: "{ 100 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("witness table"))
+    let current = baseline.replacingOccurrences(of: "{ true }", with: "{ false }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Impl.check()"])
 }
 
-@Test func aPrivateHelperCanBeRenamed() throws {
-    let current = withPrivateHelper
-        .replacingOccurrences(of: "discount", with: "reduction")
-    guard let plan = plan(withPrivateHelper, current) else { return }
-    #expect(plan.carried.map(\.simpleName) == ["reduction"])
-    #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
+/// `private(set)` restricts the setter and leaves the declaration as visible as
+/// it was written. Reading the keyword without its detail once filed it as
+/// file-local, and a `private(set)` property nothing else named classified as
+/// `noChange` -- a real edit, silently dropped.
+@Test func privateSetIsNotFileLocal() throws {
+    let baseline = """
+    class Store {
+        var storage = 0
+        private(set) var total: Int {
+            get { storage }
+            set { storage = newValue }
+        }
+    }
+    """
+    #expect(DeclarationIndexer.index(source: baseline).declaresFileLocal == false)
+    let current = baseline.replacingOccurrences(of: "get { storage }", with: "get { storage * 2 }")
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.replacements.map(\.displayName) == ["Store.total"])
 }
 
-@Test func aRemovedPrivateHelperStillInUseIsRefused() {
+@Test func aRemovedDeclarationIsStillARebuild() {
     let current = withPrivateHelper
         .replacingOccurrences(of: "private func discount(_ cents: Int) -> Int { cents }\n", with: "")
+        .replacingOccurrences(of: #"{ "\#\(discount(cents))" }"#, with: #"{ "\#\(cents)" }"#)
     guard let reason = refusal(withPrivateHelper, current) else { return }
-    #expect(reason.contains("discount"))
+    #expect(reason.contains("removed"))
 }
 
 // MARK: - Added declarations
@@ -207,7 +274,7 @@ struct Order {
     """
     guard let plan = plan(baseline, current) else { return }
     #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
-    #expect(plan.carried.map(\.simpleName) == ["dollars"])
+    #expect(plan.carried.map(\.simpleNameForTest) == ["dollars"])
 
     let source = try ReplacementGenerator.generate(module: "M", generation: 1, plan: plan)
     #expect(source.contains("func dollars(_ cents: Int) -> String"))
@@ -218,24 +285,22 @@ struct Order {
 /// reported as a reload. The edit is not lost: the baseline only advances when
 /// a patch lands, so the addition is still pending when the call arrives.
 @Test func anAddedHelperNothingCallsIsPending() {
-    let baseline = """
-    struct Order {
-        func total() -> String { "x" }
-    }
-    """
-    let current = """
-    struct Order {
-        func total() -> String { "x" }
-        func dollars() -> String { "y" }
-    }
-    """
+    let baseline = "struct Order {\n    func total() -> String { \"x\" }\n}"
+    let current = "struct Order {\n    func total() -> String { \"x\" }\n    func dollars() -> String { \"y\" }\n}"
     guard case .noChange = ChangeClassifier.classify(baseline: baseline, current: current) else {
         Issue.record("expected noChange")
         return
     }
 }
 
-// MARK: - Comments
+@Test func addingAnOverrideIsARebuild() {
+    let baseline = #"class B { func f() -> String { "x" } }\#nclass C: B { }"#
+    let current = #"class B { func f() -> String { "x" } }\#nclass C: B { override func f() -> String { "y" } }"#
+    guard let reason = refusal(baseline, current) else { return }
+    #expect(reason.contains("override"))
+}
+
+// MARK: - What the comparison key must and must not see
 
 @Test func addingACommentIsNotAChange() {
     let baseline = """
@@ -259,176 +324,6 @@ struct Order {
         return
     }
 }
-
-@Test func aCommentInsideABodyIsNotAChangeEither() {
-    let baseline = #"struct S { func f() -> String { "x" } }"#
-    let current = """
-    struct S {
-        func f() -> String {
-            // explain the thing
-            "x"
-        }
-    }
-    """
-    guard case .noChange = ChangeClassifier.classify(baseline: baseline, current: current) else {
-        Issue.record("expected noChange")
-        return
-    }
-}
-
-// MARK: - Where carrying is not allowed
-//
-// Every case below was found by review after the carry path was written, and
-// each one is a way for a carried copy to be reached, or not reached, by
-// something the name analysis does not see.
-
-/// A carried copy sits in an extension, where it is statically dispatched. If
-/// the name is overridden in the file, a replaced caller reaches the copy
-/// instead of the subclass's version --- measured as a process quietly running
-/// the base class's implementation while the reload was reported as successful.
-@Test func aFileLocalMemberOverriddenInTheFileIsNotCarried() {
-    let baseline = """
-    class Base {
-        fileprivate func tick() -> String { "base" }
-        func run() -> String { "run " + tick() }
-    }
-    class Sub: Base {
-        override fileprivate func tick() -> String { "sub" }
-    }
-    """
-    let current = baseline.replacingOccurrences(of: #""run ""#, with: #""RUN ""#)
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("tick"))
-    #expect(reason.contains("overridden"))
-}
-
-/// A default argument compiles into a generator function of its own, which no
-/// patch replaces. Changing a private helper called from one used to report a
-/// successful reload and change nothing.
-@Test func aPrivateHelperInADefaultArgumentIsRefused() {
-    let baseline = """
-    private func base() -> Int { 10 }
-    struct Cart {
-        func total(_ n: Int = base()) -> Int { n }
-        func run() -> Int { total() }
-    }
-    """
-    let current = baseline.replacingOccurrences(of: "-> Int { 10 }", with: "-> Int { 20 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("base"))
-}
-
-/// A patch cannot name a `private` stored property, and there is no copy to
-/// name instead: a copy would be separate storage, not the same bytes. This has
-/// to be refused while the reason is still legible, rather than emitted and
-/// left to fail at COMPILE against source the developer never wrote.
-@Test func aPrivateStoredPropertyReadByAPatchedBodyIsRefused() {
-    let baseline = """
-    struct Cart {
-        private var cents = 100
-        func total() -> Int { cents }
-    }
-    """
-    let current = baseline.replacingOccurrences(of: "{ cents }", with: "{ cents + 1 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("cents"))
-    #expect(reason.contains("private"))
-}
-
-/// A member of a `private extension` is file-local without saying so. Reading
-/// only its own modifiers filed it as patchable, claiming a replacement key it
-/// does not have.
-@Test func aPrivateExtensionMemberIsCarried() throws {
-    let baseline = """
-    struct Cart { var cents = 1 }
-    private extension Cart {
-        func fee() -> Int { 1 }
-    }
-    extension Cart { func total() -> Int { cents + fee() } }
-    """
-    let current = baseline.replacingOccurrences(of: "func fee() -> Int { 1 }",
-                                                with: "func fee() -> Int { 5 }")
-    guard let plan = plan(baseline, current) else { return }
-    #expect(plan.carried.map(\.simpleName) == ["fee"])
-    #expect(plan.replacements.map(\.displayName) == ["Cart.total()"])
-}
-
-/// A file-local type is diverted whole into the residue, so an edit inside one
-/// is refused by the residue comparison at the top of `classify` rather than by
-/// any of the guards below it.
-///
-/// Asserting the reason is the point. Written as a bare call that discarded the
-/// result, this passed while pinning nothing: a review found it was taking the
-/// generic residue path and not the carry-route-ends path its own comment
-/// claimed, so a regression in the latter would not have failed it.
-@Test func anEditInsideAPrivateTypeIsRefusedByTheResidue() {
-    let baseline = """
-    private struct Helper {
-        func compute() -> Int { 1 }
-    }
-    struct Cart { func total() -> Int { Helper().compute() } }
-    """
-    let current = baseline.replacingOccurrences(of: "func compute() -> Int { 1 }",
-                                                with: "func compute() -> Int { 2 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("outside a replaceable declaration"))
-}
-
-@Test func aBodyThatNamesAPrivateTypeIsRefused() {
-    let baseline = """
-    private struct Helper {
-        func compute() -> Int { 1 }
-    }
-    struct Cart { func total() -> Int { Helper().compute() } }
-    """
-    let current = baseline.replacingOccurrences(of: "{ Helper().compute() }",
-                                                with: "{ Helper().compute() + 1 }")
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("Helper"))
-}
-
-/// `private(set)` restricts the setter and leaves the declaration as visible as
-/// it was written, so it has a replacement key like any other computed
-/// property. Reading the keyword without its detail filed it as file-local, and
-/// a `private(set)` property nothing else in the file named then classified as
-/// `noChange` --- a real edit, silently dropped.
-@Test func privateSetIsNotFileLocal() throws {
-    let baseline = """
-    class Store {
-        var storage = 0
-        private(set) var total: Int {
-            get { storage }
-            set { storage = newValue }
-        }
-    }
-    """
-    let current = baseline.replacingOccurrences(of: "get { storage }", with: "get { storage * 2 }")
-    guard let plan = plan(baseline, current) else { return }
-    #expect(plan.replacements.map(\.displayName) == ["Store.total"])
-    #expect(plan.carried.isEmpty)
-}
-
-/// The witness-table guard used to run before the two closures that populate
-/// `carried`, so it only ever saw declarations the diff put there directly. A
-/// witness pulled in transitively --- because a replaced body happens to name it
-/// --- went straight past.
-@Test func theWitnessGuardSeesTransitivelyCarriedDeclarations() {
-    let baseline = """
-    private protocol Rule { func check() -> Bool }
-
-    struct Impl: Rule {
-        private func check() -> Bool { true }
-    }
-
-    func total() -> String { "x" }
-    """
-    let current = baseline.replacingOccurrences(of: #"func total() -> String { "x" }"#,
-                                                with: #"func total() -> String { Impl().check() ? "y" : "x" }"#)
-    guard let reason = refusal(baseline, current) else { return }
-    #expect(reason.contains("witness table"))
-}
-
-// MARK: - What the comparison key must and must not see
 
 /// Whitespace was collapsed in the printed source, which collapsed it inside
 /// string literals too, so this compared equal to its baseline and the save was
@@ -474,138 +369,11 @@ struct Order {
     #expect(plan.replacements.map(\.displayName) == ["S.run()"])
 }
 
-// MARK: - Facts the indexing walk cannot see
-//
-// The walk stops descending at a file-local type, at an `#if` block, and at a
-// function body, and summarises what is inside as residue. That is right for
-// deciding what changed and wrong for the facts the guards read: an `override`
-// is still an override wherever it is written. Each of these was measured
-// reaching a running process and displacing a subclass's implementation while
-// the reload reported success.
-
-private func hidden(_ wrapper: (String) -> String) -> String {
-    """
-    class Base {
-        fileprivate func tag() -> String { "base" }
-        func describe() -> String { "tag=\\(tag())" }
+private extension PatchableDeclaration {
+    /// The bare declared name, recovered from the display name for assertions.
+    var simpleNameForTest: String {
+        let head = displayName.split(separator: " ").first.map(String.init) ?? displayName
+        let last = head.split(separator: ".").last.map(String.init) ?? head
+        return last.split(separator: "(").first.map(String.init) ?? last
     }
-    \(wrapper("""
-    final class Sub: Base {
-        override fileprivate func tag() -> String { "sub" }
-    }
-    """))
-    """
-}
-
-private func refuseHiddenOverride(_ source: String, sourceLocation: SourceLocation = #_sourceLocation) {
-    let current = source.replacingOccurrences(of: #""tag=\#\(tag())""#, with: #""TAG=\#\(tag())""#)
-    #expect(current != source, "fixture did not apply", sourceLocation: sourceLocation)
-    guard case .rebuildRequired(let reason) = ChangeClassifier.classify(baseline: source, current: current) else {
-        Issue.record("expected rebuildRequired", sourceLocation: sourceLocation)
-        return
-    }
-    #expect(reason.contains("tag"), sourceLocation: sourceLocation)
-}
-
-@Test func anOverrideInsideAFileLocalTypeIsSeen() {
-    refuseHiddenOverride(hidden { "private enum NS {\n\($0)\n}" })
-}
-
-@Test func anOverrideInsideAConditionalBlockIsSeen() {
-    refuseHiddenOverride(hidden { "#if canImport(Foundation)\n\($0)\n#endif" })
-}
-
-@Test func anOverrideInsideAFunctionBodyIsSeen() {
-    refuseHiddenOverride(hidden { "func make() -> Base {\n\($0)\n    return Sub()\n}" })
-}
-
-@Test func anOverrideInAPlainNamespaceIsSeen() {
-    refuseHiddenOverride(hidden { "enum NS {\n\($0)\n}" })
-}
-
-// MARK: - File-local declarations the carry route never reached
-//
-// Every one of these is a way to be `private` and not end up in `local`. The
-// index used to list the ways and kept missing one, so the set is now derived
-// by subtraction: declared file-local, and not carried.
-
-private func refuseMention(_ baseline: String, _ current: String, naming name: String,
-                           sourceLocation: SourceLocation = #_sourceLocation) {
-    guard case .rebuildRequired(let reason) = ChangeClassifier.classify(baseline: baseline, current: current) else {
-        Issue.record("expected rebuildRequired", sourceLocation: sourceLocation)
-        return
-    }
-    #expect(reason.contains(name), "reason was: \(reason)", sourceLocation: sourceLocation)
-}
-
-/// A call site spells an operator with an operator token, not an identifier.
-/// Collecting only identifiers left a private operator invisible to the guards,
-/// and the patch silently rebound the call to a generic overload.
-@Test func aPrivateOperatorIsSeenAtItsCallSite() {
-    let baseline = """
-    infix operator <+>: AdditionPrecedence
-    func <+> <T>(a: T, b: T) -> String { "generic" }
-    struct Money { var cents = 0 }
-    private func <+> (a: Money, b: Money) -> String { "cents=\\(a.cents + b.cents)" }
-    struct Till {
-        func total(_ a: Money, _ b: Money) -> String { a <+> b }
-    }
-    """
-    refuseMention(baseline, baseline.replacingOccurrences(of: "{ a <+> b }", with: #"{ "total " + (a <+> b) }"#),
-                  naming: "<+>")
-}
-
-@Test func aPrivateOpaqueReturningHelperIsSeen() {
-    let baseline = """
-    struct Box {
-        private func rows() -> some Sequence<Int> { [1, 2] }
-        func show() -> String { "\\(Array(rows()))" }
-    }
-    """
-    refuseMention(baseline, baseline.replacingOccurrences(of: #"{ "\#\(Array(rows()))" }"#,
-                                                          with: #"{ "rows \#\(Array(rows()))" }"#),
-                  naming: "rows")
-}
-
-@Test func aPrivateCommaSeparatedBindingIsSeen() {
-    let baseline = """
-    struct Box {
-        private var lo = 1, hi = 9
-        func span() -> Int { hi - lo }
-    }
-    """
-    // `hi`, not `lo`: the guard reports the first matching mention in sorted
-    // order, which is what makes the message reproducible.
-    refuseMention(baseline, baseline.replacingOccurrences(of: "{ hi - lo }", with: "{ hi - lo + 1 }"),
-                  naming: "hi")
-}
-
-@Test func twoPrivateDeclarationsCollidingOnOneIdentityAreSeen() {
-    let baseline = """
-    struct Box {
-        private static func format(_ v: Int) -> String { "s\\(v)" }
-        private func format(_ v: Int) -> String { "i\\(v)" }
-        func show() -> String { format(1) }
-    }
-    """
-    refuseMention(baseline, baseline.replacingOccurrences(of: "{ format(1) }", with: "{ format(2) }"),
-                  naming: "format")
-}
-
-/// `extension Helper` carries no `private` of its own, but extending a private
-/// type gives its members that access level all the same --- and the patch
-/// writes `extension Helper {` around them, naming a type it cannot see.
-@Test func anExtensionOfAPrivateTypeIsSeen() {
-    let baseline = """
-    private struct Helper {
-        func compute() -> Int { 1 }
-    }
-    extension Helper {
-        func f() -> Int { 1 }
-    }
-    struct Cart { func total() -> Int { Helper().f() } }
-    """
-    refuseMention(baseline, baseline.replacingOccurrences(of: "func f() -> Int { 1 }",
-                                                          with: "func f() -> Int { 2 }"),
-                  naming: "Helper")
 }

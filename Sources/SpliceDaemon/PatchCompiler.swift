@@ -51,6 +51,10 @@ public struct PatchCompiler: Sendable {
         let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)
         guard result.exitCode == 0 else {
             timeline.record(stage, since: start, success: false)
+            if let explanation = Self.explain(result.combinedOutput) {
+                throw SpliceError(stage: stage, subject: subject,
+                                  reason: explanation, recovery: .rebuild)
+            }
             throw SpliceError(stage: stage, subject: subject,
                               reason: trim(result.combinedOutput), recovery: recovery)
         }
@@ -91,6 +95,31 @@ public struct PatchCompiler: Sendable {
                           "-Xlinker", "-bundle_loader", "-Xlinker", target]
         }
         return arguments
+    }
+
+    /// One compiler diagnostic is really a build setting, and says so nowhere.
+    ///
+    /// A patch reaches `private` declarations through `@_private(sourceFile:)`,
+    /// which the module has to have been built for. Left untranslated, a
+    /// project missing the setting is shown an error about generated source it
+    /// never wrote, at a line it cannot open.
+    static func explain(_ output: String) -> String? {
+        guard output.contains("was not compiled for private import") else { return nil }
+        return [
+            "this module was not built for private imports, so the patch cannot reach its `private` declarations.",
+            "",
+            "Add the setting to the Debug configuration:",
+            "",
+            "    OTHER_SWIFT_FLAGS = $(inherited) -Xfrontend -enable-private-imports",
+            "",
+            "and to any local package's manifest, which Xcode does not pass OTHER_SWIFT_FLAGS into:",
+            "",
+            "    .unsafeFlags([\"-Xfrontend\", \"-enable-private-imports\"],",
+            "                 .when(configuration: .debug))",
+            "",
+            "Then rebuild: the daemon reads the built binary, so the setting has no",
+            "effect until the build it points at has been redone.",
+        ].joined(separator: "\n")
     }
 
     private func trim(_ output: String) -> String {
