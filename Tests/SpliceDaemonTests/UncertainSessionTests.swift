@@ -71,7 +71,7 @@ private func harness(answering answer: @escaping @Sendable () -> LoadPatchResult
     #expect(await runtime.connect(), "the fake runtime never connected", sourceLocation: sourceLocation)
     try runtime.send(type: "hello", payload: Hello(
         buildIdentity: context.identity, moduleName: "Fixture",
-        processId: processId, loadedGenerations: []))
+        processId: processId, loadedGenerations: [], buildMatchesProcess: true))
     for _ in 0..<200 where server.currentSession == nil {
         try await Task.sleep(for: .milliseconds(20))
     }
@@ -240,4 +240,51 @@ private func edit(_ url: URL, to body: String) throws {
     }
     #expect(error.recovery == .rebuild)
     #expect(await h.coordinator.isUncertain == false)
+}
+
+/// The check the identity comparison could never make.
+///
+/// Module, triple, SDK and compiler version are all equal for a running app and
+/// for a newer build of the same sources, so the old comparison passed. The
+/// linker's UUID is not, and only the process can say which one it is running.
+@Test func aProcessRunningAnOlderBuildIsRefused() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+
+    h.runtime.responder = { envelope in
+        guard envelope.type == "loadPatch",
+              let request = try? envelope.decode(LoadPatchRequest.self) else { return nil }
+        // What the real runtime does: look for one of these among its own
+        // loaded images, and find none.
+        let matched = request.buildUUIDs.contains("00000000-0000-0000-0000-00000000FFFF")
+        let result: LoadPatchResult = matched
+            ? .loaded(generation: request.generation, durationMs: 1)
+            : .rejected(reason: "this process is not running the binary the patch was linked against")
+        return ("loadResult", try! JSONEncoder().encode(result))
+    }
+
+    try edit(h.subject, to: #""new""#)
+    guard case .rejected(let error) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the runtime's refusal to surface")
+        return
+    }
+    #expect(error.reason.contains("not running the binary"))
+    // Declined before anything was opened, so the session stays describable.
+    #expect(error.recovery == .rebuild)
+    #expect(await h.coordinator.isUncertain == false)
+}
+
+@Test func everyArchitectureSliceContributesAUUID() {
+    // A Simulator binary is universal and each slice has a different UUID.
+    // Reading only the first gave the x86_64 one while the process ran arm64,
+    // which would have refused every patch ever sent.
+    let uuids = BuildUUID.read(from: "/usr/bin/true")
+    #expect(!uuids.isEmpty)
+    #expect(Set(uuids).count == uuids.count, "slices must not report the same UUID")
+    for uuid in uuids {
+        #expect(UUID(uuidString: uuid) != nil, "not a UUID: \(uuid)")
+    }
+}
+
+@Test func aBinaryThatCannotBeReadContributesNoUUID() {
+    #expect(BuildUUID.read(from: "/nonexistent/binary").isEmpty)
 }

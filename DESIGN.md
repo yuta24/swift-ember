@@ -437,7 +437,26 @@ At minimum validate:
 -   target architecture,
 -   SDK family,
 -   Swift compiler identity,
--   language mode.
+-   language mode,
+-   the link target's Mach-O UUIDs.
+
+The last one is the only entry that separates two builds rather than two
+configurations, and it is the only one the runtime can check against the
+*process*. Everything above it is a string the daemon wrote into the
+session file and the runtime read back, so comparing them said nothing
+about the binary the process is executing. Measured: rebuild an app while
+it is running and every field above matched, so a patch linked against the
+new binary was applied to a process running the old one; with the UUIDs it
+is refused, naming the rebuild.
+
+Two details are load-bearing. A Simulator binary is universal and
+`dwarfdump --uuid` prints a different UUID per architecture slice, so the
+daemon sends all of them and the runtime matches whichever it is running
+--- taking the first gave the x86_64 slice's while the process ran arm64.
+And the daemon re-reads them whenever the binary's size or modification
+date changes, not once per session: the module inventory may be cached on
+the grounds that a rebuild means a relaunch, and this check exists
+precisely because it does not.
 
 ## 7. Change detection and classification
 

@@ -16,7 +16,18 @@ public enum Watch {
             // restart, and clearing on one would resume patching exactly the
             // process the flag exists to stop patching.
             Task { await coordinator.sessionDidConnect(processId: hello.processId) }
-            if hello.buildIdentity == context.identity {
+            if hello.buildIdentity == context.identity && !hello.buildMatchesProcess {
+                // The identity matched and the process still is not this build.
+                // Module, triple, SDK and compiler version are equal across
+                // rebuilds; only the linker UUID is not, and only the process
+                // can answer for it.
+                print("""
+                connected  pid \(hello.processId), but this is not the build being watched
+
+                  The app was built again after it launched, so patches would be
+                  linked against a binary it is not running. Relaunch it.
+                """)
+            } else if hello.buildIdentity == context.identity {
                 print("connected  pid \(hello.processId), \(hello.moduleName)")
             } else {
                 // Section 6.3: refuse to patch a process built differently from

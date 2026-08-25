@@ -19,6 +19,13 @@ public actor PatchCoordinator {
     private lazy var inventory = inventoryOverride
         ?? ModuleInventory.read(from: context.linkTarget)
     private let inventoryOverride: ModuleInventory?
+    /// Unlike the inventory, re-read whenever the binary changes.
+    ///
+    /// The inventory's excuse for caching -- a rebuild means a relaunch -- is
+    /// exactly what this check exists to disprove.
+    private let buildUUIDReader: BuildUUID
+    private let buildUUIDOverride: [String]?
+    private var buildUUIDs: [String] { buildUUIDOverride ?? buildUUIDReader.current() }
     /// Set when a patch may have been partly applied and cleared only by a
     /// fresh process.
     ///
@@ -56,7 +63,8 @@ public actor PatchCoordinator {
     /// thing.
     public init(context: BuildContext, server: IPCServer, workDirectory: URL,
                 deliver: (@Sendable (URL) throws -> URL)? = nil,
-                inventory: ModuleInventory? = nil) {
+                inventory: ModuleInventory? = nil,
+                buildUUIDs: [String]? = nil) {
         self.context = context
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
@@ -64,6 +72,8 @@ public actor PatchCoordinator {
         self.resolver = ModuleResolver(appModule: context.moduleName)
         self.deliverOverride = deliver
         self.inventoryOverride = inventory
+        self.buildUUIDOverride = buildUUIDs
+        self.buildUUIDReader = BuildUUID(binary: context.linkTarget)
     }
 
     private let deliverOverride: (@Sendable (URL) throws -> URL)?
@@ -95,7 +105,7 @@ public actor PatchCoordinator {
     public func announceSession() throws {
         container.invalidate()
         try container.writeSession(port: server.port, token: server.token,
-                                   buildIdentity: context.identity)
+                                   buildIdentity: context.identity, buildUUIDs: buildUUIDs)
     }
 
     public enum Outcome: Sendable {
@@ -250,6 +260,7 @@ public actor PatchCoordinator {
             let start = DispatchTime.now().uptimeNanoseconds
             let request = LoadPatchRequest(generation: next, path: delivered.path,
                                            buildIdentity: context.identity,
+                                           buildUUIDs: buildUUIDs,
                                            declarations: declarations.map(\.displayName))
             let result: LoadPatchResult
             do {
@@ -344,10 +355,12 @@ final class SimulatorContainer: @unchecked Sendable {
     /// The daemon publishes where to reach it into the app's own Documents
     /// directory. That is a path the runtime can always read, which a
     /// well-known host path is not.
-    func writeSession(port: UInt16, token: String, buildIdentity: String) throws {
+    func writeSession(port: UInt16, token: String, buildIdentity: String,
+                      buildUUIDs: [String]) throws {
         let documents = try dataContainer().appendingPathComponent("Documents", isDirectory: true)
         try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
-        let payload: [String: Any] = ["port": Int(port), "token": token, "buildIdentity": buildIdentity]
+        let payload: [String: Any] = ["port": Int(port), "token": token,
+                                      "buildIdentity": buildIdentity, "buildUUIDs": buildUUIDs]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: documents.appendingPathComponent("splice-session.json"))
     }

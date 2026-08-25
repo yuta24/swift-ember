@@ -376,6 +376,17 @@ This is the runtime half of `DESIGN.md` section 6.3. The daemon has
 always sent the identity; nothing checked it until the review that
 noticed the refusal path it feeds was unreachable.
 
+The identity MUST include something that distinguishes one build from
+another, and the runtime MUST check that part against the process rather
+than against the daemon. Module, target triple, SDK and compiler version
+are all equal for a running app and for a newer build of the same sources,
+so comparing them proved only that one daemon had written both strings.
+The link target's Mach-O UUIDs -- every architecture slice, since a
+Simulator binary is universal and each slice has its own -- are what the
+runtime looks for among its own loaded images. The daemon MUST re-read
+them whenever the binary changes rather than once per session: a rebuild
+with the app still running is the case this exists to catch.
+
 ### FR-4 Compatibility analysis
 
 Before loading a patch, the system MUST determine whether the change is

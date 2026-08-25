@@ -21,7 +21,7 @@ private func connectedRuntime(to server: IPCServer,
     let runtime = FakeRuntime(port: server.port)
     await runtime.connect()
     try runtime.send(type: "hello", payload: Hello(
-        buildIdentity: identity, moduleName: "Test", processId: 1, loadedGenerations: []))
+        buildIdentity: identity, moduleName: "Test", processId: 1, loadedGenerations: [], buildMatchesProcess: true))
 
     // The handshake is what makes the server willing to send anything.
     for _ in 0..<100 {
@@ -44,7 +44,7 @@ private func connectedRuntime(to server: IPCServer,
     }
 
     let request = LoadPatchRequest(generation: 3, path: "/tmp/x.dylib",
-                                   buildIdentity: "test-identity", declarations: ["A.f()"])
+                                   buildIdentity: "test-identity", buildUUIDs: [], declarations: ["A.f()"])
     let result = try await server.request(type: "loadPatch", payload: request,
                                           expecting: LoadPatchResult.self)
     guard case .loaded(let generation, _) = result else {
@@ -69,6 +69,7 @@ private func connectedRuntime(to server: IPCServer,
         _ = try await server.request(type: "loadPatch",
                                      payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
                                                                buildIdentity: "test-identity",
+                                                               buildUUIDs: [],
                                                                declarations: []),
                                      expecting: LoadPatchResult.self,
                                      timeout: .milliseconds(300))
@@ -88,7 +89,7 @@ private func connectedRuntime(to server: IPCServer,
         try await server.request(
             type: "loadPatch",
             payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
-                                      buildIdentity: "test-identity", declarations: []),
+                                      buildIdentity: "test-identity", buildUUIDs: [], declarations: []),
             expecting: LoadPatchResult.self,
             timeout: .seconds(30))
     }
@@ -113,7 +114,7 @@ private func connectedRuntime(to server: IPCServer,
     await #expect(throws: IPCServer.IPCError.self) {
         _ = try await server.request(type: "loadPatch",
                                      payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
-                                                               buildIdentity: "x", declarations: []),
+                                                               buildIdentity: "x", buildUUIDs: [], declarations: []),
                                      expecting: LoadPatchResult.self)
     }
 }
@@ -129,7 +130,7 @@ private func connectedRuntime(to server: IPCServer,
     var batch = Data()
     for index in 0..<3 {
         let hello = Hello(buildIdentity: "identity-\(index)", moduleName: "Test",
-                          processId: Int32(index), loadedGenerations: [])
+                          processId: Int32(index), loadedGenerations: [], buildMatchesProcess: true)
         batch.append(try Envelope(type: "hello", payload: hello).encodedLine())
     }
     runtime.sendRaw(batch)
@@ -149,7 +150,7 @@ private func connectedRuntime(to server: IPCServer,
     await runtime.connect()
 
     let line = try Envelope(type: "hello", payload: Hello(
-        buildIdentity: "split", moduleName: "Test", processId: 77, loadedGenerations: [])).encodedLine()
+        buildIdentity: "split", moduleName: "Test", processId: 77, loadedGenerations: [], buildMatchesProcess: true)).encodedLine()
     let cut = line.count / 2
     runtime.sendRaw(line.prefix(cut))
     try await Task.sleep(for: .milliseconds(100))
@@ -174,7 +175,7 @@ private func connectedRuntime(to server: IPCServer,
     await runtime.connect()
 
     var envelope = try Envelope(type: "hello", payload: Hello(
-        buildIdentity: "x", moduleName: "Test", processId: 1, loadedGenerations: []))
+        buildIdentity: "x", moduleName: "Test", processId: 1, loadedGenerations: [], buildMatchesProcess: true))
     envelope.protocolVersion = SpliceProtocol.version + 1
     runtime.sendRaw(try envelope.encodedLine())
 
@@ -241,7 +242,7 @@ private final class Reported: @unchecked Sendable {
     let result = try await server.request(
         type: "loadPatch",
         payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
-                                  buildIdentity: "second", declarations: []),
+                                  buildIdentity: "second", buildUUIDs: [], declarations: []),
         expecting: LoadPatchResult.self,
         timeout: .seconds(3))
     guard case .loaded = result else {
@@ -262,7 +263,7 @@ private final class Reported: @unchecked Sendable {
     var payload = Data("\n".utf8)
     payload.append(try Envelope(type: "hello", payload: Hello(
         buildIdentity: "after-blank", moduleName: "Test",
-        processId: 99, loadedGenerations: [])).encodedLine())
+        processId: 99, loadedGenerations: [], buildMatchesProcess: true)).encodedLine())
     runtime.sendRaw(payload)
 
     for _ in 0..<100 {

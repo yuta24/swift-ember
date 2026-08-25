@@ -14,12 +14,16 @@ final class SpliceClient: @unchecked Sendable {
         let port: Int
         let token: String
         let buildIdentity: String
+        let buildUUIDs: [String]
     }
 
     private let state: Splice.StateBox
     /// What the session file said this process was built as. Compared against
     /// every incoming patch.
     private var expectedBuildIdentity = ""
+    /// The link target's UUIDs, as the daemon read them off disk. Unlike the
+    /// identity above, this is checked against the process itself.
+    private var expectedBuildUUIDs: [String] = []
     private let queue = DispatchQueue(label: "dev.swift-splice.runtime")
     private var connection: NWConnection?
     private var buffer = Data()
@@ -74,6 +78,7 @@ final class SpliceClient: @unchecked Sendable {
         }
 
         expectedBuildIdentity = session.buildIdentity
+        expectedBuildUUIDs = session.buildUUIDs
 
         let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
         lock.withLock { self.connection = connection }
@@ -87,7 +92,9 @@ final class SpliceClient: @unchecked Sendable {
                     buildIdentity: session.buildIdentity,
                     moduleName: Bundle.main.bundleIdentifier ?? "unknown",
                     processId: ProcessInfo.processInfo.processIdentifier,
-                    loadedGenerations: self.state.generations), requestId: UUID().uuidString)
+                    loadedGenerations: self.state.generations,
+                    buildMatchesProcess: LoadedImages.running(oneOf: session.buildUUIDs)),
+                    requestId: UUID().uuidString)
                 self.receive(on: connection)
             case .waiting:
                 // The daemon is not listening. Network.framework would hold
@@ -176,6 +183,20 @@ final class SpliceClient: @unchecked Sendable {
                 """)
         }
 
+        // The check above compares two strings the daemon wrote. This one asks
+        // the process. Module, triple, SDK and compiler version are all equal
+        // for a running app and for a newer build of the same sources, which is
+        // exactly the pair that must not be confused -- the daemon links
+        // patches against what is on disk now, and this process is running what
+        // was on disk when it launched.
+        if !LoadedImages.running(oneOf: request.buildUUIDs) {
+            state.note("refused g\(request.generation): this process is a different build")
+            return .rejected(reason: """
+                this process is not running the binary the patch was linked against. \
+                It was built again after the app launched; relaunch it.
+                """)
+        }
+
         switch Splice.load(generation: request.generation, path: request.path) {
         case .loaded(let generation, let durationMs):
             let names = request.declarations.joined(separator: ", ")
@@ -204,7 +225,7 @@ final class SpliceClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 1
+let ProtocolVersion = 2
 
 struct Envelope: Codable {
     var protocolVersion: Int
@@ -222,12 +243,14 @@ struct Hello: Codable {
     var moduleName: String
     var processId: Int32
     var loadedGenerations: [UInt64]
+    var buildMatchesProcess: Bool
 }
 
 struct LoadPatchRequest: Codable {
     var generation: UInt64
     var path: String
     var buildIdentity: String
+    var buildUUIDs: [String]
     var declarations: [String]
 }
 
