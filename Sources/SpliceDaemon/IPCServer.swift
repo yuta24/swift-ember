@@ -7,8 +7,13 @@ import SpliceCore
 ///
 /// The daemon listens and the runtime dials in, which is what makes
 /// reconnection after an app relaunch fall out for free: a new process simply
-/// connects again. Loopback only, with a per-session token, so another local
-/// process cannot pose as the daemon (PRD.md section 12).
+/// connects again.
+///
+/// Loopback and a per-session token (PRD.md section 12). The token was
+/// generated and written into the session file from the beginning and read by
+/// nobody, so the comment that used to sit here described a check that did not
+/// exist. It does now: a connection that does not present it never becomes the
+/// session.
 public final class IPCServer: @unchecked Sendable {
     public struct Session: Sendable {
         public let hello: Hello
@@ -241,6 +246,16 @@ public final class IPCServer: @unchecked Sendable {
         case "hello":
             guard let hello = try? envelope.decode(Hello.self) else {
                 onEvent?("could not read the runtime's hello; the two sides' protocol types have drifted")
+                return
+            }
+            // The session file lives in the app's own container, so presenting
+            // its token is evidence the connection came from the app. Without
+            // this, any local process could take the session and answer for it,
+            // and every patch after that would be reported as applied to a
+            // process that never saw it.
+            guard hello.token == token else {
+                onEvent?("refused a connection that did not present the session token")
+                lock.withLock { connection }?.cancel()
                 return
             }
             lock.withLock { session = Session(hello: hello, connectedAt: Date()) }

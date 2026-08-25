@@ -548,8 +548,14 @@ This is a local developer tool.
     the latter widens symbol visibility and is Debug-only.
 -   Release builds MUST NOT contain an active reload server by default.
 -   Remote network exposure MUST NOT be enabled by default.
--   The runtime SHOULD authenticate/validate the local host connection
-    if a network transport is used.
+-   The runtime MUST present the session token on connecting, and the
+    daemon MUST refuse a connection without it. Loopback is not an access
+    check: any local process can dial an ephemeral port, and the daemon
+    keeps one session at a time, so a second connection displaces the app.
+    Every patch after that is sent elsewhere and answered, and the tool
+    reports reloads that never reached the process --- which makes this a
+    correctness requirement before it is a security one. The token lives in
+    the session file, inside the application's own container.
 -   Patch loading MUST be scoped to the current development session.
 -   Unsupported changes MUST fail closed.
 

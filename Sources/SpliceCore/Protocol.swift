@@ -10,8 +10,10 @@ public enum SpliceProtocol {
     /// UUIDs, without which the runtime's identity check compared the
     /// daemon's own string against the daemon's own string. Version 3 added
     /// the count of replacements the loaded image registered, which is what
-    /// FR-13 rests on.
-    public static let version = 3
+    /// FR-13 rests on. Version 4 added the session token to the handshake,
+    /// which until then was generated, written into the session file, and
+    /// never looked at by either side.
+    public static let version = 4
     public static let defaultPort: UInt16 = 51_237
 }
 
@@ -50,6 +52,16 @@ public struct Envelope: Codable, Sendable {
 
 /// runtime -> daemon, once per connection.
 public struct Hello: Codable, Sendable {
+    /// The token from the session file, which the daemon wrote into this app's
+    /// own container.
+    ///
+    /// It proves the connection came from something that can read that
+    /// container. Loopback is not an access check: any local process can dial
+    /// an ephemeral port, and the daemon keeps one session at a time, so a
+    /// second connection displaces the app --- after which every patch is sent
+    /// somewhere else and answered, and the tool reports reloads that never
+    /// reached the process. That is the failure this is really about.
+    public var token: String
     public var buildIdentity: String
     public var moduleName: String
     public var processId: Int32
@@ -62,8 +74,9 @@ public struct Hello: Codable, Sendable {
     /// which says nothing about the process it is in.
     public var buildMatchesProcess: Bool
 
-    public init(buildIdentity: String, moduleName: String, processId: Int32,
+    public init(token: String, buildIdentity: String, moduleName: String, processId: Int32,
                 loadedGenerations: [UInt64], buildMatchesProcess: Bool) {
+        self.token = token
         self.buildIdentity = buildIdentity
         self.moduleName = moduleName
         self.processId = processId

@@ -70,6 +70,7 @@ private func harness(answering answer: @escaping @Sendable () -> LoadPatchResult
     // a flake reporting the opposite of the truth.
     #expect(await runtime.connect(), "the fake runtime never connected", sourceLocation: sourceLocation)
     try runtime.send(type: "hello", payload: Hello(
+        token: server.token,
         buildIdentity: context.identity, moduleName: "Fixture",
         processId: processId, loadedGenerations: [], buildMatchesProcess: true))
     for _ in 0..<200 where server.currentSession == nil {

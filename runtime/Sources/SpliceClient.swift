@@ -89,6 +89,7 @@ final class SpliceClient: @unchecked Sendable {
             case .ready:
                 self.state.setConnected(true)
                 self.send(type: "hello", payload: Hello(
+                    token: session.token,
                     buildIdentity: session.buildIdentity,
                     moduleName: Bundle.main.bundleIdentifier ?? "unknown",
                     processId: ProcessInfo.processInfo.processIdentifier,
@@ -225,7 +226,7 @@ final class SpliceClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 3
+let ProtocolVersion = 4
 
 struct Envelope: Codable {
     var protocolVersion: Int
@@ -239,6 +240,7 @@ struct Envelope: Codable {
 }
 
 struct Hello: Codable {
+    var token: String
     var buildIdentity: String
     var moduleName: String
     var processId: Int32

@@ -21,6 +21,7 @@ private func connectedRuntime(to server: IPCServer,
     let runtime = FakeRuntime(port: server.port)
     await runtime.connect()
     try runtime.send(type: "hello", payload: Hello(
+        token: server.token,
         buildIdentity: identity, moduleName: "Test", processId: 1, loadedGenerations: [], buildMatchesProcess: true))
 
     // The handshake is what makes the server willing to send anything.
@@ -129,7 +130,7 @@ private func connectedRuntime(to server: IPCServer,
 
     var batch = Data()
     for index in 0..<3 {
-        let hello = Hello(buildIdentity: "identity-\(index)", moduleName: "Test",
+        let hello = Hello(token: server.token, buildIdentity: "identity-\(index)", moduleName: "Test",
                           processId: Int32(index), loadedGenerations: [], buildMatchesProcess: true)
         batch.append(try Envelope(type: "hello", payload: hello).encodedLine())
     }
@@ -150,6 +151,7 @@ private func connectedRuntime(to server: IPCServer,
     await runtime.connect()
 
     let line = try Envelope(type: "hello", payload: Hello(
+        token: server.token,
         buildIdentity: "split", moduleName: "Test", processId: 77, loadedGenerations: [], buildMatchesProcess: true)).encodedLine()
     let cut = line.count / 2
     runtime.sendRaw(line.prefix(cut))
@@ -175,6 +177,7 @@ private func connectedRuntime(to server: IPCServer,
     await runtime.connect()
 
     var envelope = try Envelope(type: "hello", payload: Hello(
+        token: server.token,
         buildIdentity: "x", moduleName: "Test", processId: 1, loadedGenerations: [], buildMatchesProcess: true))
     envelope.protocolVersion = SpliceProtocol.version + 1
     runtime.sendRaw(try envelope.encodedLine())
@@ -262,6 +265,7 @@ private final class Reported: @unchecked Sendable {
 
     var payload = Data("\n".utf8)
     payload.append(try Envelope(type: "hello", payload: Hello(
+        token: server.token,
         buildIdentity: "after-blank", moduleName: "Test",
         processId: 99, loadedGenerations: [], buildMatchesProcess: true)).encodedLine())
     runtime.sendRaw(payload)
@@ -292,4 +296,38 @@ private final class Reported: @unchecked Sendable {
 
     // Either outcome is correct. What is not correct is never returning.
     do { _ = try await starting.value } catch { }
+}
+
+/// The token was generated, written into the session file, and read by nobody
+/// for the life of the project, while a comment claimed it stopped another
+/// local process posing as the app.
+///
+/// The harm is not mainly secrecy. The daemon keeps one session at a time, so a
+/// second connection displaces the app -- after which every patch is sent
+/// somewhere else and answered, and the tool reports reloads that never reached
+/// the process.
+@Test func aConnectionWithoutTheSessionTokenNeverBecomesTheSession() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let impostor = FakeRuntime(port: port)
+    #expect(await impostor.connect())
+    try impostor.send(type: "hello", payload: Hello(
+        token: "not-the-session-token", buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+
+    // Give the daemon a moment to read it and refuse.
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(server.currentSession == nil)
+
+    // And with nothing connected, a request never leaves the daemon -- the one
+    // failure that does not poison a session.
+    await #expect(throws: IPCServer.IPCError.notConnected) {
+        _ = try await server.request(type: "loadPatch",
+                                     payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
+                                                               buildIdentity: "id", buildUUIDs: [],
+                                                               declarations: []),
+                                     expecting: LoadPatchResult.self)
+    }
 }
