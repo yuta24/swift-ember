@@ -889,6 +889,34 @@ Candidate transports:
 
 MVP should optimize for observability rather than cleverness.
 
+### 11.1a What a connection is allowed to do before it proves itself
+
+Accepting a socket is not the same thing as becoming the session, and for most
+of this project's life it was.
+
+An incoming connection used to clear the session, fail every request in flight,
+and take the slot before a single byte was read. Measured against the sample
+app: a loop that opened and closed a TCP connection every 20 ms made four
+consecutive saves fail with "no app is connected", printed seventeen
+`connected` lines, and never printed `disconnected` --- because the eviction
+path did not go through the code that reports one. Anything on the machine
+could end a developer's session: a port scan, a stray `nc`, a second `watch`.
+The session token, added later, did not help: by the time a peer's `hello` is
+examined, the app has already been evicted.
+
+So a connection now carries its own buffer and nothing else until its `hello`
+presents the token. Only then does it supersede whatever held the session, in
+that order: the old socket is cancelled, what it was carrying is settled, the
+new session is announced.
+
+Two limits belong to the same change. A peer that never completes a message is
+dropped at one megabyte, and the newline search resumes where the last one
+stopped rather than re-scanning the whole accumulation --- 32 MiB of
+newline-free bytes cost 61 seconds at 100% of a core, on the same serial queue
+that fires reply handlers and request timeouts, so a half-millisecond save
+became a 32-second stall and then a poisoned session. The same flood now costs
+3 ms.
+
 ### 11.2 Protocol
 
 Messages SHOULD be versioned:
@@ -1835,7 +1863,7 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   181/181
+local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   184/184
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```

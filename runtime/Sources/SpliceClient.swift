@@ -67,9 +67,15 @@ final class SpliceClient: @unchecked Sendable {
         lock.withLock { self.connection }?.cancel()
         lock.withLock { self.connection = nil; self.buffer = Data() }
 
+        // `UInt16(_:)` rather than `UInt16(exactly:)` was a trap on a value read
+        // off disk: a session file saying `"port": 70000` killed the app from a
+        // background queue on the retry timer, with an assertion failure and no
+        // other explanation. Every other malformed input on this path -- missing
+        // file, corrupt JSON, wrong shape -- already degrades to a retry.
         guard let data = try? Data(contentsOf: sessionURL),
               let session = try? JSONDecoder().decode(Session.self, from: data),
-              let port = NWEndpoint.Port(rawValue: UInt16(session.port))
+              let number = UInt16(exactly: session.port),
+              let port = NWEndpoint.Port(rawValue: number)
         else {
             // No daemon has announced itself yet. Keep looking; the developer
             // may start `swift-splice watch` after the app.
@@ -134,7 +140,15 @@ final class SpliceClient: @unchecked Sendable {
                 buffer = buffer[buffer.index(after: index)...]
                 return line
             }
-            guard let line, !line.isEmpty else { return }
+            // A blank line is not the end of the buffer: skip it and keep
+            // draining. Returning here left every message queued behind it
+            // waiting for the next read, which between saves may never come --
+            // measured as a reply that arrived only when six seconds of
+            // unrelated traffic dislodged it, long after the daemon had timed
+            // out and ended the session. The daemon's own drain loop was fixed
+            // for this and carries the same comment; this one was missed.
+            guard let line else { return }
+            if line.isEmpty { continue }
             handle(line)
         }
     }
@@ -145,7 +159,17 @@ final class SpliceClient: @unchecked Sendable {
             return
         }
         guard envelope.protocolVersion == ProtocolVersion else {
+            // Answered, not dropped. The rule two branches down -- never leave a
+            // request unanswered -- applies here too, and this was the one case
+            // that broke it: the daemon waited out its full ten-second timeout
+            // and then reported "the app did not answer" for a runtime that had
+            // understood the problem immediately and could say so.
             state.note("daemon speaks protocol \(envelope.protocolVersion), this runtime speaks \(ProtocolVersion)")
+            send(type: "loadResult",
+                 payload: LoadPatchResult.failed(
+                    stage: "LOAD",
+                    message: "the runtime speaks protocol \(ProtocolVersion) and the daemon speaks \(envelope.protocolVersion); upgrade one side"),
+                 requestId: envelope.requestId)
             return
         }
 

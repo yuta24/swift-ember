@@ -26,13 +26,15 @@ public final class IPCServer: @unchecked Sendable {
     private var stopped = false
     /// Set while `start()` is waiting, so `stop()` can settle it.
     private var startupFinish: (@Sendable (Result<UInt16, Error>) -> Void)?
-    private var connection: NWConnection?
-    /// Bumped on every accept. `NWConnection.cancel()` is graceful, so a
-    /// superseded socket can finish tearing down long after its replacement is
-    /// live; the tag is how a late teardown knows it is no longer current.
+    /// Every accepted socket, authenticated or not, keyed by the id given at
+    /// accept. `NWConnection.cancel()` is graceful, so a superseded socket can
+    /// finish tearing down long after its replacement is live; the id is how a
+    /// late teardown knows which peer it belongs to.
+    private var peers: [UInt64: Peer] = [:]
     private var connectionGeneration: UInt64 = 0
+    /// The one peer that has presented the token. Only this one is sent to.
+    private var sessionPeer: UInt64?
     private var session: Session?
-    private var buffer = Data()
     private var pending: [String: CheckedContinuation<Envelope, Error>] = [:]
 
     /// Valid once `start()` has returned.
@@ -137,40 +139,74 @@ public final class IPCServer: @unchecked Sendable {
         pendingStart?(.failure(StartupError.cancelledBeforeReady))
 
         listener.cancel()
-        lock.withLock { connection }?.cancel()
+        for peer in lock.withLock({ Array(peers.values) }) { peer.connection.cancel() }
+        lock.withLock { peers.removeAll(); sessionPeer = nil; session = nil }
         failAllPending(IPCError.disconnected)
     }
 
     // MARK: - Connection lifecycle
 
-    private func accept(_ incoming: NWConnection) {
-        // One runtime at a time. A second connection means the app relaunched,
-        // so the newer one wins.
-        let generation: UInt64 = lock.withLock {
-            connection?.cancel()
-            connection = incoming
-            connectionGeneration += 1
-            session = nil
-            buffer = Data()
-            return connectionGeneration
+    /// One accepted socket, with its own buffer.
+    ///
+    /// Per connection rather than one shared buffer, because a connection that
+    /// has not authenticated is now allowed to exist alongside the session --
+    /// and two streams framed against one buffer would interleave.
+    /// Unchecked because every field is only ever touched under the server's
+    /// own lock, the same discipline the fields it replaced had.
+    private final class Peer: @unchecked Sendable {
+        let id: UInt64
+        let connection: NWConnection
+        var buffer = Data()
+        /// How far into `buffer` the newline search has already looked.
+        ///
+        /// Without it every read re-scanned the whole accumulation: 32 MiB of
+        /// newline-free bytes cost 61 seconds at 100% of a core, on the same
+        /// serial queue that fires reply handlers and request timeouts, so a
+        /// half-millisecond save became a 32-second stall and then a poisoned
+        /// session.
+        var scanned = 0
+
+        init(id: UInt64, connection: NWConnection) {
+            self.id = id
+            self.connection = connection
         }
-        // The socket being replaced will never answer. Its teardown is now a
-        // no-op for the current generation, so this is the only place left
-        // that can settle what it was carrying; without it a request waits out
-        // the full timeout while `watch`, which awaits each save in turn,
-        // stalls for that whole window.
-        failAllPending(IPCError.disconnected)
+    }
+
+    /// The largest a single message may be before the connection is dropped.
+    ///
+    /// A peer that never sends a newline would otherwise grow this buffer until
+    /// the machine gave out. Every real message is a few hundred bytes; the
+    /// largest carries a list of declaration names.
+    private static let messageLimit = 1 << 20
+
+    private func accept(_ incoming: NWConnection) {
+        // Accepting is no longer the same thing as becoming the session.
+        //
+        // It used to be: an incoming connection cleared `session`, failed every
+        // request in flight, and took the slot before a single byte was read.
+        // So any local process -- a port scan, a stray `nc`, a second `watch`
+        // -- ended the developer's session and produced "relaunch the app" for
+        // an app that was healthy and mid-answer. The token check happened far
+        // too late to prevent it. Nothing here touches the session now; the
+        // hello does, once it proves it came from the app.
+        let peer: Peer = lock.withLock {
+            connectionGeneration += 1
+            let peer = Peer(id: connectionGeneration, connection: incoming)
+            peers[peer.id] = peer
+            return peer
+        }
+
         incoming.stateUpdateHandler = { [weak self] state in
             switch state {
-            case .cancelled, .failed: self?.handleDisconnect(generation)
+            case .cancelled, .failed: self?.handleDisconnect(peer.id)
             default: break
             }
         }
         incoming.start(queue: queue)
-        receive(on: incoming, generation: generation)
+        receive(on: peer)
     }
 
-    /// Only the current connection's teardown counts.
+    /// Only the session's own teardown counts.
     ///
     /// Without the tag, an app that crashed mid-patch and then relaunched could
     /// have its old socket finish cancelling *after* the new one had said
@@ -178,47 +214,65 @@ public final class IPCServer: @unchecked Sendable {
     /// request. The daemon then reported "no app is connected" for every
     /// subsequent save, permanently, because the runtime only sends hello on
     /// connect and its socket was perfectly healthy.
-    private func handleDisconnect(_ generation: UInt64) {
-        let had = lock.withLock { () -> Bool? in
-            guard generation == connectionGeneration else { return nil }
-            let had = session != nil
+    private func handleDisconnect(_ id: UInt64) {
+        let wasSession = lock.withLock { () -> Bool in
+            peers[id] = nil
+            guard sessionPeer == id else { return false }
+            sessionPeer = nil
             session = nil
-            return had
+            return true
         }
-        guard let had else { return }
+        guard wasSession else { return }
 
         // Anything still in flight will never be answered by a socket that is
         // gone. Leaving those continuations suspended is what turned an app
         // crash into a permanently wedged daemon.
         failAllPending(IPCError.disconnected)
-        if had { onDisconnect?() }
+        onDisconnect?()
     }
 
-    private func receive(on connection: NWConnection, generation: UInt64) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
+    private func receive(on peer: Peer) {
+        peer.connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            // Bytes from a superseded socket must not land in the current
-            // buffer, where they would be framed against someone else's stream.
-            guard self.lock.withLock({ generation == self.connectionGeneration }) else { return }
+            // Bytes from a socket that has already gone must not be framed
+            // against a buffer nobody is reading.
+            guard self.lock.withLock({ self.peers[peer.id] != nil }) else { return }
 
             if let data, !data.isEmpty {
-                self.lock.withLock { self.buffer.append(data) }
-                self.drainLines()
+                let overflowed = self.lock.withLock { () -> Bool in
+                    peer.buffer.append(data)
+                    return peer.buffer.count > Self.messageLimit
+                }
+                if overflowed {
+                    self.onEvent?("dropped a connection that sent \(Self.messageLimit) bytes without a complete message")
+                    peer.connection.cancel()
+                    self.handleDisconnect(peer.id)
+                    return
+                }
+                self.drainLines(from: peer)
             }
             if isComplete || error != nil {
-                self.handleDisconnect(generation)
+                self.handleDisconnect(peer.id)
                 return
             }
-            self.receive(on: connection, generation: generation)
+            self.receive(on: peer)
         }
     }
 
-    private func drainLines() {
+    private func drainLines(from peer: Peer) {
         while true {
             let line: Data? = lock.withLock {
-                guard let index = buffer.firstIndex(of: 0x0A) else { return nil }
-                let line = buffer[buffer.startIndex..<index]
-                buffer = buffer[buffer.index(after: index)...]
+                // Resume the search where the last one stopped: everything
+                // before `scanned` has already been looked at and holds no
+                // newline.
+                let searchStart = peer.buffer.index(peer.buffer.startIndex, offsetBy: peer.scanned)
+                guard let index = peer.buffer[searchStart...].firstIndex(of: 0x0A) else {
+                    peer.scanned = peer.buffer.count
+                    return nil
+                }
+                let line = peer.buffer[peer.buffer.startIndex..<index]
+                peer.buffer = peer.buffer[peer.buffer.index(after: index)...]
+                peer.scanned = 0
                 return Data(line)
             }
             // A blank line is not the end of the buffer: skip it and keep
@@ -226,11 +280,11 @@ public final class IPCServer: @unchecked Sendable {
             // read that may never come.
             guard let line else { return }
             if line.isEmpty { continue }
-            handle(line: line)
+            handle(line: line, from: peer)
         }
     }
 
-    private func handle(line: Data) {
+    private func handle(line: Data, from peer: Peer) {
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: line) else {
             onEvent?("ignored an unparseable message")
             return
@@ -239,6 +293,13 @@ public final class IPCServer: @unchecked Sendable {
             // Section 11.2: a version mismatch fails with a clear diagnostic
             // rather than by misreading the payload.
             onEvent?("protocol version \(envelope.protocolVersion) from the runtime, expected \(SpliceProtocol.version); upgrade one side")
+            // And settles whatever was waiting on it. Dropping the reply left
+            // the request to burn its whole ten-second timeout and then fail as
+            // "the app did not answer", which ends the session -- for a runtime
+            // that answered at once, and whose answer said exactly what was
+            // wrong. The diagnostic and the outcome should not disagree.
+            settle(envelope.requestId,
+                   with: .failure(IPCError.versionMismatch(envelope.protocolVersion)))
             return
         }
 
@@ -255,10 +316,32 @@ public final class IPCServer: @unchecked Sendable {
             // process that never saw it.
             guard hello.token == token else {
                 onEvent?("refused a connection that did not present the session token")
-                lock.withLock { connection }?.cancel()
+                peer.connection.cancel()
+                handleDisconnect(peer.id)
                 return
             }
-            lock.withLock { session = Session(hello: hello, connectedAt: Date()) }
+            // Authenticated, so this peer becomes the session and whatever held
+            // it before is superseded. The order matters: the old socket goes
+            // first, then anything it was carrying is settled, and only then is
+            // the new session announced.
+            let superseded: (peer: Peer, hadSession: Bool)? = lock.withLock {
+                guard let previous = sessionPeer, previous != peer.id,
+                      let old = peers[previous] else {
+                    sessionPeer = peer.id
+                    session = Session(hello: hello, connectedAt: Date())
+                    return nil
+                }
+                peers[previous] = nil
+                sessionPeer = peer.id
+                let hadSession = session != nil
+                session = Session(hello: hello, connectedAt: Date())
+                return (old, hadSession)
+            }
+            if let superseded {
+                superseded.peer.connection.cancel()
+                failAllPending(IPCError.disconnected)
+                if superseded.hadSession { onDisconnect?() }
+            }
             onConnect?(hello)
         default:
             settle(envelope.requestId, with: .success(envelope))
@@ -286,12 +369,20 @@ public final class IPCServer: @unchecked Sendable {
         case disconnected
         /// The request was sent and nothing came back in time.
         case timedOut
+        /// The request was sent and the answer was in a protocol this daemon
+        /// does not read.
+        case versionMismatch(Int)
+        /// The request could not be handed to the socket.
+        case sendFailed(String)
 
         public var description: String {
             switch self {
             case .notConnected: "no app is connected"
             case .disconnected: "the app went away before answering"
             case .timedOut: "the app did not answer"
+            case .versionMismatch(let version):
+                "the app speaks protocol \(version) and this daemon speaks \(SpliceProtocol.version); upgrade one side"
+            case .sendFailed(let reason): "the request could not be sent: \(reason)"
             }
         }
     }
@@ -326,7 +417,12 @@ public final class IPCServer: @unchecked Sendable {
     /// silently stopped the daemon from processing anything else.
     public func request<P: Codable, R: Codable>(type: String, payload: P, expecting: R.Type,
                                                 timeout: Duration = .seconds(10)) async throws -> R {
-        guard let connection = lock.withLock({ self.connection }), currentSession != nil else {
+        // One snapshot: the connection and the session it belongs to have to
+        // be the same peer, and read separately they need not be.
+        guard let connection = lock.withLock({ () -> NWConnection? in
+            guard let id = sessionPeer, session != nil else { return nil }
+            return peers[id]?.connection
+        }) else {
             throw IPCError.notConnected
         }
 
@@ -342,8 +438,17 @@ public final class IPCServer: @unchecked Sendable {
             }
 
             do {
-                connection.send(content: try envelope.encodedLine(),
-                                completion: .contentProcessed { _ in })
+                let line = try envelope.encodedLine()
+                connection.send(content: line, completion: .contentProcessed { [weak self] error in
+                    // Discarded, this used to be. A request sent into a
+                    // cancelled socket failed instantly and silently, and the
+                    // caller waited out the whole timeout to be told "the app
+                    // did not answer" -- which ends the session, where a send
+                    // failure does not.
+                    guard let error else { return }
+                    self?.settle(envelope.requestId,
+                                 with: .failure(IPCError.sendFailed("\(error)")))
+                })
             } catch {
                 settle(envelope.requestId, with: .failure(error))
             }

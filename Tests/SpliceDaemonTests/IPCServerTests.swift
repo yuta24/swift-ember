@@ -323,11 +323,143 @@ private final class Reported: @unchecked Sendable {
 
     // And with nothing connected, a request never leaves the daemon -- the one
     // failure that does not poison a session.
-    await #expect(throws: IPCServer.IPCError.notConnected) {
+    do {
         _ = try await server.request(type: "loadPatch",
                                      payload: LoadPatchRequest(generation: 1, path: "/tmp/x",
                                                                buildIdentity: "id", buildUUIDs: [],
                                                                declarations: []),
                                      expecting: LoadPatchResult.self)
+        Issue.record("expected notConnected")
+    } catch {
+        #expect("\(error)" == "\(IPCServer.IPCError.notConnected)")
+    }
+}
+
+// MARK: - What an unauthenticated connection may and may not do
+
+/// Accepting a socket used to be the same thing as becoming the session: the
+/// incoming connection cleared `session` and failed every request in flight
+/// before a single byte was read. A port scan, a stray `nc`, or a second
+/// `watch` therefore ended the developer's session -- measured against the real
+/// sample app as four consecutive saves failing with "no app is connected", and
+/// no `disconnected` line to explain why.
+@Test func aSilentConnectionDoesNotEvictTheApp() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+    try app.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(server.currentSession != nil)
+
+    let intruder = FakeRuntime(port: port)
+    #expect(await intruder.connect())
+    try await Task.sleep(for: .milliseconds(400))
+
+    #expect(server.currentSession != nil, "a connection that said nothing took the session")
+    #expect(server.currentSession?.hello.processId == 1)
+}
+
+/// The same, for a peer that speaks but cannot prove it is the app.
+@Test func aBadTokenDoesNotEvictTheApp() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+    try app.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    try await Task.sleep(for: .milliseconds(300))
+
+    let impostor = FakeRuntime(port: port)
+    #expect(await impostor.connect())
+    try impostor.send(type: "hello", payload: Hello(
+        token: "wrong", buildIdentity: "id", moduleName: "M",
+        processId: 2, loadedGenerations: [], buildMatchesProcess: true))
+    try await Task.sleep(for: .milliseconds(400))
+
+    #expect(server.currentSession?.hello.processId == 1, "an impostor took the session")
+}
+
+/// A peer that never completes a message used to grow the daemon's buffer
+/// without bound *and* re-scan all of it on every read -- 32 MiB cost 61 seconds
+/// at 100% of a core, on the same serial queue that fires reply handlers and
+/// request timeouts. A half-millisecond save became a 32-second stall and then a
+/// poisoned session.
+@Test func aFloodOfHeaderlessBytesDoesNotStallTheDaemon() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+    app.responder = { envelope in
+        guard envelope.type == "loadPatch" else { return nil }
+        let result = LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1)
+        return ("loadResult", try! JSONEncoder().encode(result))
+    }
+    try app.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    try await Task.sleep(for: .milliseconds(300))
+
+    let flood = FakeRuntime(port: port)
+    #expect(await flood.connect())
+    let chunk = Data(repeating: 0x41, count: 1 << 20)
+    for _ in 0..<8 { flood.sendRaw(chunk) }
+
+    let start = DispatchTime.now().uptimeNanoseconds
+    let request = LoadPatchRequest(generation: 1, path: "/tmp/x", buildIdentity: "id",
+                                   buildUUIDs: [], declarations: ["A.f()"])
+    _ = try await server.request(type: "loadPatch", payload: request,
+                                 expecting: LoadPatchResult.self, timeout: .seconds(20))
+    let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+    #expect(ms < 2000, "the flood stalled the daemon for \(Int(ms)) ms")
+    #expect(server.currentSession != nil, "the flood took the session")
+}
+
+/// A reply the daemon cannot read is settled at once. Dropping it left the
+/// request to burn its whole timeout and then fail as "the app did not answer",
+/// which ends the session -- for a runtime that answered immediately and whose
+/// answer said exactly what was wrong.
+@Test func aReplyAtTheWrongProtocolVersionFailsImmediately() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+    try app.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    try await Task.sleep(for: .milliseconds(300))
+
+    // Answers with a stale protocol version, by hand: FakeRuntime's own `send`
+    // always stamps the current one.
+    app.responder = { [weak app] envelope in
+        guard envelope.type == "loadPatch" else { return nil }
+        var line = Data(#"{"protocolVersion":1,"type":"loadResult","requestId":"#.utf8)
+        line.append(Data("\"\(envelope.requestId)\",\"payload\":\"e30=\"}\n".utf8))
+        app?.sendRaw(line)
+        return nil
+    }
+
+    let request = LoadPatchRequest(generation: 1, path: "/tmp/x", buildIdentity: "id",
+                                   buildUUIDs: [], declarations: [])
+    let start = DispatchTime.now().uptimeNanoseconds
+    do {
+        _ = try await server.request(type: "loadPatch", payload: request,
+                                     expecting: LoadPatchResult.self, timeout: .seconds(10))
+        Issue.record("expected the request to fail")
+    } catch {
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        #expect(ms < 1000, "waited \(Int(ms)) ms for an answer it could never read")
+        #expect("\(error)".contains("upgrade one side"), "was: \(error)")
     }
 }

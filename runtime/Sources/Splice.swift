@@ -119,6 +119,10 @@ public enum Splice {
             let copy: Status = lock.withLock {
                 status.connected = connected
                 status.lines.append(connected ? "connected to the daemon" : "waiting for the daemon")
+                // The same cap `note` applies. Without it this array grew by one
+                // entry a second for as long as no daemon was running, and every
+                // update copied the whole of it.
+                if status.lines.count > 8 { status.lines.removeFirst() }
                 return status
             }
             onUpdate?(copy)

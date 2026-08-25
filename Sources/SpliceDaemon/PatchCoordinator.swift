@@ -169,8 +169,15 @@ public actor PatchCoordinator {
         switch error {
         case IPCServer.IPCError.timedOut, IPCServer.IPCError.disconnected:
             true            // sent; the outcome is unknown
-        case IPCServer.IPCError.notConnected:
+        case IPCServer.IPCError.notConnected,
+             IPCServer.IPCError.sendFailed:
             false           // never left the daemon
+        case IPCServer.IPCError.versionMismatch:
+            // The two sides cannot read each other, so the request was not
+            // understood and nothing was applied. Saying "relaunch the app"
+            // here would be both wrong and unhelpful: what is needed is a
+            // matching runtime.
+            false
         default:
             true            // an unrecognised failure around the send
         }
@@ -283,8 +290,19 @@ public actor PatchCoordinator {
             }
 
             switch result {
-            case .loaded(_, _, let registered):
+            case .loaded(let echoed, _, let registered):
                 timeline.record(.load, since: start, success: true)
+                // The generation came back for a reason. A runtime answering
+                // about a different one is not a runtime whose answer about
+                // this one means anything -- and it was being discarded, so a
+                // reply naming g999999 was reported as a successful reload of
+                // g1.
+                guard echoed == next else {
+                    throw poison(SpliceError(
+                        stage: .register, subject: url.lastPathComponent,
+                        reason: "asked the app to load g\(next) and it answered about g\(echoed)",
+                        recovery: .restart))
+                }
                 // FR-13. `dlopen` returning a handle says the image mapped, not
                 // that the Swift runtime bound anything in it. The count comes
                 // from the image's own replacement section -- the same one the

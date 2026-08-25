@@ -56,11 +56,15 @@ public struct Hello: Codable, Sendable {
     /// own container.
     ///
     /// It proves the connection came from something that can read that
-    /// container. Loopback is not an access check: any local process can dial
-    /// an ephemeral port, and the daemon keeps one session at a time, so a
-    /// second connection displaces the app --- after which every patch is sent
-    /// somewhere else and answered, and the tool reports reloads that never
-    /// reached the process. That is the failure this is really about.
+    /// container, which a process dialling a loopback port blindly cannot. That
+    /// is the case worth closing: without it, anything that connected could
+    /// answer for the app, and the tool would report reloads that never reached
+    /// the process.
+    ///
+    /// It is not a secret. The session file is world-readable to the developer's
+    /// own processes, so anything determined enough to look can present it. The
+    /// threat model is a local mistake --- another `watch`, a stray tool, a port
+    /// scan --- not an adversary on the same machine.
     public var token: String
     public var buildIdentity: String
     public var moduleName: String
