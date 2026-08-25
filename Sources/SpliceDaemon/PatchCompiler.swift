@@ -25,7 +25,8 @@ public struct PatchCompiler: Sendable {
     /// or a persistent compiler depends entirely on which of the two dominates.
     /// A single `-emit-library` reports one number for both and guesses at
     /// stage attribution by grepping the output.
-    public func compile(source: String, generation: UInt64, timeline: StageTimeline) throws -> Artifact {
+    public func compile(source: String, generation: UInt64, flags: [String]? = nil,
+                        timeline: StageTimeline) throws -> Artifact {
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
 
         let name = String(format: "Patch_%03llu", generation)
@@ -34,7 +35,8 @@ public struct PatchCompiler: Sendable {
         let imageURL = workDirectory.appendingPathComponent("\(name).dylib")
         try source.write(to: sourceURL, atomically: true, encoding: .utf8)
 
-        try run(frontendArguments(source: sourceURL, object: objectURL, name: name),
+        try run(frontendArguments(source: sourceURL, object: objectURL, name: name,
+                                  flags: flags ?? context.extraCompilerFlags),
                 stage: .compile, subject: sourceURL.lastPathComponent,
                 recovery: .editAndRetry, timeline: timeline)
 
@@ -72,9 +74,8 @@ public struct PatchCompiler: Sendable {
         return arguments
     }
 
-    private func frontendArguments(source: URL, object: URL, name: String) -> [String] {
-        common + ["-c", "-o", object.path, "-module-name", name]
-            + context.extraCompilerFlags + [source.path]
+    private func frontendArguments(source: URL, object: URL, name: String, flags: [String]) -> [String] {
+        common + ["-c", "-o", object.path, "-module-name", name] + flags + [source.path]
     }
 
     private func linkArguments(object: URL, image: URL, name: String) -> [String] {

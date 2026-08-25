@@ -359,6 +359,41 @@ hypothesis about what the build did.
 Only one field is genuinely derived rather than looked up: the target
 triple, assembled from architecture, platform, and deployment target.
 
+### 6.3a What reaches the patch compile, and from where
+
+Everything that changes how a body is *interpreted* has to reach the patch, and
+a review measured three ways that was not happening.
+
+`OTHER_SWIFT_FLAGS` was read for one `doctor` check and otherwise dropped. A
+project putting `-DUSE_LIVE_PRICING` there --- the same file this tool asks
+projects to base Debug on --- had `#if USE_LIVE_PRICING` take the other branch
+in every patch, silently. `-enable-bare-slash-regex`, which Xcode passes as a
+matter of course, made every body containing a regex literal fail to compile
+against generated source. It is now forwarded whole.
+
+`SWIFT_UPCOMING_FEATURE_*` was forwarded by its setting suffix. Xcode turns
+`SWIFT_UPCOMING_FEATURE_EXISTENTIAL_ANY` into
+`-enable-upcoming-feature ExistentialAny`; this passed `EXISTENTIAL_ANY`, and
+swiftc accepts an unknown feature name without a word --- so it forwarded
+nothing, for every feature, silently.
+
+The language mode is per *module*, and this was per project. `-showBuildSettings`
+reports the targets of the scheme and a local package's are not among them, so
+the daemon used the application's for everything: in the example project, a
+Swift 6 package compiled under Swift 5. Measured accepting a body the project's
+own compiler rejects as a data race --- which is precisely what forwarding the
+language mode exists to prevent. A package target's mode is now read from its
+manifest, and a manifest that cannot be evaluated is refused rather than
+guessed.
+
+One thing the same review found *not* to be a problem is worth writing down, so
+it is not re-litigated. `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` is not
+forwarded, and does not need to be: a declaration's isolation is serialized into
+the module, and `@_dynamicReplacement` takes the replaced declaration's. Marking
+the replacement `nonisolated` explicitly is rejected, and an ordinary function
+in the same patch touching the same state is rejected too --- only the
+unannotated replacement compiles, which is the one the generator writes.
+
 ### 6.4 What a patch links against
 
 Not always the executable. Xcode 16 and later build a Debug
@@ -1863,7 +1898,7 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   185/185
+local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   189/189
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```

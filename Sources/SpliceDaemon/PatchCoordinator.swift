@@ -229,7 +229,8 @@ public actor PatchCoordinator {
         // cannot be patched at all, and saying so here is the difference
         // between a refusal and an edit that silently does nothing -- which is
         // what editing a Swift package used to do.
-        let module = resolver.module(for: url)
+        let resolution = resolver.resolve(url)
+        let module = resolution.module
         guard inventory.isPatchable(module) else {
             return .rejected(SpliceError(
                 stage: .classify, subject: url.lastPathComponent,
@@ -250,6 +251,30 @@ public actor PatchCoordinator {
                 recovery: .rebuild))
         }
 
+        // A local package's target need not share the application's language
+        // mode, and the build settings do not report one for it. Compiling a
+        // Swift 6 package's file under the app's Swift 5 was measured accepting
+        // a body the project's own compiler rejects as a data race.
+        var flags = context.extraCompilerFlags
+        if let manifest = resolution.manifest {
+            switch PackageLanguageMode.read(from: manifest) {
+            case .mode(let mode):
+                flags = Self.replacingLanguageMode(in: flags, with: mode)
+            case .unknown(let reason):
+                return .rejected(SpliceError(
+                    stage: .classify, subject: url.lastPathComponent,
+                    reason: """
+                        \(module) is a local package and \(reason), so the language mode \
+                        this patch would be compiled under is a guess.
+
+                        A body type-checked under the wrong mode loses the isolation and \
+                        sendability rules the package was written with, and the result \
+                        compiles.
+                        """,
+                    recovery: .configure))
+            }
+        }
+
         do {
             let imports = currentIndex.imports
             let source = try timeline.measure(.generate) {
@@ -261,7 +286,8 @@ public actor PatchCoordinator {
                     privateImportOf: currentIndex.declaresFileLocal ? url.lastPathComponent : nil)
             }
 
-            let artifact = try compiler.compile(source: source, generation: next, timeline: timeline)
+            let artifact = try compiler.compile(source: source, generation: next,
+                                                flags: flags, timeline: timeline)
 
             let delivered = try timeline.measure(.transfer) {
                 try deliverOverride?(artifact.imageURL) ?? container.deliver(artifact.imageURL)
@@ -355,6 +381,24 @@ public actor PatchCoordinator {
             return .rejected(SpliceError(stage: .verify, subject: url.lastPathComponent,
                                          reason: "unattributed failure: \(error)", recovery: .rebuild))
         }
+    }
+}
+
+extension PatchCoordinator {
+    /// Substitutes the `-swift-version` pair rather than appending one, because
+    /// two of them is not a question the compiler answers predictably.
+    static func replacingLanguageMode(in flags: [String], with mode: String) -> [String] {
+        var result: [String] = []
+        var index = flags.startIndex
+        while index < flags.endIndex {
+            if flags[index] == "-swift-version", flags.index(after: index) < flags.endIndex {
+                index = flags.index(index, offsetBy: 2)
+                continue
+            }
+            result.append(flags[index])
+            index = flags.index(after: index)
+        }
+        return result + ["-swift-version", mode]
     }
 }
 

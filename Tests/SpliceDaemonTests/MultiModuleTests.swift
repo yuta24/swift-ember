@@ -134,3 +134,111 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     #expect(error.reason.contains("unsafeFlags"), "and say how to fix it")
     #expect(error.reason.contains("App"), "and say what is patchable")
 }
+
+// MARK: - A package's language mode is its own
+
+/// The build settings report the targets of the scheme, and a local package's
+/// are not among them -- so the daemon had one `BuildContext`, the
+/// application's, and compiled a Swift 6 package's file under the app's Swift 5.
+/// Measured: a body using `Task { }` over a non-Sendable capture was accepted
+/// into the running process, while the project's own build of that identical
+/// file fails with "sending value of non-Sendable type risks causing data
+/// races".
+@Test func aPackageManifestDecidesItsOwnLanguageMode() throws {
+    let work = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("splice-mode-\(UUID().uuidString)")
+    let sources = work.appendingPathComponent("Sources/Feature", isDirectory: true)
+    try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+
+    func manifest(_ text: String) throws {
+        try text.write(to: work.appendingPathComponent("Package.swift"),
+                       atomically: true, encoding: .utf8)
+    }
+
+    try manifest("// swift-tools-version: 6.0\nimport PackageDescription\n")
+    guard case .mode(let six) = PackageLanguageMode.read(
+        from: work.appendingPathComponent("Package.swift")) else {
+        Issue.record("expected a mode"); return
+    }
+    #expect(six == "6")
+
+    try manifest("// swift-tools-version:5.9\nimport PackageDescription\n")
+    guard case .mode(let five) = PackageLanguageMode.read(
+        from: work.appendingPathComponent("Package.swift")) else {
+        Issue.record("expected a mode"); return
+    }
+    #expect(five == "5")
+
+    // An explicit setting wins over the tools version.
+    try manifest("""
+        // swift-tools-version: 5.9
+        import PackageDescription
+        let package = Package(name: "F", targets: [
+            .target(name: "F", swiftSettings: [.swiftLanguageMode(.v6)])
+        ])
+        """)
+    guard case .mode(let explicit) = PackageLanguageMode.read(
+        from: work.appendingPathComponent("Package.swift")) else {
+        Issue.record("expected a mode"); return
+    }
+    #expect(explicit == "6")
+
+    // Something this cannot evaluate is refused rather than guessed: the wrong
+    // mode is not a compile error, it is a body type-checked under rules the
+    // developer did not choose.
+    try manifest("""
+        // swift-tools-version: 5.9
+        import PackageDescription
+        let mode = SwiftLanguageMode.v6
+        let package = Package(name: "F", targets: [
+            .target(name: "F", swiftSettings: [.swiftLanguageMode(mode)])
+        ])
+        """)
+    guard case .unknown = PackageLanguageMode.read(
+        from: work.appendingPathComponent("Package.swift")) else {
+        Issue.record("expected the manifest to be refused"); return
+    }
+}
+
+@Test func theLanguageModeIsSubstitutedRatherThanAppended() {
+    let flags = ["-D", "DEBUG", "-swift-version", "5", "-strict-concurrency=complete"]
+    let result = PatchCoordinator.replacingLanguageMode(in: flags, with: "6")
+    #expect(result == ["-D", "DEBUG", "-strict-concurrency=complete", "-swift-version", "6"])
+    #expect(result.filter { $0 == "-swift-version" }.count == 1)
+}
+
+@Test func aFileOutsideAnyPackageHasNoManifest() {
+    let resolver = ModuleResolver(appModule: "App")
+    let resolution = resolver.resolve(URL(fileURLWithPath: "/nowhere/Sources/App/File.swift"))
+    #expect(resolution.manifest == nil)
+    #expect(resolution.module == "App")
+}
+
+/// A manifest somewhere above a file is not evidence the file belongs to a
+/// package target. An app whose sources sit inside a repository that happens to
+/// contain a `Package.swift` -- this project's own examples, for one -- found
+/// it, and every patch was then compiled in that package's language mode. The
+/// sample app's reload went from 348 ms to 2,641 ms before the cause was
+/// obvious.
+@Test func aManifestAboveAnAppIsNotThatAppsManifest() throws {
+    let work = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("splice-layout-\(UUID().uuidString)")
+    let appSources = work.appendingPathComponent("examples/Demo/Sources", isDirectory: true)
+    try FileManager.default.createDirectory(at: appSources, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+    try "// swift-tools-version: 6.0\n".write(to: work.appendingPathComponent("Package.swift"),
+                                              atomically: true, encoding: .utf8)
+
+    let resolver = ModuleResolver(appModule: "Demo")
+    let resolution = resolver.resolve(appSources.appendingPathComponent("Cart.swift"))
+    #expect(resolution.module == "Demo")
+    #expect(resolution.manifest == nil, "the repository's own manifest was taken for the app's")
+
+    // A real package target under the same manifest still resolves.
+    let target = work.appendingPathComponent("Sources/Feature", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    let inPackage = resolver.resolve(target.appendingPathComponent("Greeter.swift"))
+    #expect(inPackage.module == "Feature")
+    #expect(inPackage.manifest != nil)
+}

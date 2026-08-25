@@ -8,6 +8,24 @@ public enum Watch {
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
         let work = URL(fileURLWithPath: ".splice/patches")
 
+        // `doctor` checks this and `watch` did not, so pointing it at a
+        // product that had never been built started a normal-looking session
+        // against a binary that does not exist -- and the first save blamed the
+        // *package* setting, because the inventory cannot tell "file missing"
+        // from "file exports nothing".
+        guard FileManager.default.fileExists(atPath: context.linkTarget) else {
+            throw SpliceError(
+                stage: .watch, subject: (context.linkTarget as NSString).lastPathComponent,
+                reason: """
+                    there is no binary at \(context.linkTarget).
+
+                    A patch is compiled and linked against the built product, so the app \
+                    has to have been built for this configuration before it can be \
+                    patched. Build it, then start watching again.
+                    """,
+                recovery: .rebuild)
+        }
+
         let server = try IPCServer()
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: work)
 

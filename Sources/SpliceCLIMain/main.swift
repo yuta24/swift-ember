@@ -50,5 +50,16 @@ case .doctor:
     exit(Doctor.run(context: context, project: resolvedProject) ? 0 : 1)
 
 case .watch:
-    try await Watch.run(context: context)
+    // Caught the same way the resolve above is. Left uncaught, anything `watch`
+    // throws on the way up -- no built binary, a container it cannot reach, a
+    // port it cannot bind -- reached the developer as
+    // "Fatal error: Error raised at top level" with the actual message buried
+    // inside it.
+    do {
+        try await Watch.run(context: context)
+    } catch let error as SpliceError {
+        abort(error.description)
+    } catch {
+        abort("\(error)")
+    }
 }

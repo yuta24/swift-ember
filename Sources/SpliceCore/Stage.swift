@@ -24,6 +24,10 @@ public struct SpliceError: Error, Codable, Sendable, CustomStringConvertible {
         case rebuild
         /// The process may be in an uncertain state.
         case restart
+        /// Nothing is wrong with the source or the process; the project is not
+        /// set up the way this tool needs. Distinct from `rebuild` because
+        /// building again changes nothing until a setting does.
+        case configure
     }
 
     public let stage: Stage
@@ -43,6 +47,7 @@ public struct SpliceError: Error, Codable, Sendable, CustomStringConvertible {
         case .editAndRetry: "Action: fix the source and save again."
         case .rebuild: "Action: full rebuild required."
         case .restart: "Action: restart the app."
+        case .configure: "Action: fix the project configuration."
         }
         return "[\(stage.rawValue)] \(subject)\n\(reason)\n\n\(action)"
     }

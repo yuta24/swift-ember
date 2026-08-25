@@ -142,7 +142,7 @@ Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              39 cases pinning what Swift dynamic replacement does
-Tests/                 185 tests: what the classifier decides, what the
+Tests/                 189 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
