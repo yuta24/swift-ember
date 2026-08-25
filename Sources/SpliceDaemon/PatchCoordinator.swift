@@ -112,6 +112,9 @@ public actor PatchCoordinator {
         case ignored
         case rejected(SpliceError)
         case applied(generation: UInt64, declarations: [String], carried: [String],
+                     /// Whether the runtime could count what the image registered.
+                     /// False means the reload happened and nothing confirmed it.
+                     verified: Bool,
                      timeline: StageTimeline)
         /// Refused without being examined, because the running process can no
         /// longer be described. Carries the failure that caused it.
@@ -257,6 +260,7 @@ public actor PatchCoordinator {
                 try deliverOverride?(artifact.imageURL) ?? container.deliver(artifact.imageURL)
             }
 
+            var verified = false
             let start = DispatchTime.now().uptimeNanoseconds
             let request = LoadPatchRequest(generation: next, path: delivered.path,
                                            buildIdentity: context.identity,
@@ -279,8 +283,23 @@ public actor PatchCoordinator {
             }
 
             switch result {
-            case .loaded:
+            case .loaded(_, _, let registered):
                 timeline.record(.load, since: start, success: true)
+                // FR-13. `dlopen` returning a handle says the image mapped, not
+                // that the Swift runtime bound anything in it. The count comes
+                // from the image's own replacement section -- the same one the
+                // runtime reads -- so a patch that loaded and replaced nothing
+                // is a failure with a stage of its own rather than a reload
+                // nobody can tell from a real one.
+                if let registered, registered != declarations.count {
+                    throw poison(SpliceError(
+                        stage: .register, subject: url.lastPathComponent,
+                        reason: registered == 0
+                            ? "the patch loaded and registered no replacements at all"
+                            : "the patch registered \(registered) replacements; \(declarations.count) were generated",
+                        recovery: .restart))
+                }
+                verified = registered != nil
             case .rejected(let reason):
                 timeline.record(.load, since: start, success: false)
                 // The runtime declined before loading anything, so the process
@@ -301,7 +320,8 @@ public actor PatchCoordinator {
             baselineIndexes[url] = currentIndex
             memories[url, default: SessionMemory()].remember(plan)
             return .applied(generation: next, declarations: declarations.map(\.displayName),
-                            carried: plan.carried.map(\.displayName), timeline: timeline)
+                            carried: plan.carried.map(\.displayName),
+                            verified: verified, timeline: timeline)
         } catch let error as SpliceError {
             return .rejected(error)
         } catch {

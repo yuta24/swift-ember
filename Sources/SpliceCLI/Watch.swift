@@ -131,7 +131,7 @@ public enum Watch {
                     \(cause.reason)
                     """)
                     print("")
-                case .applied(let generation, let declarations, let carried, let timeline):
+                case .applied(let generation, let declarations, let carried, let verified, let timeline):
                     let count = declarations.count
                     let noun = count == 1 ? "declaration" : "declarations"
                     print("")
@@ -144,6 +144,14 @@ public enum Watch {
                     // difference between "that is why it worked" and a mystery.
                     if !carried.isEmpty {
                         print("  carried: \(carried.joined(separator: ", "))")
+                    }
+                    // Said only when it is not true. A reload that could not be
+                    // confirmed is still a reload, but the developer should know
+                    // which kind they are looking at -- the whole reason this
+                    // tool refuses SwiftUI `body` is that a reload which lies is
+                    // worse than a refusal.
+                    if !verified {
+                        print("  not verified: the runtime could not count what the image registered")
                     }
                     print(timeline.summary())
                     print("")

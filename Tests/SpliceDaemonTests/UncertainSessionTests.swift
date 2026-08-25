@@ -157,7 +157,7 @@ private func edit(_ url: URL, to body: String) throws {
 @Test func aClassifierRefusalDoesNotPoison() async throws {
     // Never reaches the process at all. Poisoning here would make an ordinary
     // "add a stored property" edit demand a relaunch.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
 
     try "struct S { var added = 1\n func f() -> String { \"old\" } }"
         .write(to: h.subject, atomically: true, encoding: .utf8)
@@ -170,7 +170,7 @@ private func edit(_ url: URL, to body: String) throws {
 }
 
 @Test func aSuccessfulLoadLeavesTheSessionUsable() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
 
     try edit(h.subject, to: #""new""#)
     guard case .applied = await h.coordinator.handle(change: h.subject) else {
@@ -186,7 +186,7 @@ private func edit(_ url: URL, to body: String) throws {
     // it was built as. Poisoning here told the developer their process was
     // undescribable when there was no process, and then hid every later
     // classify and compile error behind that message.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
     h.runtime.disconnect()
     for _ in 0..<200 where h.coordinatorServerHasSession { try await Task.sleep(for: .milliseconds(20)) }
 
@@ -220,7 +220,7 @@ private func edit(_ url: URL, to body: String) throws {
     // Not a coordinator test: this is the runtime's own check, and until it
     // existed `.rejected` was unreachable, so the rule that some failures do
     // not poison had nothing real behind it. DESIGN.md section 6.3.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
 
     // The fake stands in for a runtime that compares identities, which the
     // real one now does before calling dlopen.
@@ -228,7 +228,7 @@ private func edit(_ url: URL, to body: String) throws {
         guard envelope.type == "loadPatch",
               let request = try? envelope.decode(LoadPatchRequest.self) else { return nil }
         let result: LoadPatchResult = request.buildIdentity == "something else"
-            ? .loaded(generation: request.generation, durationMs: 1)
+            ? .loaded(generation: request.generation, durationMs: 1, registered: 1)
             : .rejected(reason: "the patch was built for a different binary")
         return ("loadResult", try! JSONEncoder().encode(result))
     }
@@ -248,7 +248,7 @@ private func edit(_ url: URL, to body: String) throws {
 /// for a newer build of the same sources, so the old comparison passed. The
 /// linker's UUID is not, and only the process can say which one it is running.
 @Test func aProcessRunningAnOlderBuildIsRefused() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
 
     h.runtime.responder = { envelope in
         guard envelope.type == "loadPatch",
@@ -257,7 +257,7 @@ private func edit(_ url: URL, to body: String) throws {
         // loaded images, and find none.
         let matched = request.buildUUIDs.contains("00000000-0000-0000-0000-00000000FFFF")
         let result: LoadPatchResult = matched
-            ? .loaded(generation: request.generation, durationMs: 1)
+            ? .loaded(generation: request.generation, durationMs: 1, registered: 1)
             : .rejected(reason: "this process is not running the binary the patch was linked against")
         return ("loadResult", try! JSONEncoder().encode(result))
     }

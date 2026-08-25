@@ -1475,6 +1475,44 @@ runtime re-dials whenever its connection drops --- a suspend and resume in
 the simulator is enough --- so `hello` carries the pid and only a
 different one clears the flag.
 
+### 17.1 REGISTER
+
+The stage that turns "the image loaded" into "the image replaced something".
+
+`dlopen` returning a handle says the image mapped. It says nothing about the
+Swift runtime having bound anything in it, and this project's stated reason for
+refusing SwiftUI `body` is that a reload which lies is worse than a refusal ---
+so reporting a reload on the strength of `dlopen` alone was the same fault in a
+smaller font.
+
+After loading, the runtime reads the image's `__TEXT,__swift5_replace` section,
+which is the one the Swift runtime itself reads, and counts the replacements it
+declares. The layout is measured rather than documented:
+
+``` text
+section   uint32 flags
+          uint32 numScopes
+          per scope: int32 relative pointer, uint32 flags
+scope     uint32 flags
+          uint32 numReplacements
+          descriptors...
+```
+
+`Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins that a patch
+emitting one replacement declares one and a patch emitting three declares
+three, so a toolchain that moves this fails there rather than in a session.
+
+Three outcomes, and the difference between them matters:
+
+-   the count matches: an ordinary reload,
+-   the count differs, zero included: a REGISTER failure. The process may
+    have had some of the patch applied and no more can be said about it, so
+    the session ends rather than the save --- REGISTER is one of the two
+    stages section 17 reserves for exactly that,
+-   the count could not be read: the reload stands and `watch` says it was
+    not verified. A check that cannot run must not become a refusal the first
+    time a toolchain moves a section.
+
 ## 18. Observability
 
 Emit one structured event per stage:

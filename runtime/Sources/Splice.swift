@@ -95,11 +95,12 @@ public enum Splice {
         }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
         state.recordLoaded(generation)
-        return .loaded(generation: generation, durationMs: ms)
+        return .loaded(generation: generation, durationMs: ms,
+                       registered: RegisteredReplacements.count(inImageAt: path))
     }
 
     enum LoadOutcome {
-        case loaded(generation: UInt64, durationMs: Double)
+        case loaded(generation: UInt64, durationMs: Double, registered: Int?)
         case failed(stage: String, message: String)
     }
 

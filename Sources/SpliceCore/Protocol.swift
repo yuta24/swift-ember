@@ -8,8 +8,10 @@ import Foundation
 public enum SpliceProtocol {
     /// Bumped when a payload's shape changes. Version 2 added the build
     /// UUIDs, without which the runtime's identity check compared the
-    /// daemon's own string against the daemon's own string.
-    public static let version = 2
+    /// daemon's own string against the daemon's own string. Version 3 added
+    /// the count of replacements the loaded image registered, which is what
+    /// FR-13 rests on.
+    public static let version = 3
     public static let defaultPort: UInt16 = 51_237
 }
 
@@ -94,7 +96,11 @@ public struct LoadPatchRequest: Codable, Sendable {
 
 /// runtime -> daemon.
 public enum LoadPatchResult: Codable, Sendable {
-    case loaded(generation: UInt64, durationMs: Double)
+    /// `registered` is how many dynamic replacements the loaded image declared,
+    /// or nil when the runtime could not examine it. The daemon compares it
+    /// against what it asked for: `dlopen` returning a handle says the image
+    /// mapped, not that anything in it was bound.
+    case loaded(generation: UInt64, durationMs: Double, registered: Int?)
     case rejected(reason: String)
     case failed(stage: Stage, message: String)
 }

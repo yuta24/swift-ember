@@ -476,6 +476,20 @@ replacement key and is replaceable regardless. Verification SHOULD
 therefore rest on the compiler's own acceptance of the patch plus an
 observable check, not on symbol presence alone.
 
+Both halves exist. The compiler's acceptance is the LINK stage, which
+resolves the replacement keys against the running binary and fails on a
+declaration that has none. The observable check is the REGISTER stage: the
+runtime reads the loaded image's own `__TEXT,__swift5_replace` section ---
+the section the Swift runtime reads to bind replacements --- and reports how
+many it declares. The daemon compares that against what it generated.
+
+Zero is the failure FR-13 names. A different non-zero count means the image
+is not the patch the daemon thinks it sent, and both leave a process that
+cannot be described, so they end the session rather than the save. A count
+the runtime could not read at all is neither: the reload is reported, and
+reported as unverified, because a check that cannot run must not become a
+refusal the moment a toolchain moves the section.
+
 ## 10. Performance requirements
 
 MVP performance targets are directional, not release blockers:

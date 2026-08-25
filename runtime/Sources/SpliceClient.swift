@@ -198,10 +198,10 @@ final class SpliceClient: @unchecked Sendable {
         }
 
         switch Splice.load(generation: request.generation, path: request.path) {
-        case .loaded(let generation, let durationMs):
+        case .loaded(let generation, let durationMs, let registered):
             let names = request.declarations.joined(separator: ", ")
             state.note("g\(generation): \(names.isEmpty ? "loaded" : names)")
-            return .loaded(generation: generation, durationMs: durationMs)
+            return .loaded(generation: generation, durationMs: durationMs, registered: registered)
         case .failed(let stage, let message):
             state.note("g\(request.generation) failed at \(stage): \(message)")
             return .failed(stage: stage, message: message)
@@ -225,7 +225,7 @@ final class SpliceClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 2
+let ProtocolVersion = 3
 
 struct Envelope: Codable {
     var protocolVersion: Int
@@ -255,7 +255,7 @@ struct LoadPatchRequest: Codable {
 }
 
 enum LoadPatchResult: Codable {
-    case loaded(generation: UInt64, durationMs: Double)
+    case loaded(generation: UInt64, durationMs: Double, registered: Int?)
     case rejected(reason: String)
     case failed(stage: String, message: String)
 }

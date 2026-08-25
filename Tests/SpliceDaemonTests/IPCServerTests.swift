@@ -39,7 +39,7 @@ private func connectedRuntime(to server: IPCServer,
 
     runtime.responder = { envelope in
         guard envelope.type == "loadPatch" else { return nil }
-        let result = LoadPatchResult.loaded(generation: 3, durationMs: 1.5)
+        let result = LoadPatchResult.loaded(generation: 3, durationMs: 1.5, registered: 1)
         return ("loadResult", try! JSONEncoder().encode(result))
     }
 
@@ -47,7 +47,7 @@ private func connectedRuntime(to server: IPCServer,
                                    buildIdentity: "test-identity", buildUUIDs: [], declarations: ["A.f()"])
     let result = try await server.request(type: "loadPatch", payload: request,
                                           expecting: LoadPatchResult.self)
-    guard case .loaded(let generation, _) = result else {
+    guard case .loaded(let generation, _, _) = result else {
         Issue.record("expected .loaded, got \(result)")
         return
     }
@@ -237,7 +237,7 @@ private final class Reported: @unchecked Sendable {
             "the stale teardown wiped the current session")
 
     relaunched.responder = { envelope in
-        ("loadResult", try! JSONEncoder().encode(LoadPatchResult.loaded(generation: 1, durationMs: 1)))
+        ("loadResult", try! JSONEncoder().encode(LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1)))
     }
     let result = try await server.request(
         type: "loadPatch",

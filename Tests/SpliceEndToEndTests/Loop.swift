@@ -136,6 +136,39 @@ enum Loop {
         return try execute(binary, arguments: images)
     }
 
+    struct CompiledPatch {
+        var work: URL
+        var image: URL
+    }
+
+    /// Builds an application and one patch, and stops there.
+    ///
+    /// For checks about the *artifact* rather than about what it does when
+    /// loaded --- the shape of its replacement section, say.
+    static func compileOnly(baseline: String, plan: PatchPlan) throws -> CompiledPatch {
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("splice-section-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+
+        let module = "Fixture"
+        let appSource = work.appendingPathComponent("App.swift")
+        try (baseline + "\n" + "func probe() async throws -> [String] { [] }\n")
+            .write(to: appSource, atomically: true, encoding: .utf8)
+
+        let binary = work.appendingPathComponent("app")
+        try compileApplication(sources: [harness, appSource], module: module,
+                               into: work, binary: binary)
+
+        let generated = try ReplacementGenerator.generate(module: module, generation: 1, plan: plan)
+        let patchSource = work.appendingPathComponent("Patch.swift")
+        try generated.write(to: patchSource, atomically: true, encoding: .utf8)
+
+        let image = work.appendingPathComponent("Patch.dylib")
+        try compilePatch(source: patchSource, moduleSearchPath: work,
+                         appBinary: binary, image: image, generatedSource: generated)
+        return CompiledPatch(work: work, image: image)
+    }
+
     enum Failure: Error, CustomStringConvertible {
         case notHotPatchable(ChangeClassification)
         case build(String, String)
