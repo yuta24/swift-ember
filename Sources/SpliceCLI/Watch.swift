@@ -74,9 +74,12 @@ public enum Watch {
         // the old one is unreachable from the new process -- so without this
         // the daemon waits forever for a connection the app cannot make.
         let reannounce = Task.detached {
-            // Detached because announceSession runs `simctl`, measured at about
-            // 94 ms, and doing that on the coordinator every two seconds would
-            // make a save landing in that window queue behind it.
+            // Detached so the wait between attempts is not held on the caller.
+            // It does not keep `simctl` off the coordinator: `announceSession`
+            // is actor-isolated, so a save landing in that 94 ms window queues
+            // behind it either way. The comment here used to claim otherwise.
+            // It only runs while nothing is connected, so the window is one a
+            // developer is unlikely to be saving into.
             var consecutiveFailures = 0
             while !Task.isCancelled {
                 let backoff = min(2 << min(consecutiveFailures, 4), 60)

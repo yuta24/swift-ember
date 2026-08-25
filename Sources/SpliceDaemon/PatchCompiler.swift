@@ -128,6 +128,25 @@ public struct PatchCompiler: Sendable {
     }
 }
 
+/// Somewhere for two concurrent readers to put what they read.
+private final class Collected: @unchecked Sendable {
+    private let lock = NSLock()
+    private var standardOutput = Data()
+    private var standardError = Data()
+
+    func store(_ data: Data, isStandardOutput: Bool) {
+        lock.withLock {
+            if isStandardOutput { standardOutput = data } else { standardError = data }
+        }
+    }
+
+    func text(isStandardOutput: Bool) -> String {
+        lock.withLock {
+            String(data: isStandardOutput ? standardOutput : standardError, encoding: .utf8) ?? ""
+        }
+    }
+}
+
 enum Subprocess {
     struct Result {
         let exitCode: Int32
@@ -151,14 +170,34 @@ enum Subprocess {
         process.standardOutput = out
         process.standardError = err
         try process.run()
-        // Read before waiting: a full pipe buffer would otherwise block the
-        // child forever while the parent waits for it to exit.
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
+
+        // Both pipes are drained at the same time.
+        //
+        // Reading one to EOF and then the other is the same deadlock as waiting
+        // before reading, which the comment that used to sit here was about: the
+        // child fills the pipe nobody is draining, blocks, and never closes the
+        // one the parent is waiting on. Measured on the exact shape this call
+        // has -- a child writing to stderr and little to stdout -- 64 KB came
+        // back fine and 300 KB hung forever. The caller is
+        // `xcodebuild -showBuildSettings` at daemon start, so the symptom was
+        // `watch` never finishing starting, with nothing printed.
+        let collected = Collected()
+        let group = DispatchGroup()
+        for (handle, isStandardOutput) in [(out.fileHandleForReading, true),
+                                           (err.fileHandleForReading, false)] {
+            group.enter()
+            DispatchQueue.global().async {
+                let data = handle.readDataToEndOfFile()
+                collected.store(data, isStandardOutput: isStandardOutput)
+                group.leave()
+            }
+        }
+        group.wait()
         process.waitUntilExit()
+
         return SeparatedResult(exitCode: process.terminationStatus,
-                               standardOutput: String(data: outData, encoding: .utf8) ?? "",
-                               standardError: String(data: errData, encoding: .utf8) ?? "")
+                               standardOutput: collected.text(isStandardOutput: true),
+                               standardError: collected.text(isStandardOutput: false))
     }
 
     @discardableResult

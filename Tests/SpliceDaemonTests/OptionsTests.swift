@@ -179,3 +179,36 @@ private func parse(_ arguments: String...) throws -> Options {
 @Test func anOrdinaryCompileErrorIsLeftAlone() {
     #expect(PatchCompiler.explain("error: cannot find 'x' in scope") == nil)
 }
+
+/// Reading one pipe to EOF and then the other deadlocks as soon as the child
+/// fills the one nobody is draining. Measured on the shape this call actually
+/// has -- `xcodebuild -showBuildSettings`, which writes to stderr -- 64 KB came
+/// back and 300 KB hung forever, so `watch` never finished starting and printed
+/// nothing to say why.
+///
+/// Raced against a deadline rather than simply called: a regression here would
+/// otherwise hang the whole suite with no output, which is the same failure it
+/// is testing for.
+@Test func aChildThatFillsStderrDoesNotDeadlockTheReader() async throws {
+    let work = Task.detached {
+        try Subprocess.runSeparated(
+            "/usr/bin/perl",
+            arguments: ["-e", "print STDERR 'x' x 300000; print STDOUT 'done'; exit 0"])
+    }
+
+    let finished = await withTaskGroup(of: Subprocess.SeparatedResult?.self) { group in
+        group.addTask { try? await work.value }
+        group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+
+    guard let finished else {
+        Issue.record("runSeparated did not return within 20 seconds")
+        return
+    }
+    #expect(finished.exitCode == 0)
+    #expect(finished.standardOutput == "done")
+    #expect(finished.standardError.count == 300_000)
+}
