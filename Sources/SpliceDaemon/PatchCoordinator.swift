@@ -291,7 +291,7 @@ public actor PatchCoordinator {
                 // runtime reads -- so a patch that loaded and replaced nothing
                 // is a failure with a stage of its own rather than a reload
                 // nobody can tell from a real one.
-                if let registered, registered != declarations.count {
+                if let registered, registered < declarations.count {
                     throw poison(SpliceError(
                         stage: .register, subject: url.lastPathComponent,
                         reason: registered == 0
@@ -299,7 +299,14 @@ public actor PatchCoordinator {
                             : "the patch registered \(registered) replacements; \(declarations.count) were generated",
                         recovery: .restart))
                 }
-                verified = registered != nil
+                // Fewer than generated is the failure FR-13 names: the patch did
+                // less than it said. *More* than generated is not, because a
+                // patch cannot register a replacement it does not contain --- so
+                // a count above the expected one says the reader misread the
+                // image, not that the process is wrong. Treating that as a
+                // failure would end a session every time a toolchain moved a
+                // field. It is reported as unverified instead.
+                verified = registered == declarations.count
             case .rejected(let reason):
                 timeline.record(.load, since: start, success: false)
                 // The runtime declined before loading anything, so the process

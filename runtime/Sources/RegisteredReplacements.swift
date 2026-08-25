@@ -49,21 +49,92 @@ enum RegisteredReplacements {
         guard numScopes > 0 else { return 0 }
         guard size >= UInt(8 + numScopes * 8) else { return nil }
 
+        // Every address below is derived from bytes read out of the image, so
+        // every one is checked against the image's own mapped segments before
+        // it is dereferenced.
+        //
+        // The layout this reader follows is measured rather than documented, so
+        // a toolchain that changes it can produce a `relative` that points
+        // nowhere. An unchecked dereference of that is EXC_BAD_ACCESS inside
+        // the application, on every save, in the one process this tool exists
+        // to keep alive.
+        //
+        // Measured, and it narrows the risk rather than removing it: five
+        // corrupted sections were built and loaded, and four of them killed the
+        // process inside `dlopen` -- the Swift runtime reads this same section
+        // to bind replacements, and it gets there first. Only a pointer landing
+        // just outside the image survived that far, and this check is what
+        // stopped it. What remains is a layout that is *different but valid*,
+        // where the Swift runtime is content and these offsets read the wrong
+        // field; that produces a wrong count rather than a crash, which is why
+        // the count is treated as evidence and not as proof.
+        let mapped = segments(of: header)
         var total = 0
         for index in 0..<numScopes {
             let entry = words.advanced(by: 8 + index * 8)
             let relative = entry.loadUnaligned(as: Int32.self)
             guard relative != 0 else { continue }
+
             // A RelativeIndirectablePointer stores "indirect" in the low bit.
             let indirect = relative & 1 == 1
             let target = entry.advanced(by: Int(relative & ~1))
-            let scope = indirect
-                ? UnsafeRawPointer(bitPattern: target.loadUnaligned(as: UInt.self))
-                : target
-            guard let scope else { return nil }
+
+            let scope: UnsafeRawPointer
+            if indirect {
+                guard mapped.contains(target, bytes: MemoryLayout<UInt>.size),
+                      let loaded = UnsafeRawPointer(bitPattern: target.loadUnaligned(as: UInt.self))
+                else { return nil }
+                scope = loaded
+            } else {
+                scope = target
+            }
+
+            // flags, then numReplacements.
+            guard mapped.contains(scope, bytes: 8) else { return nil }
             total += Int(scope.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
         return total
+    }
+
+    /// The address ranges an image occupies, so a computed pointer can be
+    /// checked before it is followed.
+    ///
+    /// The slide comes from the difference between where `__TEXT` says it
+    /// wanted to be and where the header actually is, which is the standard way
+    /// to recover it from a header alone.
+    private static func segments(of header: UnsafePointer<mach_header_64>) -> MappedRanges {
+        var ranges: [(start: UInt, end: UInt)] = []
+        var slide: UInt?
+        let headerAddress = UInt(bitPattern: UnsafeRawPointer(header))
+
+        var cursor = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
+        for _ in 0..<header.pointee.ncmds {
+            let command = cursor.loadUnaligned(as: load_command.self)
+            guard command.cmdsize > 0 else { break }
+            if command.cmd == LC_SEGMENT_64 {
+                let segment = cursor.loadUnaligned(as: segment_command_64.self)
+                if slide == nil, withUnsafeBytes(of: segment.segname, { $0.starts(with: Array("__TEXT".utf8)) }) {
+                    slide = headerAddress &- UInt(segment.vmaddr)
+                }
+                if let slide, segment.vmsize > 0 {
+                    let start = UInt(segment.vmaddr) &+ slide
+                    ranges.append((start, start &+ UInt(segment.vmsize)))
+                }
+            }
+            cursor = cursor.advanced(by: Int(command.cmdsize))
+        }
+        return MappedRanges(ranges: ranges)
+    }
+
+    struct MappedRanges {
+        let ranges: [(start: UInt, end: UInt)]
+
+        func contains(_ pointer: UnsafeRawPointer, bytes: Int) -> Bool {
+            let start = UInt(bitPattern: pointer)
+            let (end, overflowed) = start.addingReportingOverflow(UInt(bytes))
+            guard !overflowed else { return false }
+            return ranges.contains { start >= $0.start && end <= $0.end }
+        }
     }
 
     /// The loaded image with this path.

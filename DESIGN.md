@@ -1505,13 +1505,30 @@ three, so a toolchain that moves this fails there rather than in a session.
 Three outcomes, and the difference between them matters:
 
 -   the count matches: an ordinary reload,
--   the count differs, zero included: a REGISTER failure. The process may
-    have had some of the patch applied and no more can be said about it, so
-    the session ends rather than the save --- REGISTER is one of the two
-    stages section 17 reserves for exactly that,
--   the count could not be read: the reload stands and `watch` says it was
-    not verified. A check that cannot run must not become a refusal the first
-    time a toolchain moves a section.
+-   the count is *lower*, zero included: a REGISTER failure. The patch did
+    less than it said, the process may have had some of it applied, and no
+    more can be said about it --- so the session ends rather than the save.
+    REGISTER is one of the two stages section 17 reserves for exactly that,
+-   the count is *higher*, or could not be read: the reload stands and
+    `watch` says it was not verified. A patch cannot register a replacement
+    it does not contain, so a count above the expected one says this reader
+    misread the image rather than that the process is wrong; ending a session
+    every time a toolchain moved a field is not a trade worth making, and
+    neither is refusing because a check could not run.
+
+The reader validates every address it derives against the image's own mapped
+segments before following it, because the layout it walks is measured rather
+than documented. How much that is worth was itself measured: five corrupted
+sections were built and loaded, and four killed the process inside `dlopen` ---
+the Swift runtime reads this same section to bind replacements and gets there
+first, so the wild-pointer case is mostly not ours to catch. The fifth, a
+pointer landing just outside the image, survived that far and the bounds check
+is what stopped it. What the checks cannot catch is a layout that is different
+but *valid*, where the Swift runtime is content and these offsets read the
+wrong field --- which is why the count is treated as evidence, the "higher than
+expected" case is not fatal, and
+`Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins the layout so a
+change fails there first.
 
 ## 18. Observability
 
@@ -1818,7 +1835,7 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   177/177
+local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   181/181
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```

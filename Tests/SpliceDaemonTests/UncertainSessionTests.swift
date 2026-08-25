@@ -289,3 +289,46 @@ private func edit(_ url: URL, to body: String) throws {
 @Test func aBinaryThatCannotBeReadContributesNoUUID() {
     #expect(BuildUUID.read(from: "/nonexistent/binary").isEmpty)
 }
+
+/// FR-13's case: the image registered fewer replacements than the patch
+/// generated, so the patch did less than it said and the process can no longer
+/// be described.
+@Test func registeringFewerReplacementsThanGeneratedEndsTheSession() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 0) }
+    try edit(h.subject, to: #""new""#)
+    guard case .rejected(let error) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected a REGISTER failure")
+        return
+    }
+    #expect(error.stage == .register)
+    #expect(error.recovery == .restart)
+    #expect(await h.coordinator.isUncertain)
+}
+
+/// More than generated is a different thing. A patch cannot register a
+/// replacement it does not contain, so a count above the expected one says the
+/// reader misread the image -- and ending the session every time a toolchain
+/// moves a field is not a trade worth making. The reload stands, unverified.
+@Test func registeringMoreThanGeneratedIsUnverifiedRatherThanFatal() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 99) }
+    try edit(h.subject, to: #""new""#)
+    guard case .applied(_, _, _, let verified, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(verified == false)
+    #expect(await h.coordinator.isUncertain == false)
+}
+
+/// A count the runtime could not read at all. The check that cannot run must
+/// not become a refusal.
+@Test func anUnreadableCountIsReportedRatherThanRefused() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: nil) }
+    try edit(h.subject, to: #""new""#)
+    guard case .applied(_, _, _, let verified, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(verified == false)
+    #expect(await h.coordinator.isUncertain == false)
+}
