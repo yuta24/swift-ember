@@ -79,6 +79,63 @@ enum Loop {
         return Outcome(before: before, after: after)
     }
 
+    /// Several saves in a row against one process, the way a session actually
+    /// goes: each patch is generated with the memory of what the ones before it
+    /// put in, and all of them are loaded in order.
+    ///
+    /// One generation was all this harness could do, and that is why a patch
+    /// naming a declaration an earlier patch had carried --- extract a helper,
+    /// then keep tuning the caller, the most ordinary loop there is --- shipped
+    /// broken. Everything single-generation passed.
+    static func runGenerations(_ versions: [String],
+                               sourceLocation: SourceLocation = #_sourceLocation) throws -> [String] {
+        precondition(versions.count >= 2, "a run needs a baseline and at least one edit")
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("splice-e2e-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let module = "Fixture"
+        let appSource = work.appendingPathComponent("App.swift")
+        try versions[0].write(to: appSource, atomically: true, encoding: .utf8)
+
+        let binary = work.appendingPathComponent("app")
+        try compileApplication(sources: [harness, appSource], module: module,
+                               into: work, binary: binary)
+
+        var memory = SessionMemory()
+        var baseline = versions[0]
+        var images: [String] = []
+
+        for (offset, current) in versions.dropFirst().enumerated() {
+            let generation = UInt64(offset + 1)
+            let currentIndex = DeclarationIndexer.index(source: current)
+            let classification = ChangeClassifier.classify(
+                before: DeclarationIndexer.index(source: baseline), after: currentIndex,
+                memory: memory)
+            guard case .hotPatch(let plan) = classification else {
+                throw Failure.notHotPatchable(classification)
+            }
+
+            let generated = try ReplacementGenerator.generate(
+                module: module, generation: generation, plan: plan, imports: currentIndex.imports,
+                privateImportOf: currentIndex.declaresFileLocal ? "App.swift" : nil)
+            let patchSource = work.appendingPathComponent("Patch\(generation).swift")
+            try generated.write(to: patchSource, atomically: true, encoding: .utf8)
+
+            let image = work.appendingPathComponent("Patch\(generation).dylib")
+            try compilePatch(source: patchSource, moduleSearchPath: work,
+                             appBinary: binary, image: image, generatedSource: generated)
+            images.append(image.path)
+
+            // The daemon advances both only when the patch lands.
+            memory.remember(plan)
+            baseline = current
+        }
+
+        return try execute(binary, arguments: images)
+    }
+
     enum Failure: Error, CustomStringConvertible {
         case notHotPatchable(ChangeClassification)
         case build(String, String)

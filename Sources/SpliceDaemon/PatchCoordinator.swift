@@ -38,6 +38,12 @@ public actor PatchCoordinator {
     /// which is the one stage that grows with the size of the file being
     /// edited.
     private var baselineIndexes: [URL: FileIndex] = [:]
+    /// What each file has already contributed to this session's patches.
+    ///
+    /// Cleared by nothing: a carried declaration stays only in the patches, so
+    /// every later patch for that file has to carry it again. A rebuild ends
+    /// the session, which is the only thing that makes it stale.
+    private var memories: [URL: SessionMemory] = [:]
     private var generation: UInt64 = 0
 
     /// `deliver` exists so the load path can be reached without a simulator.
@@ -177,7 +183,8 @@ public actor PatchCoordinator {
             let baselineIndex = baselineIndexes[url]
                 ?? DeclarationIndexer.index(source: baseline, policy: policy)
             baselineIndexes[url] = baselineIndex
-            return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex))
+            return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex,
+                                                            memory: memories[url] ?? SessionMemory()))
         }
 
         let plan: PatchPlan
@@ -281,6 +288,7 @@ public actor PatchCoordinator {
             generation = next
             baselines[url] = current
             baselineIndexes[url] = currentIndex
+            memories[url, default: SessionMemory()].remember(plan)
             return .applied(generation: next, declarations: declarations.map(\.displayName),
                             carried: plan.carried.map(\.displayName), timeline: timeline)
         } catch let error as SpliceError {

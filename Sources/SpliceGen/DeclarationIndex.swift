@@ -24,6 +24,13 @@ public struct PatchableDeclaration: Sendable {
     /// What a human should see. `identity` carries parameter types so that
     /// overloads stay distinct, which is not what belongs in a CLI line.
     public let displayName: String
+    /// The declared name with nothing around it.
+    ///
+    /// Used for one question: whether a declaration the edit *added* overloads
+    /// a name that already exists. Adding `kind(_: Int)` beside `kind(_: Any)`
+    /// changes what every existing call to `kind` resolves to, including from
+    /// bodies the edit did not touch and the patch does not replace.
+    public let simpleName: String
     /// Whether this declaration could be *added* by a patch.
     ///
     /// False for an `override`, which an extension cannot declare, and for an
@@ -354,6 +361,11 @@ public enum DeclarationIndexer {
             return
         }
 
+        if let literal = magicLiteral(in: Syntax(body)) {
+            builder.reject(identity, magicLiteralReason(literal), fingerprint)
+            return
+        }
+
         if isOperator(function.name) {
             // Operators do get replacement keys (Appendix A), but the spelling
             // of the @_dynamicReplacement(for:) target for one is not something
@@ -387,6 +399,7 @@ public enum DeclarationIndexer {
             body: normalise(body),
             node: DeclSyntax(function),
             displayName: display,
+            simpleName: function.name.text,
             carryable: carryable),
             fingerprint: fingerprint)
     }
@@ -432,11 +445,20 @@ public enum DeclarationIndexer {
 
         var withoutBody = variable.detached
         withoutBody.bindings = PatternBindingListSyntax([binding.detached.with(\.accessorBlock, nil)])
-        let signature = normalise(withoutBody)
+        // Which accessors exist is signature, not body. Gaining a setter leaves
+        // `var v: Int` untouched, so it read as a body change: the patch loaded,
+        // reported a reload, and the setter was dead --- the original key has no
+        // setter for it to bind to.
+        let signature = normalise(withoutBody) + "|" + accessorShape(accessors)
         let fingerprint = signature + normalise(accessors)
 
         if let reason = rejection(attributes: variable.attributes, modifiers: variable.modifiers) {
             builder.reject(identity, reason, fingerprint)
+            return
+        }
+
+        if let literal = magicLiteral(in: Syntax(accessors)) {
+            builder.reject(identity, magicLiteralReason(literal), fingerprint)
             return
         }
 
@@ -458,8 +480,19 @@ public enum DeclarationIndexer {
             body: normalise(accessors),
             node: DeclSyntax(variable),
             displayName: identity,
+            simpleName: name,
             carryable: carryable),
             fingerprint: fingerprint)
+    }
+
+    /// The accessors a property declares, as a stable string.
+    private static func accessorShape(_ accessors: AccessorBlockSyntax) -> String {
+        switch accessors.accessors {
+        case .getter:
+            return "get"
+        case .accessors(let list):
+            return list.map { $0.accessorSpecifier.text }.sorted().joined(separator: ",")
+        }
     }
 
     /// willSet/didSet do not make a property computed. Swift synthesises real
@@ -480,6 +513,31 @@ public enum DeclarationIndexer {
         returns an opaque result type; changing the concrete type behind `some` \
         compiles and loads without a diagnostic and is then undefined at runtime
         """
+
+    static func magicLiteralReason(_ literal: String) -> String {
+        """
+        its body uses \(literal), which expands against the declaration the patch \
+        emits rather than this one, so a reload would quietly change what it reports
+        """
+    }
+
+    /// The source-location literals, which a patch cannot preserve.
+    ///
+    /// `#function` in a replaced body expands to the generated name --- measured
+    /// as `label()` becoming `splice_g1_label____()` --- and `#fileID` to the
+    /// patch's own file. Nothing warns, and the wrong value lands in exactly
+    /// the code that exists to say where you are.
+    ///
+    /// This catches the literal written in the body. It cannot catch one
+    /// arriving through a callee's default argument, such as
+    /// `func log(_ m: String, function: String = #function)`, which is
+    /// evaluated at the call site and so also expands in the patch. That case
+    /// is recorded in PRD.md section 5 rather than detected.
+    private static func magicLiteral(in node: Syntax) -> String? {
+        let finder = MagicLiteralFinder(viewMode: .sourceAccurate)
+        finder.walk(node)
+        return finder.found
+    }
 
     /// `View` is the measured exception, and it fails a different way.
     ///
@@ -679,6 +737,37 @@ private final class OpaqueTypeFinder: SyntaxVisitor {
     }
 }
 
+private final class MagicLiteralFinder: SyntaxVisitor {
+    var found: String?
+
+    override func visit(_ node: TokenSyntax) -> SyntaxVisitorContinueKind {
+        guard found == nil else { return .skipChildren }
+        switch node.tokenKind {
+        case .poundAvailable, .poundUnavailable:
+            break
+        case .pound:
+            break
+        default:
+            let text = node.text
+            if text.hasPrefix("#"), MagicLiteralFinder.names.contains(String(text.dropFirst())) {
+                found = text
+            }
+        }
+        return .skipChildren
+    }
+
+    override func visit(_ node: MacroExpansionExprSyntax) -> SyntaxVisitorContinueKind {
+        if found == nil, MagicLiteralFinder.names.contains(node.macroName.text) {
+            found = "#" + node.macroName.text
+        }
+        return .visitChildren
+    }
+
+    static let names: Set<String> = [
+        "function", "file", "fileID", "filePath", "line", "column", "dsohandle",
+    ]
+}
+
 /// True if anything in the file is declared `private` or `fileprivate`.
 ///
 /// Modifiers anywhere, not declarations of a particular kind: the one on a
@@ -690,11 +779,7 @@ private final class FileLocalDetector: SyntaxVisitor {
     var found = false
 
     override func visit(_ node: DeclModifierSyntax) -> SyntaxVisitorContinueKind {
-        guard node.detail == nil else { return .skipChildren }
-        switch node.name.tokenKind {
-        case .keyword(.private), .keyword(.fileprivate): found = true
-        default: break
-        }
+        if DeclarationIndexer.isFileLocal(DeclModifierListSyntax([node])) { found = true }
         return .skipChildren
     }
 }

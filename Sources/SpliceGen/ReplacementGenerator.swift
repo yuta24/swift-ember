@@ -21,6 +21,33 @@ public struct PatchPlan: Sendable {
     }
 }
 
+/// What this session has already put into a patch for one file.
+///
+/// A carried declaration lives in the patch dylib and nowhere else. Once a
+/// patch lands the baseline advances, so on the next save that declaration is
+/// no longer an addition --- and without this it was neither carried again nor
+/// replaceable, so every later patch naming it failed to compile, permanently,
+/// for that file. Measured: "cannot find 'dollars' in scope", against a
+/// declaration sitting in the developer's own source.
+///
+/// Replacements are remembered for the matching reason. A patched body calls
+/// the copy in *its own* patch, so when a carried declaration changes, every
+/// body that calls it has to be re-emitted alongside. Re-emitting everything
+/// this file has contributed keeps one invariant instead of a rule per case:
+/// each patch contains the current version of everything the session has
+/// changed in that file, and the newest generation wins for all of it.
+public struct SessionMemory: Sendable {
+    public var carried: Set<String> = []
+    public var replaced: Set<String> = []
+
+    public init() {}
+
+    public mutating func remember(_ plan: PatchPlan) {
+        carried.formUnion(plan.carried.map(\.identity))
+        replaced.formUnion(plan.replacements.map(\.identity))
+    }
+}
+
 /// The verdict for one edited file, per DESIGN.md section 7.2.
 public enum ChangeClassification: Sendable {
     case noChange
@@ -46,16 +73,19 @@ public enum ChangeClassification: Sendable {
 /// design (PRD.md FR-4).
 public enum ChangeClassifier {
     public static func classify(baseline: String, current: String,
-                                policy: ClassifierPolicy = .default) -> ChangeClassification {
+                                policy: ClassifierPolicy = .default,
+                                memory: SessionMemory = SessionMemory()) -> ChangeClassification {
         classify(before: DeclarationIndexer.index(source: baseline, policy: policy),
-                 after: DeclarationIndexer.index(source: current, policy: policy))
+                 after: DeclarationIndexer.index(source: current, policy: policy),
+                 memory: memory)
     }
 
     /// For callers that already have the indexes and need something else from
     /// them, such as the imports the generator has to copy. Parsing the file a
     /// second time to read those was both wasted work and a place for the two
     /// parses to disagree about the policy.
-    public static func classify(before: FileIndex, after: FileIndex) -> ChangeClassification {
+    public static func classify(before: FileIndex, after: FileIndex,
+                                memory: SessionMemory = SessionMemory()) -> ChangeClassification {
 
         if before.residue != after.residue {
             return .rebuildRequired(reason: "something outside a replaceable declaration changed, such as a type's declaration, an import, or a stored property")
@@ -70,7 +100,7 @@ public enum ChangeClassifier {
 
         // A declaration that appeared is carried rather than replaced: there is
         // no key to bind it to, and nothing that could already be calling it.
-        var carried: [PatchableDeclaration] = []
+        var addedIdentities: Set<String> = []
         for identity in afterKeys.subtracting(beforeKeys).sorted() {
             if let unsupported = after.unsupported[identity] {
                 return .rebuildRequired(reason: "\(identity) was added: \(unsupported.reason)")
@@ -81,7 +111,18 @@ public enum ChangeClassifier {
             guard declaration.carryable else {
                 return .rebuildRequired(reason: "\(identity) was added; an override or an @objc member cannot be added by a patch, because an extension is not where it would have to go")
             }
-            carried.append(declaration)
+            // An addition that overloads a name already in the binary changes
+            // what *existing* code resolves to. Measured: adding
+            // `kind(_: Int)` beside `kind(_: Any)` and editing one caller left
+            // the other caller running the old resolution, so the process
+            // matched no version of the file while the reload reported
+            // success.
+            if let clash = before.patchable.values.first(where: {
+                $0.simpleName == declaration.simpleName && $0.contextPath == declaration.contextPath
+            }) {
+                return .rebuildRequired(reason: "\(identity) overloads \(clash.displayName), which changes what code already in the binary resolves to")
+            }
+            addedIdentities.insert(identity)
         }
 
         for (identity, old) in before.unsupported {
@@ -93,7 +134,7 @@ public enum ChangeClassifier {
             }
         }
 
-        var replacements: [PatchableDeclaration] = []
+        var changedIdentities: Set<String> = []
         for (identity, old) in before.patchable {
             guard let new = after.patchable[identity] else {
                 return .rebuildRequired(reason: "\(identity) changed kind")
@@ -101,19 +142,35 @@ public enum ChangeClassifier {
             if old.signature != new.signature {
                 return .rebuildRequired(reason: "\(identity): the signature changed, which is ABI-relevant")
             }
-            if old.body != new.body { replacements.append(new) }
+            if old.body != new.body { changedIdentities.insert(identity) }
         }
+
+        if changedIdentities.isEmpty && addedIdentities.isEmpty { return .noChange }
+
+        // Everything this session has put in a patch for this file goes in
+        // again, at its current version. A carried declaration exists only in
+        // the patch, so it has to be in the newest one too; and a body that
+        // calls it has to be re-emitted alongside, since the copy it calls is
+        // the one in its own patch.
+        let carriedIdentities = addedIdentities
+            .union(memory.carried.intersection(after.patchable.keys))
+        let replacedIdentities = changedIdentities
+            .union(memory.replaced)
+            .intersection(after.patchable.keys)
+            .subtracting(carriedIdentities)
 
         // A patch that replaces nothing would load and do nothing observable,
         // which FR-13 says must not be reported as a reload. Adding a helper
         // that nothing calls yet is exactly that, and it needs no patch: the
         // baseline does not advance, so the addition is still pending when the
         // edit that uses it arrives, and both land together.
-        if replacements.isEmpty { return .noChange }
+        if replacedIdentities.isEmpty { return .noChange }
 
         return .hotPatch(PatchPlan(
-            replacements: replacements.sorted { $0.identity < $1.identity },
-            carried: carried.sorted { $0.identity < $1.identity }))
+            replacements: replacedIdentities.compactMap { after.patchable[$0] }
+                .sorted { $0.identity < $1.identity },
+            carried: carriedIdentities.compactMap { after.patchable[$0] }
+                .sorted { $0.identity < $1.identity }))
     }
 
     private static func identities(_ index: FileIndex) -> Set<String> {
@@ -140,8 +197,16 @@ public enum ReplacementGenerator {
     public static func generate(module: String, generation: UInt64,
                                 plan: PatchPlan, imports: [String] = [],
                                 privateImportOf sourceFile: String? = nil) throws -> String {
-        let moduleImport = sourceFile.map { "@_private(sourceFile: \"\($0)\") @testable import \(module)" }
-            ?? "@testable import \(module)"
+        // Escaped, because this becomes a Swift string literal and a file name
+        // may legally contain a quote or a backslash. Unescaped, the patch did
+        // not parse and the developer was shown a syntax error in source they
+        // never wrote.
+        let moduleImport = sourceFile.map { name -> String in
+            let escaped = name
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "@_private(sourceFile: \"\(escaped)\") @testable import \(module)"
+        } ?? "@testable import \(module)"
         var lines: [String] = [
             "// Generated by swift-splice for generation \(generation). Do not edit.",
             "",

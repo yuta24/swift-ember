@@ -377,3 +377,130 @@ private extension PatchableDeclaration {
         return last.split(separator: "(").first.map(String.init) ?? last
     }
 }
+
+// MARK: - Edits that look like body changes and are not
+
+/// `#function` in a replaced body expands to the name the generator gave the
+/// replacement --- measured as `label()` becoming `splice_g1_label____()` --- and
+/// `#fileID` to the patch's own file. The wrong value lands in exactly the code
+/// that exists to say where you are, with no diagnostic.
+@Test func aBodyUsingASourceLocationLiteralIsRefused() {
+    for literal in ["#function", "#fileID", "#file", "#line"] {
+        let baseline = "struct S { func label() -> String { \"\\(\(literal))\" } }"
+        let current = "struct S { func label() -> String { \"x\\(\(literal))\" } }"
+        guard let reason = refusal(baseline, current) else { continue }
+        #expect(reason.contains(literal), "reason was: \(reason)")
+    }
+}
+
+/// An addition that overloads a name already in the binary changes what
+/// *existing* code resolves to. Measured: adding `kind(_: Int)` beside
+/// `kind(_: Any)` and editing one caller left the other caller on the old
+/// resolution, so the process matched no version of the file.
+@Test func anAddedOverloadIsRefused() {
+    let baseline = """
+    func kind(_ x: Any) -> String { "any" }
+    func viaG() -> String { "g:" + kind(1) }
+    func viaH() -> String { "h:" + kind(1) }
+    """
+    let current = """
+    func kind(_ x: Any) -> String { "any" }
+    func kind(_ x: Int) -> String { "int" }
+    func viaG() -> String { "g!" + kind(1) }
+    func viaH() -> String { "h:" + kind(1) }
+    """
+    guard let reason = refusal(baseline, current) else { return }
+    #expect(reason.contains("overloads"))
+}
+
+/// An addition that shares a name with a declaration on a *different* type is
+/// not an overload of anything, and is carried as usual.
+@Test func anAddedNameOnAnotherTypeIsNotAnOverload() {
+    let baseline = """
+    struct A { func kind() -> String { "a" } }
+    struct B { func run() -> String { "b" } }
+    """
+    let current = """
+    struct A { func kind() -> String { "a" } }
+    struct B {
+        func run() -> String { kind() }
+        func kind() -> String { "bk" }
+    }
+    """
+    guard let plan = plan(baseline, current) else { return }
+    #expect(plan.carried.map(\.displayName) == ["B.kind()"])
+}
+
+/// Which accessors a property declares is signature, not body. Gaining a setter
+/// leaves `var v: Int` untouched, so it read as a body change: the patch loaded,
+/// reported a reload, and the setter was dead, because the original key has no
+/// setter to bind to.
+@Test func gainingASetterIsASignatureChange() {
+    let baseline = "final class Box { var store = 0\n var v: Int { store } }"
+    let current = "final class Box { var store = 0\n var v: Int { get { store } set { store = newValue } } }"
+    guard let reason = refusal(baseline, current) else { return }
+    #expect(reason.contains("signature"))
+}
+
+// MARK: - Across generations
+
+/// A carried declaration lives in the patch dylib and nowhere else. Once a
+/// patch lands the baseline advances, so without a memory of what was carried
+/// it is neither carried again nor replaceable, and every later patch naming it
+/// fails to compile -- permanently, since a rejection does not advance the
+/// baseline either.
+@Test func aCarriedDeclarationIsCarriedAgain() {
+    let landed = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { dollars(cents) }
+        func dollars(_ c: Int) -> String { "$\\(c / 100)" }
+    }
+    """
+    var memory = SessionMemory()
+    memory.carried = ["Order.dollars(_:)[Int]"]
+    memory.replaced = ["Order.total()[]"]
+
+    let edited = landed.replacingOccurrences(of: "{ dollars(cents) }", with: #"{ "=" + dollars(cents) }"#)
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: landed, current: edited,
+                                                              memory: memory) else {
+        Issue.record("expected hotPatch")
+        return
+    }
+    #expect(plan.carried.map(\.displayName) == ["Order.dollars(_:) (Int)"])
+    #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
+}
+
+/// Editing the carried declaration itself. Its callers were replaced by an
+/// earlier patch and call *that* patch's copy, so they are re-emitted with it.
+@Test func editingACarriedDeclarationReEmitsItsCallers() {
+    let landed = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { dollars(cents) }
+        func dollars(_ c: Int) -> String { "$\\(c / 100)" }
+    }
+    """
+    var memory = SessionMemory()
+    memory.carried = ["Order.dollars(_:)[Int]"]
+    memory.replaced = ["Order.total()[]"]
+
+    let edited = landed.replacingOccurrences(of: #""$\#\(c / 100)""#, with: #""USD \#\(c / 100)""#)
+    guard case .hotPatch(let plan) = ChangeClassifier.classify(baseline: landed, current: edited,
+                                                              memory: memory) else {
+        Issue.record("expected hotPatch")
+        return
+    }
+    #expect(plan.carried.map(\.displayName) == ["Order.dollars(_:) (Int)"])
+    #expect(plan.replacements.map(\.displayName) == ["Order.total()"])
+}
+
+@Test func aFileNameWithAQuoteIsEscaped() throws {
+    let baseline = #"struct S { private func f() -> Int { 1 } }"#
+    let current = #"struct S { private func f() -> Int { 2 } }"#
+    guard let plan = plan(baseline, current) else { return }
+    let source = try ReplacementGenerator.generate(module: "M", generation: 1, plan: plan,
+                                                   privateImportOf: #"we"ird\.swift"#)
+    #expect(source.contains(#"@_private(sourceFile: "we\"ird\\.swift")"#),
+            "generated: \(source.split(separator: "\n").prefix(4).joined(separator: " | "))")
+}

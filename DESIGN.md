@@ -525,7 +525,27 @@ so it displaces nothing and changes no layout.
 -   an `override` or `@objc` declaration *added*. An extension is the only
     place a patch can put a member, and it may declare neither,
 -   a declaration *removed*. The original stays in the binary and nothing
-    can say what still calls it.
+    can say what still calls it,
+-   a declaration *added* that overloads a name already in the binary.
+    Adding `kind(_: Int)` beside `kind(_: Any)` changes what every existing
+    call to `kind` resolves to, including from bodies the edit did not touch
+    and the patch does not replace. Measured: one caller edited, the other
+    left running the old resolution, and the process matched no version of
+    the file while the reload reported success,
+-   a body using `#function`, `#file`, `#fileID`, `#filePath`, `#line`,
+    `#column`, or `#dsohandle`. These expand against the declaration the
+    patch emits, not the one in the source: measured, `#function` in a
+    replaced body reported `splice_g1_label____()`. Nothing warns, and the
+    wrong value lands in the code that exists to say where you are. Only the
+    literal written in the body is detected; one arriving through a callee's
+    default argument, as in `func log(_ m: String, function: String =
+    #function)`, is evaluated at the call site and so also expands in the
+    patch. That case is a known limitation rather than a refusal,
+-   a computed property gaining or losing an accessor. `var v: Int` reads the
+    same either way, so this looked like a body change: the patch loaded,
+    reported a reload, and the new setter was dead, because the original key
+    has none to bind to. The accessors a property declares are part of its
+    signature.
 
 ### 7.3b Reach
 
@@ -615,9 +635,39 @@ mistake is how this was first measured wrong.
 
 A patch emits the private import only for files that declare something
 file-local, so a project that has not added the setting keeps working for
-every file without private code rather than failing everywhere at once. When
+every file without private code rather than failing everywhere at once. The
+test is syntactic and does not evaluate `#if`, so a `private` declaration in a
+branch this build never compiles still counts --- the fallback is a courtesy
+during migration, not a guarantee. When
 it does fail, `PatchCompiler` translates the compiler's diagnostic into the
 setting that is missing.
+
+### 7.3d What a patch leaves behind
+
+A patch is not only applied, it is *remembered*. Two things a session emits do
+not exist anywhere else, and the next patch for that file has to account for
+both.
+
+A carried declaration lives in the patch dylib and in no other image. When the
+patch lands the baseline advances, so on the next save that declaration is no
+longer an addition --- and without a record of it, it is neither carried again
+nor replaceable. Every later patch naming it fails to compile, permanently for
+that file, since a rejection does not advance the baseline either. Measured
+four ways in, one of them the most ordinary loop there is: extract a helper,
+then keep tuning the caller.
+
+A replaced body calls the copy in *its own* patch. So when a carried
+declaration changes, every body that calls it has to be re-emitted alongside,
+or those callers keep running against the older copy.
+
+Both follow from one rule rather than a case each: **a patch for a file
+contains the current version of everything this session has changed in that
+file.** `SessionMemory` is the two sets that make it hold, and the newest
+generation wins for all of them (Appendix A, `two-generations`).
+
+None of this was visible to the test suite, because every end-to-end test ran
+exactly one generation. `Loop.runGenerations` is the harness that would have
+caught it.
 
 ### 7.4 Implementation options
 
@@ -1711,7 +1761,7 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   164/164
+local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   171/171
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```

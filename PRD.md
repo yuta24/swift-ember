@@ -284,8 +284,18 @@ Examples:
 -   an `override` or `@objc` declaration *added*, rather than changed. A
     patch can only add a member through an extension, which may declare
     neither,
+-   a declaration added that overloads a name already in the binary, which
+    changes what existing code resolves to,
 -   a declaration removed. The original stays in the binary and nothing can
-    say what still calls it.
+    say what still calls it,
+-   a body using `#function`, `#file`, `#fileID`, `#line` or the other
+    source-location literals. They expand against the declaration the patch
+    emits rather than the original. A literal reaching the body through a
+    callee's *default argument* --- `function: String = #function` --- is
+    evaluated at the call site and expands in the patch too; that one is not
+    detected, and is the one known way a reload can quietly change what a log
+    line says,
+-   a computed property gaining or losing an accessor.
 
 Safety rule: unknown changes are Tier C.
 

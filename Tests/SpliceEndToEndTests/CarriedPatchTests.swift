@@ -159,3 +159,78 @@ let order = Order()
                                                          with: "func fee() -> Int { 5 }"),
                  before: ["2"], after: ["6"])
 }
+
+// MARK: - Across generations
+//
+// A carried declaration lives in the patch dylib and nowhere else, so the
+// patch after it has to carry it again. Nothing single-generation could see
+// that, and the whole suite was single-generation.
+
+private let extractedHelper = [
+    """
+    struct Order {
+        var cents = 1000
+        func total() -> String { "\\(cents)" }
+    }
+    let order = Order()
+    \(probe(#"["\(order.total())"]"#))
+    """,
+    """
+    struct Order {
+        var cents = 1000
+        func total() -> String { dollars(cents) }
+        func dollars(_ c: Int) -> String { "$\\(c / 100)" }
+    }
+    let order = Order()
+    \(probe(#"["\(order.total())"]"#))
+    """,
+    """
+    struct Order {
+        var cents = 1000
+        func total() -> String { "=" + dollars(cents) }
+        func dollars(_ c: Int) -> String { "$\\(c / 100)" }
+    }
+    let order = Order()
+    \(probe(#"["\(order.total())"]"#))
+    """,
+]
+
+/// Extract a helper, then keep tuning the caller. The second patch names a
+/// declaration only the first patch ever contained.
+@Test func aCarriedHelperSurvivesTheNextPatch() throws {
+    let output = try Loop.runGenerations(extractedHelper)
+    #expect(output == ["g0: 1000", "g1: $10", "g2: =$10"], "full output: \(output)")
+}
+
+/// Editing the carried helper itself. Its callers were replaced by an earlier
+/// patch and call *that* patch's copy, so they have to be re-emitted with it.
+@Test func editingACarriedHelperReachesItsEarlierCallers() throws {
+    var versions = Array(extractedHelper.prefix(2))
+    versions.append(versions[1].replacingOccurrences(of: #""$\#\(c / 100)""#,
+                                                     with: #""USD \#\(c / 100)""#))
+    let output = try Loop.runGenerations(versions)
+    #expect(output == ["g0: 1000", "g1: $10", "g2: USD 10"], "full output: \(output)")
+}
+
+/// A private helper, the same shape. This one was a regression: the closure
+/// that used to re-carry file-local declarations every generation went with the
+/// copy route it served.
+@Test func aCarriedPrivateHelperSurvivesTheNextPatch() throws {
+    let v0 = """
+    struct Order {
+        var cents = 1000
+        func total() -> String { "\\(cents)" }
+    }
+    let order = Order()
+    \(probe(#"["\(order.total())"]"#))
+    """
+    let v1 = v0.replacingOccurrences(
+        of: #"func total() -> String { "\#\(cents)" }"#,
+        with: """
+        func total() -> String { dollars(cents) }
+            private func dollars(_ c: Int) -> String { "$\\(c / 100)" }
+        """)
+    let v2 = v1.replacingOccurrences(of: "{ dollars(cents) }", with: #"{ "=" + dollars(cents) }"#)
+    let output = try Loop.runGenerations([v0, v1, v2])
+    #expect(output == ["g0: 1000", "g1: $10", "g2: =$10"], "full output: \(output)")
+}
