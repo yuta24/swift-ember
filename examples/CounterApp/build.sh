@@ -45,7 +45,7 @@ if [ "$CONFIG" = debug ]; then
     defines=(-D SPLICE_ENABLED)
     flags=(-Onone
            -enable-testing
-           -Xfrontend -enable-implicit-dynamic
+           -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports
            "${defines[@]}")
 else
     flags=(-O)

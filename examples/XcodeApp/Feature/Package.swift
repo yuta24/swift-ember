@@ -15,7 +15,8 @@ let package = Package(
                 // replaceable has to be asked for here. Debug only, and
                 // unsafeFlags is acceptable because a local package is never
                 // resolved as a versioned dependency.
-                .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
+                .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic",
+                              "-Xfrontend", "-enable-private-imports"],
                              .when(configuration: .debug))
             ])
     ]

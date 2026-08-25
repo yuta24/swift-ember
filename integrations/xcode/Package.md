@@ -10,12 +10,19 @@ why the app's own settings do not reach it.
 .target(
     name: "Feature",
     swiftSettings: [
-        .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
+        .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic",
+                      "-Xfrontend", "-enable-private-imports"],
                      .when(configuration: .debug))
     ])
 ```
 
 That is all. Optimisation and testability arrive on their own.
+
+The second flag is what lets a patch reach the package's `private`
+declarations. Without it the package is still patchable, but only for bodies
+that touch nothing private --- which is a much smaller set than it sounds, since
+most method bodies read private state. `doctor` reports it per module, by
+asking the compiler rather than reading the setting.
 
 ## Why the xcconfig is not enough
 
@@ -52,12 +59,18 @@ swift-splice doctor --project App.xcodeproj --scheme App
 ```
 
 ```
-Replacement keys      OK    22 exported
-  Feature             2 keys
-  XcodeApp            20 keys
-  a module missing from this list cannot be patched
+Replacement keys      OK    28 exported
+  Feature             3 keys
+  XcodeApp            25 keys
+  a module missing from this list cannot be patched; see
+  integrations/xcode/Package.md
+Private imports       OK    every patchable module accepts @_private
 ```
 
 The list is read out of the built binary, not out of build settings, so it
 answers the question the settings cannot. A module that is missing gets a
 refusal naming it when you edit it, rather than silence.
+
+The private-imports line is asked the same way, by type-checking one import
+against the built module. Both are questions a build setting can answer wrongly:
+the setting can be right in a file nobody rebuilt since.
