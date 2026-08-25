@@ -241,11 +241,12 @@ and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
     a new computed property. The patch carries it rather than replacing
     anything, and nothing in the running binary can call it, so it displaces
     nothing,
--   `private` and `fileprivate` body change, where every caller in the file
-    can itself be replaced. The declaration is not replaced --- it has no key
-    --- but the patch carries a copy under the same name and replaces the
-    callers, all of them or none. This is also what lets a patched body call
-    a private helper it did not change, which before failed at COMPILE.
+-   `private` and `fileprivate` body change, and any body that reads private
+    state or names a private type. These need
+    `-Xfrontend -enable-private-imports` on the module's build, which gives
+    them replacement keys like any other declaration; the patch names them
+    through `@_private(sourceFile:)`. Without the setting they are refused at
+    COMPILE with the setting spelled out.
 
 ### Tier B: Potentially hot reloadable
 
@@ -254,10 +255,6 @@ Requires validation and may be introduced incrementally:
 -   generic implementation change under any configuration other than
     `-Onone`, where specialization may bypass the replacement,
 -   changes reached only through binary-only dependency modules,
--   a `private` declaration reached through a function value captured before
-    the patch, such as one stored in a property. The copy the patch carries
-    is not what that value points at. Detecting the capture requires more
-    than the file-scoped name analysis the classifier does today.
 
 ### Tier C: Hot restart / rebuild required
 
@@ -284,23 +281,11 @@ Examples:
     backing storage despite looking like accessors,
 -   operator declaration body changed,
 -   protocol requirement changed,
--   `private` / `fileprivate` body change where a caller cannot be
-    replaced --- an initialiser, a stored property's initial value, a
-    top-level statement --- since the patch's copy would then be reached by
-    some callers and not others. The declaration itself is never replaced:
-    implicit dynamic does not cover it and `@testable import` cannot reach
-    it. Tier A covers the case where every caller can be replaced,
 -   an `override` or `@objc` declaration *added*, rather than changed. A
     patch can only add a member through an extension, which may declare
     neither,
--   a `private` / `fileprivate` declaration whose name is overridden in the
-    same file. A carried copy is statically dispatched and the subclass's
-    version stops running,
--   a `private` / `fileprivate` declaration reached from a default argument,
-    which compiles into a generator function dynamic replacement does not
-    reach,
--   any body naming a `private` / `fileprivate` stored property, type, or
-    typealias. Neither replaceable nor copyable.
+-   a declaration removed. The original stays in the binary and nothing can
+    say what still calls it.
 
 Safety rule: unknown changes are Tier C.
 
@@ -353,10 +338,10 @@ diagnostic, so the gap is safe, but the covered set is undocumented and
 version-sensitive. The implementation MUST treat coverage as something
 measured per toolchain rather than derived from a source-level rule.
 
-A missing key ends replacement, not the edit. A `private` declaration is
-reached instead by carrying a copy in the patch and replacing its callers
-(section 8, Tier A), which needs no key at all. `@inlinable` and
-`@_transparent` have no such route, because their callers hold the code.
+The `private` and `fileprivate` rows hold only without
+`-enable-private-imports`; with it they get keys like anything else, which is
+what section 8 Tier A assumes. `@inlinable` and `@_transparent` have no such
+route, because their callers hold the code.
 
 ### FR-3 Change detection
 
@@ -593,10 +578,9 @@ Two findings changed the plan:
 
 Implicit dynamic also turned out not to cover `@inlinable`,
 `@_transparent`, `private`, or `fileprivate`, but each of those is
-rejected at compile time, so the pipeline fails closed there. `private`
-and `fileprivate` were later reached another way, by carrying a copy
-rather than replacing anything; the measurement here still stands, since
-what it says is that they cannot be *replaced*.
+rejected at compile time, so the pipeline fails closed there. The last two
+were later covered by adding `-enable-private-imports` to the build, which
+this spike did not try.
 
 One result differs by platform. The opaque result type change returns
 the new value on the macOS host and crashes on the Simulator, from
@@ -827,13 +811,12 @@ Still open:
     `@_transparent`, `private`, `fileprivate`, `deinit`), but it is
     undocumented. How should the tool track it across toolchains without
     hand-maintaining a list?
-12. Answered, with one part left over. A `private` declaration is never
-    replaced, but its change reaches the process when the patch carries a
-    copy and replaces every caller; `private` is file-scoped, so the file
-    bounds that search, and the classifier does it. What remains open is a
-    reference captured as a function value before the patch --- stored in a
-    property, say --- which still points at the old copy. The name analysis
-    cannot see that, and the case is in Tier B rather than refused.
+12. Answered. Under `-enable-private-imports` a `private` declaration has a
+    replacement key like any other and is replaced normally, reached by the
+    patch through `@_private(sourceFile:)`. The earlier answer --- carry a
+    copy and replace every caller --- worked and was withdrawn: two reviews
+    found ten defects in it, every one a consequence of copying rather than
+    replacing. DESIGN.md 7.3c has the measurements.
 13. Is there any way to detect an opaque-result-type underlying change
     before loading, given that the compiler accepts it silently? Failing
     that, is rejecting every opaque-result-type declaration too blunt to

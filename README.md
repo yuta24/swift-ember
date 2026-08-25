@@ -118,20 +118,19 @@ they reach. Concretely:
 - **overrides**, including a body that opens with `super.viewDidLoad()`, and
   including one UIKit reaches through `objc_msgSend` rather than through
   Swift's vtable;
-- **`private` and `fileprivate` bodies**. These can never be replaced --- they
-  have no replacement key and `@testable import` cannot name them --- so the
-  patch carries its own copy and replaces the callers instead. All of them:
-  `private` is file-scoped, which is what makes "all of them" a question with
-  an answer;
+- **`private` and `fileprivate` bodies**, and any body that reads private
+  state or names a private type. These need one more build setting than the
+  rest --- `-Xfrontend -enable-private-imports` --- and it is worth the line:
+  without it, 5 of 32 ordinary body edits reach a running process. With it, 31.
+  Most method bodies in most types touch private state;
 - **declarations you just added**. A new helper is carried in the patch rather
   than replacing anything, since nothing already running could be calling it.
 
-The last two are also what lets you edit a body that *calls* a private helper
-at all. Before the patch carried them, that ordinary edit failed to compile.
-
 Anything that changes a type's layout, a signature, or the set of things a
-protocol requires is a rebuild, and so is any declaration returning an opaque
-result type. `PRD.md` section 8 is the full tier list.
+protocol requires is a rebuild, and so is any declaration removed or any
+declaration returning an opaque result type. `PRD.md` section 8 is the full
+tier list, and `DESIGN.md` section 7.3b is where those two numbers come
+from.
 
 ## Layout
 
@@ -142,8 +141,8 @@ Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              32 cases pinning what Swift dynamic replacement does
-Tests/                 176 tests: what the classifier decides, what the
+fixtures/              39 cases pinning what Swift dynamic replacement does
+Tests/                 164 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight

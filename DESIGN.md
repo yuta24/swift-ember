@@ -486,24 +486,15 @@ Methods on:
 
 `mutating` status must remain unchanged.
 
-Two further shapes are safe candidates, and neither is a body-only change
-in the same sense:
+`private` and `fileprivate` declarations are among them. Under
+`-enable-private-imports` they have replacement keys like any other and the
+patch names them through `@_private(sourceFile:)`, so nothing about them is
+special. Section 7.3c is how that was decided and what it replaced.
 
--   a declaration that did not exist in the built binary. It is carried in
-    the patch rather than replacing anything. Nothing already running can
-    call it, so it displaces nothing and changes no layout,
--   a `private` or `fileprivate` declaration whose body changed. It cannot
-    be replaced --- it has no key, and `@testable import` cannot name it ---
-    but the patch can carry its own copy, and a replaced body then resolves
-    the reference to that copy rather than to the invisible original. The
-    copy is only reached from what the patch replaced, so *every* caller in
-    the file has to be replaced along with it, or one function would mean
-    two things at once. `private` is file-scoped, which is what bounds that
-    search.
-
-Carrying a copy is also required, not optional, whenever a replaced body
-calls a `private` declaration at all. Without it the patch names something
-the patch module cannot see and fails at COMPILE.
+One further shape is a safe candidate without being a body-only change: a
+declaration that did not exist in the built binary. It is carried in the
+patch rather than replacing anything. Nothing already running can call it,
+so it displaces nothing and changes no layout.
 
 #### Unsafe
 
@@ -533,121 +524,100 @@ the patch module cannot see and fails at COMPILE.
     the patch carries would then be reached by some callers and not others,
 -   an `override` or `@objc` declaration *added*. An extension is the only
     place a patch can put a member, and it may declare neither,
--   a file-local declaration whose name is *overridden* in the same file. A
-    carried copy sits in an extension and is statically dispatched, so a
-    replaced caller reaches the copy where it used to reach the subclass's
-    version. Measured: the process quietly ran the base class's
-    implementation while the reload reported success. `private` and
-    `fileprivate` members can only be overridden from inside their own file,
-    so the file-scoped check is complete,
--   a file-local declaration reached from a *default argument*. A default
-    argument compiles into a generator function of its own, which dynamic
-    replacement does not touch,
--   any body that names a file-local declaration no patch can carry: a
-    stored property, a type, a typealias, an operator, an `@objc` member, one
-    returning an opaque type, one of a comma-separated binding, or one of two
-    that collided on a single identity. There is no key to replace it and no
-    copy that could stand in --- a copy of storage would be different storage.
-    Refused rather than emitted, because the patch would otherwise fail at
-    COMPILE against generated source and blame the developer's file for it.
-
-    That list is not how the check is written. Listing the ways a declaration
-    can fail to be carryable is exactly what kept turning out to be
-    incomplete: four of the seven entries above were found one at a time,
-    after the check was written, each as a patch that did not build. The set
-    is now *derived* --- declared file-local anywhere in the file, and not
-    among the declarations actually carried --- so a new way to be
-    uncarryable joins it without anyone noticing,
--   a member of an extension of a file-local type. `extension Helper` carries
-    no `private` of its own, and Swift gives its members the type's access
-    level anyway. The enclosing type's name is part of what the patch writes
-    down, so it counts as something the declaration names.
-
-### 7.3a Where the facts come from
-
-Three of the refusals above read facts about the file rather than about the
-declaration being edited: which names are overridden, which are file-local and
-uncarryable, and whether a file-local protocol exists.
-
-These are collected by a pass over the whole tree, deliberately not by the
-indexing walk. The walk stops descending in three places --- a file-local type,
-an `#if` block, a function body --- and summarises what is inside as residue.
-That is right for deciding what changed and wrong for these facts: an
-`override` inside `#if os(iOS)` is still an override. Collected along the walk,
-the override guard saw an empty set for four ordinary spellings, and a carried
-copy was measured displacing a subclass's implementation in a running process
-while the reload reported success --- the exact failure the guard had just been
-written to close.
-
-Mentions have the same shape of hazard. A call to a private operator spells it
-with an operator token rather than an identifier, so collecting only
-identifiers left one invisible to every guard: measured, the patch compiled,
-the private overload was not in it, and the call silently rebound to a generic
-one.
+-   a declaration *removed*. The original stays in the binary and nothing
+    can say what still calls it.
 
 ### 7.3b Reach
 
 The question this section does not otherwise answer is what fraction of
 ordinary edits reach a running process.
 
-Measured over three hand-written files in the shapes this tool is for --- an
-`ObservableObject` view model, an async service, a UIKit view controller, 403
-lines between them --- by editing every function body, accessor, `init`,
-`subscript` and `deinit` in turn:
+Measured by editing every function body, accessor, `init`, `subscript` and
+`deinit` in turn, across three hand-written files in the shapes this tool is
+for --- an `ObservableObject` view model, an `actor` service, a view controller
+--- and classifying each edit on its own:
 
 ``` text
-                            bodies   hot patched   refused
-CartViewModel.swift             18             5        13
-FeedService.swift               13             3        10
-ProfileViewController.swift     15             0        15
-                                46             8        38
+                            bodies   before   after
+CartViewModel.swift             10        2       9
+FeedService.swift                9        1       9
+ProfileViewController.swift     13        2      13
+                                32        5      31
 ```
 
-Eight of forty-six, and zero for the view controller. Thirty-two of the
-thirty-eight refusals name a `private` declaration the patch cannot reach.
+Before and after are the same files and the same sweep, run against the
+classifier as it stood at commit 90eefba and as it stands now. What changed
+between them is section 7.3c.
 
-The cause is one thing, and the counterfactual isolates it: with every
-`private` stored property in those files changed to `internal`, the same sweep
-goes from 8 to 31. A patch cannot name a `private` declaration, because
-`@testable import` elevates `internal` and stops there --- and a method that
-touches private state is most methods in most real types. A view controller is
-almost entirely methods that touch private outlets, which is why it scores
-zero.
+Every one of the twenty-seven refusals in the "before" column names a
+`private` declaration the patch could not reach --- a stored property, a
+helper, a type. That was not the analysis being blunt. A patch simply could
+not write the name down, because `@testable import` elevates `internal` and
+stops there, and a method that touches private state is most methods in most
+real types. A view controller is almost entirely methods that touch private
+outlets, which is why it scored two.
 
-Two smaller cliffs, both whole-file: one `private protocol` anywhere disables
-carrying for the entire file (section 12.5), and nothing inside an `#if` is
-ever patchable, since the block is residue.
+The one refusal left is an `init`, which is residue and always was.
 
-Almost none of this is the name analysis being blunt --- 30 of the 32 refusals
-are unavoidable given what a patch can name. The one genuinely spurious shape
-is a local variable sharing a name with an unrelated private stored property
-elsewhere in the file, because `mentions` is every identifier token with no
-scope resolution. Moving the number therefore needs a different mechanism for
-private state, not a smarter analysis. Section 7.3c is the measured candidate.
+Two whole-file limits remain, both unrelated: nothing inside an `#if` is ever
+patchable, since the block is residue, and a removed declaration is a rebuild.
 
-### 7.3c Private imports, measured and not adopted
+### 7.3c Private imports
 
-`-Xfrontend -enable-private-imports` on the application build, and
-`@_private(sourceFile: "Cart.swift")` on the patch's import, both work on Xcode
-27.0 Beta 4:
+`-Xfrontend -enable-private-imports` on the module's build, and
+`@_private(sourceFile:)` on the patch's import.
+
+Measured on Xcode 26.2 through 27.0 Beta 4, on the macOS host and on an iOS
+Simulator, and pinned by seven fixtures:
 
 ``` text
 read a private stored property from a patched body    works
 replace a private function directly, by its own key   works
+replace a member of a private type                    works
+a default argument's generator sees the replacement   works
+an existential through a private witness table        works
+an overridden fileprivate member keeps its dispatch   works
+without the flag: rejected at COMPILE                 works
 ```
 
-The second is the surprising half. With private imports enabled the private
-declaration has a replacement key like any other, so it is *replaced* rather
-than copied --- and the replacement was observed through an unpatched caller,
-which a carried copy could never be.
+The second line is the one that mattered. With private imports a private
+declaration has a replacement key of its own, so it is *replaced* rather than
+copied --- and the replacement was observed through an unpatched caller, which
+a copy could never be.
 
-Adopting this would raise reach from 8/46 toward the 31/46 the counterfactual
-suggests, and would make most of section 7.3's carry machinery a fallback
-rather than the main path. It is not adopted because it is a change to what
-every integrating project must build with, not a change to this tool, and
-because the flag is another undocumented frontend option to put behind the
-adapter in section 4.4. Recorded here so the decision is made on the
-measurement rather than on the guess.
+That distinction is why this section replaced a large amount of code rather
+than adding to it. Reaching a private declaration by copying meant carrying
+the copy in the patch and replacing every caller, which needed a call-graph
+closure over the file and three guards around the ways a copy can be reached,
+or not reached, by something the analysis could not see: an override that
+turns a copy into a statically-dispatched impostor, a default argument's
+generator that keeps calling the original, a witness table entry that is not a
+syntactic reference at all. Two reviews found ten defects in that machinery,
+every one of them a consequence of copying rather than replacing. Replacement
+has none of them, and the machinery is gone.
+
+What it costs, measured on `examples/XcodeApp`:
+
+``` text
+debug dylib                496,664 -> 502,216 bytes   +1.1%
+clean build                     10 s -> 8 s           no penalty
+incremental build         2,094-2,317 -> 1,986-2,382 ms   no difference
+dispatch, 20M calls          1,455 -> 1,461 ms        +0.4%
+```
+
+The costs it does carry are not in the numbers. It is a second undocumented
+frontend option to keep behind the adapter in section 4.4, and it changes what
+every integrating project must build with --- one line in the xcconfig, and one
+per local package, since Xcode does not pass `OTHER_SWIFT_FLAGS` into package
+targets. `doctor` asks the compiler per module rather than reading the setting,
+because a setting can be right in a file nobody has rebuilt since; that exact
+mistake is how this was first measured wrong.
+
+A patch emits the private import only for files that declare something
+file-local, so a project that has not added the setting keeps working for
+every file without private code rather than failing everywhere at once. When
+it does fail, `PatchCompiler` translates the compiler's diagnostic into the
+setting that is missing.
 
 ### 7.4 Implementation options
 
@@ -1073,9 +1043,10 @@ private / fileprivate
   error: replaced function 'f()' could not be found
 ```
 
-The `private` row is a statement about *replacement* only. Section 7.3
-describes the route around it, which does not replace the declaration at
-all: the patch carries a copy and replaces the callers.
+The `private` row holds only without `-enable-private-imports`. With it,
+private and fileprivate declarations get keys like anything else and are
+replaced normally; section 7.3c has the measurements and what adopting it
+removed.
 
 Two cautions apply to reading this table.
 
@@ -1740,20 +1711,19 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    32/32  32/32 (iOS 27.0)   176/176
+local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   164/164
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
 
-The counts differ by row because the matrix grew. Six cases --- the three
-`override-*` ones, `patch-local-declaration`, `private-via-caller`, and
-`carried-two-generations` --- were added after every row but Xcode 27.0b4 was
-last measured, so the other rows report the 26-case matrix and the 109-test
-suite they were actually run against; the suite has since grown to 176 with
-the tests that pin the new cases and the refusals a review added. Five of the six were run separately on
-the host under Xcode 26.2, 26.3, and 26.5 and pass on all three, so nothing
-suggests the older rows would differ; but a row is not re-measured until it is
-re-run, and none of them has been.
+The counts differ by row because the matrix grew, from 26 cases to 39, and
+the test suite with it. Only the Xcode 27.0b4 row has been re-run against the
+current matrix; the others report what they were actually measured against.
+The thirteen added cases were run separately on the host under Xcode 26.2,
+26.3 and 26.5 and pass on all three --- including the seven that depend on
+`-enable-private-imports`, which matters most, since that is a second
+undocumented frontend option. Nothing suggests the older rows would differ,
+but a row is not re-measured until it is re-run.
 
 The last two rows come from `.ci-results/*.yaml` uploaded by the run,
 not from anything committed here, and they cover two things no machine
@@ -1821,8 +1791,14 @@ toolchains:
       override_via_objc_dispatch: tested
       super_call_in_replacement: tested
       patch_local_declaration: tested
-      private_via_replaced_callers: tested
       carried_declaration_across_generations: tested
+      private_function_with_private_imports: tested
+      private_type_member: tested
+      private_stored_property_read: tested
+      private_default_argument: tested
+      private_witness: tested
+      private_override: tested
+      private_imports_absent: rejected_at_compile
       inlinable: unsupported
       transparent: unsupported
       private: unsupported
@@ -2170,7 +2146,7 @@ host        arm64-apple-macosx26.0
 simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
 ```
 
-The matrix was run on both targets. All 32 cases pass on both, and every
+The matrix was run on both targets. All 39 cases pass on both, and every
 result below holds for both except where noted.
 
 Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
@@ -2226,8 +2202,16 @@ override, called through the base class       replaced, state preserved
 override, called through objc_msgSend         replaced
 override whose replacement calls super        replaced, state preserved
 declaration carried only in the patch         callable from a replaced body
-private function, via its replaced callers    new implementation observed
 two patches carrying the same private name    no collision; newest wins
+
+with -enable-private-imports:
+private function, by its own key              replaced; unpatched caller sees it
+member of a private type                      replaced
+private stored property, read from a patch    readable
+private helper behind a default argument      replaced; the generator sees it
+private witness, existential call             replaced
+overridden fileprivate member                 replaced; dispatch unchanged
+without the flag                              rejected at COMPILE
 opaque result type, same underlying type      replaced
 two generations loaded in sequence            newest wins
 
