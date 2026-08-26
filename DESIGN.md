@@ -1261,11 +1261,87 @@ someone their `some View` edit is memory-unsafe would be false.
 continue. `watch` prints exactly what it will and will not do when the
 variable is set. It is not a feature.
 
-What would have to be found next: how Xcode Previews reaches a body,
-given that `DebugReplaceableView` exists for that purpose and is public
-but undocumented. `_makeView` and the attribute graph are where the
-original implementation is captured, so an invalidation trigger alone is
-not enough --- the graph re-ran and still called the old code.
+### 13.1 The `DebugReplaceableView` route, measured and closed
+
+The question this section used to end on --- how Xcode Previews reaches
+a body, given that `DebugReplaceableView` exists for that purpose --- has
+been followed to the end. It does not lead anywhere this tool can go.
+
+What is there. `DebugReplaceableView` is a struct with `Body = Never`
+and a `_makeView` of its own; it conforms to SwiftUI's internal
+`DynamicView`, holds its erased child in a class
+(`DebugReplaceableViewStorageBase`, so the child could be swapped
+without disturbing any layout), and SwiftUICore exports
+
+``` text
+T _$s7SwiftUI20DebugReplaceableViewV20invalidateEverythingyyFZ
+     static SwiftUI.DebugReplaceableView.invalidateEverything() -> ()
+```
+
+which is exactly the trigger the earlier measurement was missing. It is
+absent from the swiftinterface but externally visible, so `dlsym` finds
+it. Disassembled, it takes an unfair lock and walks a global
+`LazyContainerManager`. There is no feature check in it.
+
+What happens when it is called. A spike app built for iOS 26 --- the
+floor the eraser needs --- loaded a patch replacing a `some View` body
+and then called it:
+
+``` text
+SPIKE before          bodyType=DebugReplaceableView   method=OLD method
+SPIKE loaded
+SPIKE after-load      bodyType=DebugReplaceableView   method=NEW method
+SPIKE invalidateEverything returned
+SPIKE after-invalidate bodyType=DebugReplaceableView  method=NEW method
+```
+
+Three things at once. The erasure is real: at this deployment target
+`some View` genuinely is `DebugReplaceableView`. The replacement is
+real: a direct call gets the new code. And `invalidateEverything()` runs
+and returns without crashing --- **and the screen does not change.**
+
+The control is what makes that conclusive. A second view's body calls an
+ordinary *method*, and that method's replacement is the kind this tool
+supports everywhere else. It stayed at "OLD method" on screen while
+returning "NEW method" to a direct call, which says the body was never
+re-evaluated at all. `invalidateEverything()` did not cause a render
+pass; it is not that a render pass produced stale output.
+
+Why. The dynamic path `DebugReplaceableView` takes is gated on
+`_ViewListInputs.debugReplaceableViewCount`, an optional box that the
+view host passes down. It does not appear in the swiftinterface, and
+neither do `DebugReplaceableViewCount` or `DebugReplaceableViewInfo`.
+`_ViewListInputs` itself is public and **empty** --- an opaque token with
+no members and no initialiser:
+
+``` swift
+public struct _ViewListInputs { }
+```
+
+So the input that turns the mechanism on can only be supplied by
+whatever creates the host, which is Previews. Nothing outside SwiftUI
+can construct or modify a `_ViewListInputs`, and the container manager
+`invalidateEverything` walks is therefore empty in an ordinary
+application. That is not a missing trigger or an undiscovered entry
+point; it is a boundary.
+
+The conclusion is the same as the one section 13 already reached, now
+with the last plausible route eliminated rather than untried: SwiftUI
+`body` stays refused. `SPLICE_EXPERIMENTAL_SWIFTUI` still lifts the
+refusal, and what it buys is a patch that loads, binds, and changes
+nothing on screen.
+
+Recorded at this length so the route is not walked a third time. What
+would change the answer is Apple giving the host input a public
+spelling, or a different mechanism appearing --- not more effort against
+this one.
+
+What was not tried, so that the limit of the measurement is on the
+record: `invalidateEverything()` was called from the main queue between
+render passes, not from inside a graph update. If it turns out to need a
+transaction it is still gated on an input nothing outside SwiftUI can
+supply, so this is noted as an untested variation rather than as a
+remaining hope.
 
 Apple exposes `DebugReplaceableView` for debug-time replacement
 scenarios. Three facts constrain its use:
