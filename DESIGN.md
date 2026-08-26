@@ -1354,6 +1354,15 @@ pin is dispatch. The runtime's window discovery --- walking
 `connectedScenes` --- needs a real application and is covered only by
 the example below.
 
+`examples/UIKitApp` is the shape this section is about: a storyboard, a
+scene delegate, a navigation controller, a table view with prototype
+cells, an outlet, a segue and an `@IBAction`. It is where the two halves
+of the one-shot note are visible next to each other --- `awakeFromNib`
+on a pooled cell, which the reuse pool means really does not change, and
+the application delegate, where the advice is that a build is needed.
+Both were measured against it, and the screen agreed with what `watch`
+said in each case.
+
 End to end in `examples/XcodeApp`, whose `ReceiptController` is a real
 `UIViewController` inside the SwiftUI app: an edit to a method the
 controller calls during layout reached the screen in 498 ms, with the

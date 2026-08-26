@@ -160,10 +160,23 @@ check_runtime_across_toolchains() {
     return "$failed"
 }
 
+# Both real projects, because they are configured the same way and fail
+# differently: XcodeApp is SwiftUI with a local package, UIKitApp is a
+# storyboard with a scene delegate and compiled resources.
 build_xcode_example() {
-    xcodebuild -project examples/XcodeApp/XcodeApp.xcodeproj -scheme XcodeApp \
-        -configuration Debug -destination 'generic/platform=iOS Simulator' \
-        build 2>&1 | tail -3 | grep -q 'BUILD SUCCEEDED'
+    local project ok=0
+    for project in XcodeApp UIKitApp; do
+        printf '  %-10s ' "$project"
+        if xcodebuild -project "examples/$project/$project.xcodeproj" -scheme "$project" \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            build 2>&1 | tail -3 | grep -q 'BUILD SUCCEEDED'; then
+            echo "ok"
+        else
+            echo "FAILED"
+            ok=1
+        fi
+    done
+    return "$ok"
 }
 
 # --- simulator -------------------------------------------------------------
@@ -226,9 +239,14 @@ build_examples() {
 # doctor reads the built binary back, so this proves the settings in
 # integrations/xcode produce something actually patchable.
 run_doctor() {
-    "$(swift build --show-bin-path)/swift-splice" doctor \
-        --project examples/XcodeApp/XcodeApp.xcodeproj --scheme XcodeApp \
-        --sources examples/XcodeApp/Sources
+    local splice ok=0 project
+    splice="$(swift build --show-bin-path)/swift-splice"
+    for project in XcodeApp UIKitApp; do
+        echo "  $project"
+        "$splice" doctor --project "examples/$project/$project.xcodeproj" \
+            --scheme "$project" --sources "examples/$project/Sources" || ok=1
+    done
+    return "$ok"
 }
 
 # --- run -------------------------------------------------------------------

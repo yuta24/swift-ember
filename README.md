@@ -82,7 +82,9 @@ swift-splice watch  --project App.xcodeproj --scheme App
 
 `doctor` names each missing setting rather than reporting a general failure,
 and it verifies the claim against the built binary instead of trusting the
-settings. `examples/XcodeApp` is a project wired up this way.
+settings. `examples/XcodeApp` (SwiftUI, with a local package) and `examples/UIKitApp`
+(storyboards, a navigation controller, a table view) are projects wired up
+this way.
 
 ## How it works
 
@@ -160,7 +162,8 @@ Tests/                 199 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
-examples/XcodeApp      the same thing as a real .xcodeproj
+examples/XcodeApp      the same thing as a real .xcodeproj, in SwiftUI
+examples/UIKitApp      storyboards, a navigation controller, a table view
 DESIGN.md              architecture and the measurements behind it
 PRD.md                 scope, tiers, milestones
 ```
