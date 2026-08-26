@@ -1,8 +1,8 @@
 // The one UIKit entry point a reload cannot reach on its own.
 //
 // `viewDidLoad` runs once per loaded view. Replacing it is correct and takes
-// effect nowhere, because nothing calls it again -- the same silent no-op that
-// SwiftUI `body` is refused for.
+// effect nowhere, because nothing calls it again -- the same shape as a
+// SwiftUI body whose view is never re-evaluated (DESIGN.md section 13.1).
 //
 // Discarding the controller's view does re-run it, the controller's own state
 // survives, and the rebuilt view is not put back where the old one was --- all

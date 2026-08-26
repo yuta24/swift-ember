@@ -20,7 +20,7 @@ cd "$ROOT"
 # inferred, so that skipping "the simulator" does not quietly skip a build that
 # never needed one.
 ALWAYS_STAGES="toolchain build tests fixtures runtime-toolchains xcode-build"
-SIMULATOR_STAGES="simulator fixtures-simulator examples doctor"
+SIMULATOR_STAGES="simulator fixtures-simulator examples ui-fixtures doctor"
 ALL_STAGES="$ALWAYS_STAGES $SIMULATOR_STAGES"
 
 SKIP_SIMULATOR=0
@@ -264,6 +264,7 @@ if [ "$SKIP_SIMULATOR" -eq 0 ]; then
     step simulator boot_simulator
     step fixtures-simulator run_simulator_fixtures
     step examples build_examples
+    step ui-fixtures ./fixtures/ui/run.sh
     step doctor run_doctor
 fi
 

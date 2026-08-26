@@ -2,6 +2,7 @@
 .splice/
 .ci-results/
 fixtures/.build/
+fixtures/ui/.build/
 examples/*/.build/
 examples/*/splice-context.json
 examples/**/xcuserdata/

@@ -157,8 +157,9 @@ Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              43 cases pinning what Swift dynamic replacement does
-Tests/                 199 tests: what the classifier decides, what the
+fixtures/              43 cases pinning what Swift dynamic replacement does,
+                       and 3 more under ui/ that need a rendering process
+Tests/                 203 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
@@ -211,15 +212,13 @@ nothing.
 
 Release builds, physical devices, and anything that changes a type's layout.
 
-SwiftUI `body` is a rebuild too, though not for the reason you would guess.
-UIKit has no such problem --- see above --- because it dispatches when it
-calls, not when it compiles.
-`View` carries a type eraser, so a return type of exactly `some View` is
-already concrete and patching one is safe — it just does nothing. Nested
-opaque positions such as `(some View)?` are not erased and remain genuinely
-unsafe. SwiftUI reaches a body through
-code generated at compile time rather than through the replacement, so the
-reload reports success and the screen does not change. A reload that lies is
-worse than a refusal. `DESIGN.md` section 13 has the measurements.
+SwiftUI `body` is a rebuild too, and the reason took three attempts to get
+right. `View` carries a type eraser, so the patch is safe to load, and a
+replaced body does run when SwiftUI evaluates that view --- it renders. What
+it also does, when the body's concrete type changes and the view is a row of
+a `List`, is abort the process: the eraser stores its child in a generic box
+that the graph downcasts to the type it saw first. Adding `.padding()` is
+enough. `DESIGN.md` section 13.1 has the measurements, including the two
+earlier answers that were wrong.
 
 The full list is `PRD.md` section 5.

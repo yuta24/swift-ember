@@ -33,12 +33,16 @@ public struct PatchableDeclaration: Sendable {
     public let simpleName: String
     /// How many replaceable entities this declaration emits.
     ///
-    /// One for a function. For a computed property it is one per accessor, and
-    /// the difference matters: FR-13 compares what the patch asked for against
-    /// what the loaded image says it carries, and the image counts accessors.
-    /// Measured, a `var x: T { get set }` contributes two records for one
-    /// declaration, so counting declarations reported every get/set property
-    /// edit as a reload nobody could confirm.
+    /// One for a function, one per accessor for a computed property. The
+    /// difference matters: FR-13 compares what the patch asked for against
+    /// what the loaded image says it carries, and the image counts accessors
+    /// rather than declarations. Measured, a `var x: T { get set }`
+    /// contributes two records for one declaration, so counting declarations
+    /// reported every get/set property edit as a reload nobody could confirm.
+    ///
+    /// An opaque return brings a record of its own as well --- measured, a
+    /// `some View` body emits two --- which is not accounted for here because
+    /// nothing opaque reaches a patch.
     public let replacementCount: Int
 
     /// Whether this declaration could be *added* by a patch.
@@ -88,33 +92,6 @@ public struct FileIndex: Sendable {
 /// Deliberately syntactic. DESIGN.md section 7.4 says not to reach for
 /// compiler internals until simpler mechanisms fail, and for body-only changes
 /// the syntax is enough.
-/// What the index is willing to consider, beyond what it can prove.
-public struct ClassifierPolicy: Sendable {
-    /// Allow declarations returning an opaque result type.
-    ///
-    /// Off by default and dangerous on: changing the concrete type behind
-    /// `some P` compiles and loads without a diagnostic and is then undefined
-    /// (DESIGN.md 12.7). `View` is the one protocol measured to be different,
-    /// because it carries `@_typeEraser(DebugReplaceableView)` and every
-    /// `some View` is already erased to that concrete type. This switch exists
-    /// so that claim can be tested against a running app rather than argued
-    /// about; see DESIGN.md 13.
-    public var allowOpaqueResultTypes = false
-
-    public init(allowOpaqueResultTypes: Bool = false) {
-        self.allowOpaqueResultTypes = allowOpaqueResultTypes
-    }
-
-    public static let `default` = ClassifierPolicy()
-
-    /// Reads the switch from the environment so a spike can be run without a
-    /// build of its own. Not a supported interface.
-    public static var fromEnvironment: ClassifierPolicy {
-        ClassifierPolicy(
-            allowOpaqueResultTypes: ProcessInfo.processInfo.environment["SPLICE_EXPERIMENTAL_SWIFTUI"] == "1")
-    }
-}
-
 /// Accumulates one file's index.
 ///
 /// A value rather than four `inout` parameters threaded through every visit:
@@ -184,8 +161,7 @@ private struct IndexBuilder {
 }
 
 public enum DeclarationIndexer {
-    public static func index(source: String,
-                             policy: ClassifierPolicy = .default) -> FileIndex {
+    public static func index(source: String) -> FileIndex {
         let file = Parser.parse(source: source)
         var builder = IndexBuilder()
 
@@ -199,9 +175,9 @@ public enum DeclarationIndexer {
         detector.walk(file)
 
         let imports = collectImports(file.statements.map(\.item))
-        let importsSwiftUI = imports.contains { moduleName(of: $0) == "SwiftUI" }
+        let importsSwiftUI = SwiftUIImportFinder.found(in: file)
 
-        walk(members: file.statements.map(\.item), context: [], policy: policy,
+        walk(members: file.statements.map(\.item), context: [],
              importsSwiftUI: importsSwiftUI, into: &builder)
 
         // Not sorted: order is part of the fingerprint. Sorting made a pure
@@ -213,20 +189,20 @@ public enum DeclarationIndexer {
     }
 
     private static func walk(members: [CodeBlockItemSyntax.Item], context: [String],
-                             policy: ClassifierPolicy, importsSwiftUI: Bool,
+                             importsSwiftUI: Bool,
                              into builder: inout IndexBuilder) {
         for item in members {
             guard case .decl(let decl) = item else {
                 builder.note(normalise(item))
                 continue
             }
-            visit(decl, context: context, policy: policy, importsSwiftUI: importsSwiftUI,
+            visit(decl, context: context, importsSwiftUI: importsSwiftUI,
                   into: &builder)
         }
     }
 
     private static func visit(_ decl: DeclSyntax, context: [String],
-                              policy: ClassifierPolicy, importsSwiftUI: Bool,
+                              importsSwiftUI: Bool,
                               into builder: inout IndexBuilder) {
         // Before the branch below, not after: ProtocolDeclSyntax conforms to
         // both DeclGroupSyntax and NamedDeclSyntax, so it would otherwise be
@@ -248,7 +224,7 @@ public enum DeclarationIndexer {
             let head = head(of: type)
             builder.note(normalise(head))
             walk(members: type.memberBlock.members.map { .decl($0.decl) },
-                 context: context + [name], policy: policy, importsSwiftUI: importsSwiftUI,
+                 context: context + [name], importsSwiftUI: importsSwiftUI,
                  into: &builder)
             return
         }
@@ -265,19 +241,19 @@ public enum DeclarationIndexer {
             let head = head(of: ext)
             builder.note(normalise(head))
             walk(members: ext.memberBlock.members.map { .decl($0.decl) },
-                 context: [name], policy: policy, importsSwiftUI: importsSwiftUI,
+                 context: [name], importsSwiftUI: importsSwiftUI,
                  into: &builder)
             return
         }
 
         if let function = decl.as(FunctionDeclSyntax.self) {
-            record(function: function, context: context, policy: policy,
+            record(function: function, context: context,
                    importsSwiftUI: importsSwiftUI, into: &builder)
             return
         }
 
         if let variable = decl.as(VariableDeclSyntax.self) {
-            record(variable: variable, context: context, policy: policy,
+            record(variable: variable, context: context,
                    importsSwiftUI: importsSwiftUI, into: &builder)
             return
         }
@@ -337,10 +313,51 @@ public enum DeclarationIndexer {
         return String(path.split(separator: ".").first ?? path)
     }
 
+    /// Whether the file imports Apple's SwiftUI as a whole module.
+    ///
+    /// Asked of the syntax rather than of the rendered import lines, and the
+    /// difference is a segfault. Matching text took the first component of the
+    /// last token, so `import struct SwiftUI.Text` counted as importing
+    /// SwiftUI while bringing no `View` into scope at all --- and a file that
+    /// then declared a `View` protocol of its own had its `some View` bodies
+    /// treated as erased. Measured: the patch compiled, loaded, and the process
+    /// died with EXC_BAD_ACCESS on the witness table, on the host and on the
+    /// Simulator. That is the undefined behaviour section 12.7 describes, and
+    /// this check is the only thing standing between it and a default-on
+    /// feature.
+    ///
+    /// Reading the tree also finds an import inside an `#if`, which the text
+    /// form could not: a conditional import renders as the whole block, so
+    /// `#if canImport(SwiftUI)` refused every body in the file.
+    ///
+    /// What it still cannot see is SwiftUI arriving through another module's
+    /// `@_exported import`. That stays a refusal, which costs a rebuild rather
+    /// than correctness.
+    private final class SwiftUIImportFinder: SyntaxVisitor {
+        private var seen = false
+
+        static func found(in file: SourceFileSyntax) -> Bool {
+            let finder = SwiftUIImportFinder(viewMode: .sourceAccurate)
+            finder.walk(file)
+            return finder.seen
+        }
+
+        override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+            // A declaration-level import brings one declaration, not the
+            // module, so `View` and its `@_typeEraser` are not in scope.
+            if node.importKindSpecifier == nil,
+               node.path.count == 1,
+               node.path.first?.name.text == "SwiftUI" {
+                seen = true
+            }
+            return .skipChildren
+        }
+    }
+
     // MARK: - Functions
 
     private static func record(function: FunctionDeclSyntax, context: [String],
-                               policy: ClassifierPolicy, importsSwiftUI: Bool,
+                               importsSwiftUI: Bool,
                                into builder: inout IndexBuilder) {
         let labels = function.signature.parameterClause.parameters.map { parameter in
             (parameter.firstName.text == "_" ? "_" : parameter.firstName.text) + ":"
@@ -388,10 +405,8 @@ public enum DeclarationIndexer {
         let returnType = function.signature.returnClause?.type
         if containsOpaqueType(returnType) {
             let erasedView = isErasedSwiftUIView(returnType, importsSwiftUI: importsSwiftUI)
-            if !(erasedView && policy.allowOpaqueResultTypes) {
-                builder.reject(identity, erasedView ? swiftUIBodyReason : opaqueReason, fingerprint)
-                return
-            }
+            builder.reject(identity, erasedView ? swiftUIBodyReason : opaqueReason, fingerprint)
+            return
         }
 
         let carryable = isCarryable(attributes: function.attributes, modifiers: function.modifiers)
@@ -418,7 +433,7 @@ public enum DeclarationIndexer {
     // MARK: - Properties
 
     private static func record(variable: VariableDeclSyntax, context: [String],
-                               policy: ClassifierPolicy, importsSwiftUI: Bool,
+                               importsSwiftUI: Bool,
                                into builder: inout IndexBuilder) {
 
 
@@ -476,10 +491,8 @@ public enum DeclarationIndexer {
         let declaredType = binding.typeAnnotation?.type
         if containsOpaqueType(declaredType) {
             let erasedView = isErasedSwiftUIView(declaredType, importsSwiftUI: importsSwiftUI)
-            if !(erasedView && policy.allowOpaqueResultTypes) {
-                builder.reject(identity, erasedView ? swiftUIBodyReason : opaqueReason, fingerprint)
-                return
-            }
+            builder.reject(identity, erasedView ? swiftUIBodyReason : opaqueReason, fingerprint)
+            return
         }
 
         let carryable = isCarryable(attributes: variable.attributes, modifiers: variable.modifiers)
@@ -560,18 +573,46 @@ public enum DeclarationIndexer {
         return finder.found
     }
 
-    /// `View` is the measured exception, and it fails a different way.
+    /// `View` is the measured exception, and it fails a third way.
     ///
-    /// It carries `@_typeEraser(DebugReplaceableView)`, so `some View` is
-    /// already a concrete type and changing the tree shape is not the
-    /// undefined-behaviour case above --- the patch loads, and a direct call to
-    /// `body` really does reach it. SwiftUI's own rendering does not, so the
-    /// edit silently changes nothing on screen. Measured in DESIGN.md 13; a
-    /// silent no-op is the outcome this tool exists to avoid reporting as
-    /// success.
+    /// Two earlier answers here were wrong, so this one carries its
+    /// measurement. The patch is not the undefined-behaviour case above at the
+    /// point of loading: `View` carries `@_typeEraser`, the whole return type
+    /// is concrete, and a replaced body really does run whenever SwiftUI
+    /// evaluates that view --- on screen, no invalidation needed. The second
+    /// answer, that SwiftUI never evaluates it, was measured against a view
+    /// SwiftUI had no reason to evaluate.
+    ///
+    /// What kills it is the erasure's own storage. `DebugReplaceableView`
+    /// keeps its child in a *generic* box, and the graph downcasts that box to
+    /// the type recorded on first evaluation:
+    ///
+    /// ```text
+    /// Could not cast value of type
+    ///   'DebugReplaceableViewStorage<VStack<TupleContent<Pack{Text, Text}>>>'
+    /// to
+    ///   'DebugReplaceableViewStorage<Text>'
+    /// ```
+    ///
+    /// SIGABRT, in `DebugReplaceableViewChild.updateValue()`. So section 12.7
+    /// is not avoided, only relocated: the whole return type being concrete
+    /// does not make the type *behind* it free to change.
+    ///
+    /// Two conditions, both measured. It needs the iOS 26 eraser --- below
+    /// that `some View` erases to `AnyView`, which tolerates a type change
+    /// because that is what `AnyView` is for. And it needs the view to be a
+    /// row of something that builds a view list: the same patch against the
+    /// same view is harmless in a `VStack` and aborts in a `List`. `List` is
+    /// not a corner.
+    ///
+    /// So the refusal stands, and an edit that changes nothing about the
+    /// body's concrete type --- a different string, a different number --- is
+    /// refused with it, because the classifier cannot tell the two apart from
+    /// syntax and the cost of being wrong is the process.
     static let swiftUIBodyReason = """
-        returns `some View`; the patch would load and change nothing, because \
-        SwiftUI does not evaluate a view body through the replacement
+        returns `some View`; the patch loads and runs, but a change to the \
+        view's concrete type aborts the process when that view is a row of a \
+        List (measured on iOS 26 and later)
         """
 
     /// Whether this is the one shape measured to be erased, and therefore the

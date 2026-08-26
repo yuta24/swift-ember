@@ -70,19 +70,6 @@ public enum Watch {
         let watcher = FileWatcher(roots: roots)
         watcher.prime()
 
-        if ClassifierPolicy.fromEnvironment.allowOpaqueResultTypes {
-            print("""
-            SPLICE_EXPERIMENTAL_SWIFTUI is set.
-
-            Declarations returning an opaque result type will be patched. For
-            `some View` that is safe and useless: the patch loads and SwiftUI
-            never calls it, so the reload is reported as successful and nothing
-            on screen changes. For any other `some P` it is undefined behaviour.
-            This exists to continue the spike in DESIGN.md 13, not to be used.
-
-            """)
-        }
-
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         print("listening on 127.0.0.1:\(port)")
         print("")
@@ -169,9 +156,9 @@ public enum Watch {
                     }
                     // Said only when it is not true. A reload that could not be
                     // confirmed is still a reload, but the developer should know
-                    // which kind they are looking at -- the whole reason this
-                    // tool refuses SwiftUI `body` is that a reload which lies is
-                    // worse than a refusal.
+                    // which kind they are looking at. A reload nobody can
+                    // vouch for is the shape this project refuses elsewhere,
+                    // and saying so is what keeps it from being one.
                     if !verified {
                         // Which way the count was wrong, not only that it was.
                         // "Could not count" and "counted more than were asked
@@ -186,8 +173,13 @@ public enum Watch {
                             // ends the session before it reaches here, and the
                             // expected count is never zero, so the smallest
                             // number this line can carry is two.
-                            print("  not verified: the image replaced \(registered.counted) declarations "
-                                  + "and \(registered.expected) were generated")
+                            // Records, not declarations: an accessor and an
+                            // opaque return each bring one, so the two numbers
+                            // are not counts of the same thing and saying
+                            // "declarations" made a correct pair look wrong.
+                            let plural = registered.expected == 1 ? "was" : "were"
+                            print("  not verified: the image carries \(registered.counted) replacement "
+                                  + "records and \(registered.expected) \(plural) generated")
                         } else {
                             print("  not verified: the runtime could not read the image's records")
                         }
@@ -200,9 +192,9 @@ public enum Watch {
                         print("  refreshed: \(refreshed)")
                     }
                     // The entry points a refresh cannot reach on its own. Said
-                    // rather than left to be discovered, for the same reason
-                    // `some View` is refused outright: an edit that loads and
-                    // changes nothing is the worst outcome this tool has.
+                    // rather than left to be discovered: an edit that loads and
+                    // changes nothing is the outcome this tool exists to avoid
+                    // reporting as success.
                     // Grouped by how far out of reach the new body is. A view
                     // controller can be made again inside this process and will
                     // run it; an application delegate cannot, and a relaunch

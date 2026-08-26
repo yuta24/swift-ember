@@ -99,7 +99,7 @@ cases:
     kind: unsafe
     state_preserved: false
     result: pass
-    observed: "signal 11"
+    observed: "exit 0; g0: old g1: 42"
     note: "compiles and loads with no diagnostic; runtime outcome is undefined and has been observed as the new value, as garbage, and as SIGSEGV"
   - id: opaque-result-type-stable
     supported: true
@@ -208,7 +208,7 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
-    note: "some View is erased to DebugReplaceableView, so a shape change is safe; the replacement dispatches on a direct call but not through SwiftUI's rendering"
+    note: "some View is erased and the replacement dispatches on a direct call; what this case cannot see is SwiftUI's own storage, which aborts on a type change in a List -- see DESIGN.md 13.1"
   - id: throws-function
     supported: true
     kind: replace

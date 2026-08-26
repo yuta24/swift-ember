@@ -73,10 +73,9 @@ public enum ChangeClassification: Sendable {
 /// design (PRD.md FR-4).
 public enum ChangeClassifier {
     public static func classify(baseline: String, current: String,
-                                policy: ClassifierPolicy = .default,
                                 memory: SessionMemory = SessionMemory()) -> ChangeClassification {
-        classify(before: DeclarationIndexer.index(source: baseline, policy: policy),
-                 after: DeclarationIndexer.index(source: current, policy: policy),
+        classify(before: DeclarationIndexer.index(source: baseline),
+                 after: DeclarationIndexer.index(source: current),
                  memory: memory)
     }
 

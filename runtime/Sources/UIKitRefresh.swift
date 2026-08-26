@@ -16,11 +16,12 @@ import UIKit
 /// simply has no reason to call anything again just because an image was
 /// loaded. This sends the reasons.
 ///
-/// That is the whole difference from SwiftUI, which DESIGN.md section 13
-/// refuses: there the graph re-runs and still reaches the original body, so no
-/// amount of invalidation helps. Here invalidation is sufficient, and the
-/// fixtures `uikit-live-instance` and `uikit-data-source` measure both of the
-/// tiers below on an instance that is already on screen.
+/// SwiftUI is the same problem with a harder answer (DESIGN.md section 13.1).
+/// A replaced `body` also runs when SwiftUI evaluates it; what differs is that
+/// asking UIKit to lay out again is a supported call, while making SwiftUI
+/// re-evaluate a view whose value did not change is not. Here invalidation is
+/// sufficient, and the fixtures `uikit-live-instance` and `uikit-data-source`
+/// measure both of the tiers below on an instance that is already on screen.
 ///
 /// What is not here is a tier that re-runs `viewDidLoad`; see
 /// `Splice.RefreshOptions` for what was measured and why it was dropped.

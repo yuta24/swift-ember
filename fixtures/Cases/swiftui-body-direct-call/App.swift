@@ -15,9 +15,14 @@
 // documents. This pins two halves of that claim: the patch loads without
 // corrupting anything, and a direct read of `body` really does reach it.
 //
-// What it cannot pin is the half that matters most. In a rendering app the
-// replacement changes nothing on screen, because SwiftUI does not evaluate a
-// body through it -- measured in DESIGN.md 13, and only observable with a UI.
+// What it cannot pin is the half that matters most, and this case passing
+// while the claim above it was wrong is how that half stayed wrong twice. In
+// a rendering app the replacement *does* run and *does* render -- and then
+// aborts the process if the body's concrete type changed and the view is a
+// row of a List, because SwiftUI's own storage is generic and the graph
+// downcasts it. A direct read of `body` never touches that storage, which is
+// exactly why this case is quiet about it. DESIGN.md 13.1; only observable
+// with a UI.
 
 import SwiftUI
 

@@ -272,12 +272,12 @@ Examples:
 -   ABI-relevant conformance/layout changes,
 -   build settings changed,
 -   imported module graph changed in an unsupported way,
--   SwiftUI `body`, or any other declaration returning an opaque result
-    type, whose underlying type changes. This passes both the compiler
-    and the loader without a diagnostic and is then undefined at
-    runtime, observed variously as the new value, as garbage, and as a
-    crash. Unsafe rather than merely unsupported,
--   any declaration returning an opaque result type, changed or not,
+-   any declaration returning an opaque result type. Changing the type
+    behind `some P` passes both the compiler and the loader without a
+    diagnostic and is then undefined at runtime, observed variously as
+    the new value, as garbage, and as a crash. `some View` fails
+    differently rather than not at all: the eraser makes it concrete and
+    then the graph aborts on a storage cast (section 13.1),
 -   `@inlinable` or `@_transparent` declaration body changed. Implicit
     dynamic does not cover these,
 -   property observer (`willSet`/`didSet`) body changed; these have real
@@ -730,29 +730,34 @@ answering "nothing changed" is the worst of the available answers.
 
 ### M4 --- SwiftUI spike
 
-Complete, with a negative result.
+Complete. The answer changed twice, and the second answer is the
+measured one.
 
 -   [x] Investigate `DebugReplaceableView` and current Xcode behaviour.
 -   [x] Determine opaque-result-type constraints.
--   [ ] Demonstrate a state-preserving SwiftUI edit. **Not feasible**
-    with dynamic replacement alone.
+-   [ ] Demonstrate a state-preserving SwiftUI edit. A `body` edit does
+    reach the screen with the session token unchanged, but only for an
+    edit that leaves the body's concrete type identical; anything else
+    aborts the process. Not shippable as a feature.
 
 `View` carries `@_typeEraser(DebugReplaceableView)`, so `some View` is
 already concrete and changing a view tree's shape is safe --- not the
 undefined behaviour section 12.7 describes for other opaque result
 types. The replacement loads and dispatches on a direct call to `body`.
 
-But SwiftUI never makes that call. In a running app the patch reports
-success and the screen does not change, in the same render pass where an
-ordinary method replacement took effect. SwiftUI reaches a body through
-compile-time-generated `_makeView` code, not through the replaceable
-getter, so an invalidation trigger would not help: the graph re-ran and
-still produced the old tree.
+SwiftUI makes that call too --- a replaced body runs when SwiftUI
+evaluates that view, and renders. The paragraph that used to stand here
+said it never does, and it was reading a body SwiftUI had no reason to
+evaluate as a body SwiftUI evaluated and ignored.
 
-A reload that reports success and changes nothing is worse than a
-refusal, so `body` stays Tier C --- now for a reason that is understood
-rather than feared. `DESIGN.md` section 13 has the measurements and what
-would have to be found next.
+`body` stays Tier C anyway, for the reason underneath both of those. The
+eraser makes the return type concrete and keeps the child in a generic
+box; changing the body's concrete type makes the graph downcast that box
+to the type it saw first, and the process aborts. Measured on iOS 26 and
+later, for a view that is a row of a `List`. Adding `.padding()` is
+enough to trigger it.
+
+`DESIGN.md` section 13.1 has the measurements and both earlier answers.
 
 One thing the spike fixed along the way: generated patches now carry the
 original file's imports. A patched body mentioning `VStack` had been

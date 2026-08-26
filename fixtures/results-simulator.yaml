@@ -208,7 +208,7 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
-    note: "some View is erased to DebugReplaceableView, so a shape change is safe; the replacement dispatches on a direct call but not through SwiftUI's rendering"
+    note: "some View is erased and the replacement dispatches on a direct call; what this case cannot see is SwiftUI's own storage, which aborts on a type change in a List -- see DESIGN.md 13.1"
   - id: throws-function
     supported: true
     kind: replace

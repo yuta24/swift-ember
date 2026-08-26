@@ -1240,108 +1240,154 @@ such type. Changing a view tree's shape in a patch is safe. A fixture
 pins this, and a second one pins that the replacement dispatches: a
 direct read of `body` after loading really does run the new code.
 
-It still must not be allowed, for a different reason.
+It renders, too --- and it still must not be allowed, for a reason that
+took three attempts to state correctly. Section 13.1 has the
+measurements.
 
-In a rendering application the patch loads, reports success, and changes
-nothing on screen. Both halves were observed in one render pass:
-`Banner.body` was replaced twice and the banner never changed, while
-`Cart.subtotalLabel()` was replaced in the same session and its row
-updated immediately. So the view did re-render and still produced the
-old tree. SwiftUI does not reach a body through the replaceable getter;
-it goes through the `_makeView` machinery generated at compile time,
-which holds the original.
+A replaced `body` runs whenever SwiftUI evaluates that body, and
+produces the new tree on screen. What it also does, when the body's
+concrete type changes and the view is a row of a `List`, is abort the
+process. The erasure makes the *return* type concrete; it does not make
+the type behind it free to change, because `DebugReplaceableView` keeps
+its child in a generic box that the graph downcasts to whatever it saw
+first. So section 12.7 is relocated rather than escaped.
 
-That makes SwiftUI `body` a silent no-op, which is the outcome this tool
-treats as worse than a refusal --- the developer edits, the CLI says
-"hot reloaded", and the screen disagrees. The classifier refuses it, with
-its own wording rather than the undefined-behaviour one, because telling
-someone their `some View` edit is memory-unsafe would be false.
+The classifier refuses `some View`, with wording of its own rather than
+the undefined-behaviour one, because "undefined at runtime" is the wrong
+description of a clean `SIGABRT` in a cast --- and because the two
+earlier wordings, "does nothing" and "is safe and useless", were both
+measured wrong.
 
-`SPLICE_EXPERIMENTAL_SWIFTUI=1` lifts the refusal so the spike can
-continue. `watch` prints exactly what it will and will not do when the
-variable is set. It is not a feature.
+### 13.1 Three answers, and the measurements that separate them
 
-### 13.1 The `DebugReplaceableView` route, measured and closed
+This section has carried three conclusions. The first two were wrong,
+and it is worth being precise about how, because the same mistake is
+available to anyone who measures this again.
 
-The question this section used to end on --- how Xcode Previews reaches
-a body, given that `DebugReplaceableView` exists for that purpose --- has
-been followed to the end. It does not lead anywhere this tool can go.
+**One: "SwiftUI never evaluates a body through the replacement."**
+Wrong. It was measured on a view SwiftUI had no reason to evaluate. A
+view whose value compares equal to its predecessor is skipped, so a
+stateless view's body runs once at launch and never again --- and that
+looks identical to a body being evaluated and ignored unless you log
+from inside it. The corrected experiment logs every evaluation:
 
-What is there. `DebugReplaceableView` is a struct with `Body = Never`
-and a `_makeView` of its own; it conforms to SwiftUI's internal
-`DynamicView`, holds its erased child in a class
-(`DebugReplaceableViewStorageBase`, so the child could be swapped
-without disturbing any layout), and SwiftUICore exports
+``` text
+                      before the patch        after the patch loads
+Stateless   no stored properties      1 eval  never evaluated again
+Valued      takes a changing value    every tick   every tick, NEW
+Stateful    drives its own @State     every beat   every beat, NEW
+```
+
+and the screen agreed exactly: `Stateless: OLD`, `Valued: NEW 7`,
+`Stateful: NEW`. So a replaced body **does** run, and renders, with no
+invalidation sent to SwiftUI at all. Measured under both erasers.
+
+**Two: "so it is safe, and the refusal was wrong."** Also wrong, and
+this one had a patch shipped against it for a few hours. Changing the
+body's concrete type aborts the process:
+
+``` text
+Could not cast value of type
+  'DebugReplaceableViewStorage<VStack<TupleContent<Pack{Text, Text}>>>'
+to
+  'DebugReplaceableViewStorage<Text>'
+```
+
+`SIGABRT`, in `DebugReplaceableViewChild.updateValue()` under
+`AG::Graph::UpdateStack::update()`. The eraser erases the outer type and
+stores the child in a *generic* box; the graph downcasts that box to the
+type recorded on first evaluation. A concrete return type does not make
+the underlying type free to change.
+
+Two conditions, both measured by changing one thing at a time:
+
+-   **The eraser.** At an iOS 18 deployment target `some View` erases to
+    `AnyView`, which tolerates a type change because that is what
+    `AnyView` is for, and the same patch renders correctly. At iOS 26
+    and later it is `DebugReplaceableView`, and it aborts.
+-   **The container.** The same patch against the same view is harmless
+    inside a `VStack` and aborts inside a `List` --- changing only that
+    line turns one into the other. `List` builds a view list, which is
+    the path the generic storage is cast on. `List` is not a corner
+    case.
+
+The reach of the damage is what makes this a refusal rather than a
+caveat. The safe set is exactly "edits that leave the body's concrete
+type bit-identical" --- a different string, a different number, a
+modifier that happens to return the same type. Adding `.padding()` is
+outside it. Nothing syntactic tells those apart reliably, and the cost
+of being wrong is the developer's process, so the whole shape is
+refused.
+
+**Three: refused, because a change to the underlying type aborts.**
+That is the current answer, and unlike the first two it names a
+mechanism that was reproduced from a clean container, with a single
+patch, on two deployment targets.
+
+It is also the first of the three with an artifact. `fixtures/ui/`
+builds a rendering application, delivers one patch, and asks whether the
+process is still beating; three cases hold the whole statement in place
+--- the abort in a `List`, the same patch surviving in a `VStack`, and a
+literal-only edit surviving in the `List`. The console matrix could not
+have caught any of this, and `swiftui-body-direct-call` passed happily
+through both wrong answers because a direct read of `body` never touches
+the storage that aborts.
+
+The measurement that would change it is Apple making the storage
+non-generic, or `some View` ceasing to erase to `DebugReplaceableView`.
+Neither is something this project can arrange.
+
+### 13.2 What is still open
+
+Nothing about reaching a body: that is answered, twice over. What is
+open is whether a safe subset can be identified soundly --- an edit that
+provably cannot change the body's concrete type. A token-level
+comparison that ignores literal contents is the obvious candidate and is
+not obviously sound, since a literal's *type* can change what a generic
+expression instantiates to. It is not worth attempting under the
+assumption that being wrong costs a rebuild; being wrong costs the
+process.
+
+### 13.3 The `DebugReplaceableView` route, followed and closed
+
+Followed before the mistake above was found. Kept because it answers a
+question this document had been carrying, and because it says something
+about a route somebody will otherwise try again --- but note that it is
+no longer needed for anything.
+
+`DebugReplaceableView` is a struct with `Body = Never` and a `_makeView`
+of its own; it conforms to SwiftUI's internal `DynamicView` and holds
+its erased child in a class, so the child could in principle be swapped
+without disturbing any layout. SwiftUICore exports
 
 ``` text
 T _$s7SwiftUI20DebugReplaceableViewV20invalidateEverythingyyFZ
      static SwiftUI.DebugReplaceableView.invalidateEverything() -> ()
 ```
 
-which is exactly the trigger the earlier measurement was missing. It is
-absent from the swiftinterface but externally visible, so `dlsym` finds
-it. Disassembled, it takes an unfair lock and walks a global
-`LazyContainerManager`. There is no feature check in it.
+which is absent from the swiftinterface but externally visible, so
+`dlsym` finds it. Disassembled, it takes an unfair lock and walks a
+global `LazyContainerManager`, with no feature check in it. Called from
+an application it returns without doing anything observable.
 
-What happens when it is called. A spike app built for iOS 26 --- the
-floor the eraser needs --- loaded a patch replacing a `some View` body
-and then called it:
-
-``` text
-SPIKE before          bodyType=DebugReplaceableView   method=OLD method
-SPIKE loaded
-SPIKE after-load      bodyType=DebugReplaceableView   method=NEW method
-SPIKE invalidateEverything returned
-SPIKE after-invalidate bodyType=DebugReplaceableView  method=NEW method
-```
-
-Three things at once. The erasure is real: at this deployment target
-`some View` genuinely is `DebugReplaceableView`. The replacement is
-real: a direct call gets the new code. And `invalidateEverything()` runs
-and returns without crashing --- **and the screen does not change.**
-
-The control is what makes that conclusive. A second view's body calls an
-ordinary *method*, and that method's replacement is the kind this tool
-supports everywhere else. It stayed at "OLD method" on screen while
-returning "NEW method" to a direct call, which says the body was never
-re-evaluated at all. `invalidateEverything()` did not cause a render
-pass; it is not that a render pass produced stale output.
-
-Why. The dynamic path `DebugReplaceableView` takes is gated on
-`_ViewListInputs.debugReplaceableViewCount`, an optional box that the
-view host passes down. It does not appear in the swiftinterface, and
-neither do `DebugReplaceableViewCount` or `DebugReplaceableViewInfo`.
-`_ViewListInputs` itself is public and **empty** --- an opaque token with
-no members and no initialiser:
+The reason is that the dynamic path is gated on
+`_ViewListInputs.debugReplaceableViewCount`, an optional box the view
+host passes down. Neither it nor `DebugReplaceableViewCount` nor
+`DebugReplaceableViewInfo` appears in the swiftinterface, and
+`_ViewListInputs` itself is public and **empty**:
 
 ``` swift
 public struct _ViewListInputs { }
 ```
 
-So the input that turns the mechanism on can only be supplied by
-whatever creates the host, which is Previews. Nothing outside SwiftUI
-can construct or modify a `_ViewListInputs`, and the container manager
-`invalidateEverything` walks is therefore empty in an ordinary
-application. That is not a missing trigger or an undiscovered entry
-point; it is a boundary.
+An opaque token with no members and no initialiser, so only whatever
+creates the host --- Previews --- can supply the input, and the manager
+`invalidateEverything` walks is empty in an ordinary application.
 
-The conclusion is the same as the one section 13 already reached, now
-with the last plausible route eliminated rather than untried: SwiftUI
-`body` stays refused. `SPLICE_EXPERIMENTAL_SWIFTUI` still lifts the
-refusal, and what it buys is a patch that loads, binds, and changes
-nothing on screen.
-
-Recorded at this length so the route is not walked a third time. What
-would change the answer is Apple giving the host input a public
-spelling, or a different mechanism appearing --- not more effort against
-this one.
-
-What was not tried, so that the limit of the measurement is on the
-record: `invalidateEverything()` was called from the main queue between
-render passes, not from inside a graph update. If it turns out to need a
-transaction it is still gated on an input nothing outside SwiftUI can
-supply, so this is noted as an untested variation rather than as a
-remaining hope.
+Worth keeping because it is the route somebody will otherwise try
+again, and because the storage it describes is the same storage section
+13.1 measures aborting: `DebugReplaceableViewStorage` is where both the
+hoped-for hook and the actual crash live.
 
 Apple exposes `DebugReplaceableView` for debug-time replacement
 scenarios. Three facts constrain its use:
@@ -1388,7 +1434,9 @@ internals.
 
 ## 13a. UIKit adapter
 
-Measured, and the result is the opposite of section 13's.
+Measured. Section 13 reached a similar place by a different road: both
+frameworks run a replaced body when they call it again, and the work is
+in getting them to call it again.
 
 UIKit dispatches at call time --- through the class's vtable, or through
 `objc_msgSend` for an `@objc` member --- so every entry point it calls
@@ -1451,7 +1499,8 @@ not as a benchmark.
 
 `viewDidLoad` has already run for every controller that exists. The
 patch replaces it correctly and nothing calls it again, which is the
-silent no-op `some View` is refused for --- so `watch` says so, and
+outcome this tool treats as worse than a refusal --- so `watch` says so,
+and
 `PatchCoordinator.oneShotLifecycleTargets` is the list it says it for.
 The reload still stands: the next controller of that type runs the new
 body.
@@ -2137,7 +2186,7 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   199/199
+local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   203/203
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```

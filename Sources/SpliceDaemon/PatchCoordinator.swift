@@ -254,13 +254,12 @@ public actor PatchCoordinator {
         let next = generation + 1
         let timeline = StageTimeline(generation: next)
 
-        let policy = ClassifierPolicy.fromEnvironment
         // One measurement: indexing is the bulk of classification, and two
         // rows in the summary read as two stages.
         let (currentIndex, classification) = timeline.measure(.classify) {
-            let currentIndex = DeclarationIndexer.index(source: current, policy: policy)
+            let currentIndex = DeclarationIndexer.index(source: current)
             let baselineIndex = baselineIndexes[url]
-                ?? DeclarationIndexer.index(source: baseline, policy: policy)
+                ?? DeclarationIndexer.index(source: baseline)
             baselineIndexes[url] = baselineIndex
             return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex,
                                                             memory: memories[url] ?? SessionMemory()))

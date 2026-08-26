@@ -245,3 +245,4 @@ private struct OtoolFailure: Error, CustomStringConvertible {
     let scope = try scopeWords(of: outcome.image, pointerWord: words[2])
     #expect(scope == 2, "the image registered \(scope) for one get/set property")
 }
+
