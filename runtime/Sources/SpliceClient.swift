@@ -226,11 +226,55 @@ final class SpliceClient: @unchecked Sendable {
         case .loaded(let generation, let durationMs, let registered):
             let names = request.declarations.joined(separator: ", ")
             state.note("g\(generation): \(names.isEmpty ? "loaded" : names)")
-            return .loaded(generation: generation, durationMs: durationMs, registered: registered)
+            return .loaded(generation: generation, durationMs: durationMs, registered: registered,
+                           refreshed: refreshUIKit())
         case .failed(let stage, let message):
             state.note("g\(request.generation) failed at \(stage): \(message)")
             return .failed(stage: stage, message: message)
         }
+    }
+
+    /// Makes the loaded generation visible, and says what that took.
+    ///
+    /// UIKit has to be told to call anything again; see UIKitRefresh. The wait
+    /// is bounded rather than a plain `DispatchQueue.main.sync` because an
+    /// application whose main thread is blocked would otherwise hold this
+    /// connection until the daemon's ten-second timeout and poison the session
+    /// -- over a reload that had already succeeded.
+    private func refreshUIKit() -> String? {
+        // The same condition UIKitRefresh is declared under, and it has to
+        // stay the same: `canImport(UIKit)` alone is true on watchOS, where
+        // that file does not exist, and the mismatch is a build failure rather
+        // than a missing feature.
+        #if canImport(UIKit) && !os(watchOS)
+        let options = state.refresh
+        guard !options.isEmpty else { return nil }
+
+        final class Holder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var stored: String?
+            var value: String? {
+                get { lock.withLock { stored } }
+                set { lock.withLock { stored = newValue } }
+            }
+        }
+        let holder = Holder()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { holder.value = UIKitRefresh.perform(options) }
+            finished.signal()
+        }
+        if finished.wait(timeout: .now() + 2) == .timedOut {
+            // Not "not refreshed". The block stays queued and the screen does
+            // update once the main thread is free -- measured -- so saying it
+            // did not happen would be the reverse of the lie this tool is
+            // built to avoid. What is true is that nobody waited to see.
+            return "still running; the main thread did not answer within 2 s"
+        }
+        return holder.value
+        #else
+        return nil
+        #endif
     }
 
     private func send<P: Encodable>(type: String, payload: P, requestId: String) {
@@ -250,7 +294,7 @@ final class SpliceClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 4
+let ProtocolVersion = 5
 
 struct Envelope: Codable {
     var protocolVersion: Int
@@ -281,7 +325,7 @@ struct LoadPatchRequest: Codable {
 }
 
 enum LoadPatchResult: Codable {
-    case loaded(generation: UInt64, durationMs: Double, registered: Int?)
+    case loaded(generation: UInt64, durationMs: Double, registered: Int?, refreshed: String?)
     case rejected(reason: String)
     case failed(stage: String, message: String)
 }

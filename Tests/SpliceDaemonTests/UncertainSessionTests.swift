@@ -30,14 +30,14 @@ private struct Harness {
 /// outcome.
 private func harness(answering answer: @escaping @Sendable () -> LoadPatchResult,
                      processId: Int32 = 1,
+                     source: String = #"struct S { func f() -> String { "old" } }"#,
                      sourceLocation: SourceLocation = #_sourceLocation) async throws -> Harness {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("splice-uncertain-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
     let subject = root.appendingPathComponent("S.swift")
-    try #"struct S { func f() -> String { "old" } }"#
-        .write(to: subject, atomically: true, encoding: .utf8)
+    try source.write(to: subject, atomically: true, encoding: .utf8)
 
     let image = root.appendingPathComponent("Patch.dylib")
     try Data().write(to: image)
@@ -158,7 +158,7 @@ private func edit(_ url: URL, to body: String) throws {
 @Test func aClassifierRefusalDoesNotPoison() async throws {
     // Never reaches the process at all. Poisoning here would make an ordinary
     // "add a stored property" edit demand a relaunch.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
 
     try "struct S { var added = 1\n func f() -> String { \"old\" } }"
         .write(to: h.subject, atomically: true, encoding: .utf8)
@@ -171,7 +171,7 @@ private func edit(_ url: URL, to body: String) throws {
 }
 
 @Test func aSuccessfulLoadLeavesTheSessionUsable() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
 
     try edit(h.subject, to: #""new""#)
     guard case .applied = await h.coordinator.handle(change: h.subject) else {
@@ -187,7 +187,7 @@ private func edit(_ url: URL, to body: String) throws {
     // it was built as. Poisoning here told the developer their process was
     // undescribable when there was no process, and then hid every later
     // classify and compile error behind that message.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
     h.runtime.disconnect()
     for _ in 0..<200 where h.coordinatorServerHasSession { try await Task.sleep(for: .milliseconds(20)) }
 
@@ -221,7 +221,7 @@ private func edit(_ url: URL, to body: String) throws {
     // Not a coordinator test: this is the runtime's own check, and until it
     // existed `.rejected` was unreachable, so the rule that some failures do
     // not poison had nothing real behind it. DESIGN.md section 6.3.
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
 
     // The fake stands in for a runtime that compares identities, which the
     // real one now does before calling dlopen.
@@ -229,7 +229,7 @@ private func edit(_ url: URL, to body: String) throws {
         guard envelope.type == "loadPatch",
               let request = try? envelope.decode(LoadPatchRequest.self) else { return nil }
         let result: LoadPatchResult = request.buildIdentity == "something else"
-            ? .loaded(generation: request.generation, durationMs: 1, registered: 1)
+            ? .loaded(generation: request.generation, durationMs: 1, registered: 1, refreshed: nil)
             : .rejected(reason: "the patch was built for a different binary")
         return ("loadResult", try! JSONEncoder().encode(result))
     }
@@ -249,7 +249,7 @@ private func edit(_ url: URL, to body: String) throws {
 /// for a newer build of the same sources, so the old comparison passed. The
 /// linker's UUID is not, and only the process can say which one it is running.
 @Test func aProcessRunningAnOlderBuildIsRefused() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
 
     h.runtime.responder = { envelope in
         guard envelope.type == "loadPatch",
@@ -258,7 +258,7 @@ private func edit(_ url: URL, to body: String) throws {
         // loaded images, and find none.
         let matched = request.buildUUIDs.contains("00000000-0000-0000-0000-00000000FFFF")
         let result: LoadPatchResult = matched
-            ? .loaded(generation: request.generation, durationMs: 1, registered: 1)
+            ? .loaded(generation: request.generation, durationMs: 1, registered: 1, refreshed: nil)
             : .rejected(reason: "this process is not running the binary the patch was linked against")
         return ("loadResult", try! JSONEncoder().encode(result))
     }
@@ -294,7 +294,7 @@ private func edit(_ url: URL, to body: String) throws {
 /// generated, so the patch did less than it said and the process can no longer
 /// be described.
 @Test func registeringFewerReplacementsThanGeneratedEndsTheSession() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 0) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 0, refreshed: nil) }
     try edit(h.subject, to: #""new""#)
     guard case .rejected(let error) = await h.coordinator.handle(change: h.subject) else {
         Issue.record("expected a REGISTER failure")
@@ -310,9 +310,9 @@ private func edit(_ url: URL, to body: String) throws {
 /// reader misread the image -- and ending the session every time a toolchain
 /// moves a field is not a trade worth making. The reload stands, unverified.
 @Test func registeringMoreThanGeneratedIsUnverifiedRatherThanFatal() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 99) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 99, refreshed: nil) }
     try edit(h.subject, to: #""new""#)
-    guard case .applied(_, _, _, let verified, _) = await h.coordinator.handle(change: h.subject) else {
+    guard case .applied(_, _, _, let verified, _, _, _, _) = await h.coordinator.handle(change: h.subject) else {
         Issue.record("expected the reload to stand")
         return
     }
@@ -323,12 +323,131 @@ private func edit(_ url: URL, to body: String) throws {
 /// A count the runtime could not read at all. The check that cannot run must
 /// not become a refusal.
 @Test func anUnreadableCountIsReportedRatherThanRefused() async throws {
-    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: nil) }
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: nil, refreshed: nil) }
     try edit(h.subject, to: #""new""#)
-    guard case .applied(_, _, _, let verified, _) = await h.coordinator.handle(change: h.subject) else {
+    guard case .applied(_, _, _, let verified, _, _, _, _) = await h.coordinator.handle(change: h.subject) else {
         Issue.record("expected the reload to stand")
         return
     }
     #expect(verified == false)
     #expect(await h.coordinator.isUncertain == false)
+}
+
+// MARK: - One-shot lifecycle
+
+/// A method that has already run is named, so the developer is not left
+/// staring at a screen that did not change.
+///
+/// Name-based, and the fixture says so: a plain Swift class, no `NSObject`,
+/// no `override`, nothing UIKit. That is the rule --- anything called
+/// `viewDidLoad` on a type earns the note --- and it is what makes the two
+/// exclusions below worth testing.
+///
+/// The reload itself stands: the body really is replaced, and every instance
+/// created from now on runs it. What must not happen is silence, which is the
+/// same standard `some View` is refused under.
+@Test func aReplacedViewDidLoadIsCalledOutAsAlreadyRun() async throws {
+    let before = "class Screen { func viewDidLoad() { print(\"old\") } }"
+    let h = try await harness(answering: { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) },
+                              source: before)
+    try before.replacingOccurrences(of: "\"old\"", with: "\"new\"")
+        .write(to: h.subject, atomically: true, encoding: .utf8)
+
+    guard case .applied(_, _, _, _, _, _, let oneShot, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(oneShot == [OneShotNote(name: "Screen.viewDidLoad()", scope: .instance)])
+}
+
+/// And an ordinary method is not, so the note means something when it appears.
+@Test func anOrdinaryMethodIsNotCalledOutAsAlreadyRun() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) }
+    try edit(h.subject, to: #""new""#)
+    guard case .applied(_, _, _, _, _, _, let oneShot, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(oneShot.isEmpty)
+}
+
+/// A *property* called `viewDidLoad` must not be named.
+///
+/// It is re-read on every access, so "nothing calls it again" would be the
+/// reverse of the truth --- the same kind of lie the note exists to prevent,
+/// pointed the other way.
+///
+/// What keeps it out is the spelling: every entry in `oneShotLifecycleTargets`
+/// carries its parentheses and a property's replacement target is the bare
+/// name. That is a quiet invariant, so `everyOneShotTargetIsSpelledAsAFunction`
+/// pins it directly and this case pins the behaviour it produces.
+@Test func aPropertyNamedLikeALifecycleMethodIsNotCalledOut() async throws {
+    let before = "class Screen { var viewDidLoad: Int { 1 } }"
+    let h = try await harness(answering: { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) },
+                              source: before)
+    try before.replacingOccurrences(of: "{ 1 }", with: "{ 2 }")
+        .write(to: h.subject, atomically: true, encoding: .utf8)
+
+    guard case .applied(_, let declarations, _, _, _, _, let oneShot, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(declarations.count == 1, "the property should still be reloaded")
+    #expect(oneShot.isEmpty)
+}
+
+/// Nor a top-level function: the advice names a type, and there is none.
+@Test func aTopLevelFunctionNamedLikeALifecycleMethodIsNotCalledOut() async throws {
+    let before = #"func viewDidLoad() -> String { "old" }"#
+    let h = try await harness(answering: { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) },
+                              source: before)
+    try before.replacingOccurrences(of: #""old""#, with: #""new""#)
+        .write(to: h.subject, atomically: true, encoding: .utf8)
+
+    guard case .applied(_, let declarations, _, _, _, _, let oneShot, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(declarations.count == 1)
+    #expect(oneShot.isEmpty)
+}
+
+/// The strongest one-shot there is: an application is launched once per
+/// process, so this one provably never runs again. Matched by its argument
+/// labels, since the name alone is just `application`.
+@Test func anAppDelegateLaunchMethodIsCalledOutAsAlreadyRun() async throws {
+    let before = """
+        class Delegate {
+            func application(_ app: Int, didFinishLaunchingWithOptions options: Int) -> Bool { true }
+        }
+        """
+    let h = try await harness(answering: { .loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil) },
+                              source: before)
+    try before.replacingOccurrences(of: "{ true }", with: "{ false }")
+        .write(to: h.subject, atomically: true, encoding: .utf8)
+
+    guard case .applied(_, _, _, _, _, _, let oneShot, _) = await h.coordinator.handle(change: h.subject) else {
+        Issue.record("expected the reload to stand")
+        return
+    }
+    #expect(oneShot == [OneShotNote(
+        name: "Delegate.application(_:didFinishLaunchingWithOptions:) (Int,Int)",
+        // Not `.instance`: there is one delegate per process, and a relaunched
+        // process starts from the built binary with no patch loaded, so the
+        // advice that tells you to make another one would not work.
+        scope: .process)])
+}
+
+/// The invariant that keeps properties out of the one-shot note.
+///
+/// A property's replacement target is the bare name, so an entry spelled with
+/// its parentheses cannot match one. Nothing in `oneShotLifecycleMethods` says
+/// that --- it falls out of how the entries are written --- so a later entry
+/// added without parentheses would silently reopen the case the test above
+/// exists for, and every test would still pass.
+@Test func everyOneShotTargetIsSpelledAsAFunction() {
+    for target in PatchCoordinator.oneShotLifecycleTargets.keys {
+        #expect(target.hasSuffix(")") && target.contains("("),
+                "\(target) would match a property of the same name")
+    }
 }

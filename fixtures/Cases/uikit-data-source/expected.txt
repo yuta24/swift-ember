@@ -1,0 +1,2 @@
+g0: cellForRowAt=old cellForRowAt=old text=row=old
+g1: cellForRowAt=new cellForRowAt=new text=row=new

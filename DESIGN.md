@@ -1310,6 +1310,160 @@ CoreReplacementEngine
 Do not couple core runtime correctness to undocumented SwiftUI
 internals.
 
+## 13a. UIKit adapter
+
+Measured, and the result is the opposite of section 13's.
+
+UIKit dispatches at call time --- through the class's vtable, or through
+`objc_msgSend` for an `@objc` member --- so every entry point it calls
+again reaches the replacement. Nothing about a loaded image makes it
+call anything again, which is the whole of the problem and the whole of
+the fix. `runtime/Sources/UIKitRefresh.swift` sends the reasons: it
+invalidates layout, constraints, and drawing across every window, and
+reloads every table and collection view. `Splice.RefreshOptions` is
+what an application can turn off.
+
+Three declaration shapes, each with a fixture:
+
+``` text
+uikit-live-instance   layoutSubviews, viewWillLayoutSubviews, draw(_:),
+                      and an @objc method, on the controller and view
+                      that already exist                           -> new
+uikit-data-source     cellForRowAt, a protocol requirement on a
+                      separate object, after reloadData            -> new
+uikit-view-did-load   viewDidLoad, unprompted                      -> not called
+```
+
+Three *declarations*, one dispatch shape. Every entry point above is
+`@objc`, so all three patches carry an Objective-C category and no
+`__swift5_replace` section (section 13a.2), and the vtable half of the
+sentence above is exercised by the host cases rather than by these. The
+UIKit method a developer most often edits is the other kind --- an
+ordinary Swift method the controller calls --- and that is what the
+example app demonstrates.
+
+The cases are Simulator-only, which `fixtures/run.sh` learned to
+express: `PLATFORMS` in `case.conf`, validated against the platforms the
+runner knows, and a skipped case is counted and named rather than
+quietly absent. Asking for a skipped case by name exits non-zero, since
+a request that ran nothing is not a pass.
+
+They run as a console process with no `UIApplication`, so the views are
+alive but on no screen and the render pass is forced by hand. What they
+pin is dispatch. The runtime's window discovery --- walking
+`connectedScenes` --- needs a real application and is covered only by
+the example below.
+
+End to end in `examples/XcodeApp`, whose `ReceiptController` is a real
+`UIViewController` inside the SwiftUI app: an edit to a method the
+controller calls during layout reached the screen in 498 ms, with the
+process's session token unchanged. One save, Xcode 27.0 Beta 4, iPhone
+17 Pro on iOS 27.0; the neighbouring saves in the same session measured
+396--516 ms, so read it as the same order as section 18.1's numbers and
+not as a benchmark.
+
+### 13a.1 `viewDidLoad` is named, not fixed
+
+`viewDidLoad` has already run for every controller that exists. The
+patch replaces it correctly and nothing calls it again, which is the
+silent no-op `some View` is refused for --- so `watch` says so, and
+`PatchCoordinator.oneShotLifecycleTargets` is the list it says it for.
+The reload still stands: the next controller of that type runs the new
+body.
+
+The list keys on the replacement target --- the name with its argument
+labels --- and only for a member of some type, which is what keeps
+`application(_:didFinishLaunchingWithOptions:)` in and two false
+positives out. A *property* called `viewDidLoad` is re-read on every
+access, so the note would have been the reverse of the truth; a
+top-level function has no type for the advice to name. Both were
+reachable and both are now tested.
+
+What keeps the property out is the spelling --- every entry carries its
+parentheses and a property's target is the bare name --- so that
+invariant is pinned by a test of its own rather than left to be noticed.
+
+The advice depends on the entry. A view controller or a scene can be
+made again inside the live process, which holds the patch, so the next
+one runs the new body. An application delegate cannot: there is one per
+process, and a relaunched process starts from the built binary with
+nothing loaded, so for those the honest advice is that seeing the change
+takes a build. Saying "the next instance gets it" there would have been
+advice that does not work.
+
+A tier that discarded each loaded controller's view was built, measured,
+and removed. Discarding the view does re-run `viewDidLoad`, and the
+controller's own state survives; `uikit-view-did-load` still measures
+that. What it does not do is put the rebuilt view back --- a
+controller's view is held by whatever installed it --- so on the example
+app it left a black window, the SwiftUI hosting controller's view having
+been discarded with nothing to rebuild it. Recorded so it is not
+re-attempted without solving the re-installation problem first.
+
+### 13a.2 An `@objc` replacement is a category, not a record
+
+The finding that made UIKit support work at all.
+
+`@_dynamicReplacement` on an `@objc` member emits **no**
+`__TEXT,__swift5_replace` section. It emits an Objective-C category,
+which the Objective-C runtime installs over the class's own method at
+image load:
+
+``` text
+__CATEGORY_INSTANCE_METHODS__TtC8XcodeApp17ReceiptController_$_Patch_001
+```
+
+FR-13's check counts what the image registered, and it counted only the
+Swift section. So every UIKit lifecycle edit produced "the patch
+registered 1 replacements; 2 were generated", ended the session, and
+demanded a restart --- for a reload that had worked and was on screen.
+
+The category carries **two** method entries for one replaced
+declaration, the original selector and the replacement's own, sharing a
+single `imp`. Counting entries said two replacements for one edited
+declaration, which reads as "the image did more than was asked" and
+left every such reload unverified.
+
+Counting distinct implementations fixed that and broke something worse.
+A declaration the patch merely *carries* also lands in that category
+when the class is `@objcMembers`, and it is indistinguishable from a
+replacement by that measure --- so allowing for it meant widening the
+accepted total, and the width cancelled the check. Measured: an edit
+that also extracted one helper produced a patch whose replacement was
+missing entirely, whose carried helper made up the difference, and which
+was reported as a **verified reload**. That is the single failure FR-13
+exists to catch. It was also cumulative, since `SessionMemory` re-emits
+carried declarations, so the slack grew with every save for the rest of
+the session.
+
+What separates them is in the image. A replacement is reachable from two
+selectors; something that replaced nothing is reachable from one:
+
+``` text
+count 3
+  name 0x8078  imp (0xbb8)   \_ the replaced @objc method
+  name 0x8080  imp (0xbb8)   /
+  name 0x7290  imp (0xc6c)   -- a carried helper, replacing nothing
+```
+
+So the runtime counts implementations reached by two or more selectors,
+carried declarations are absent from both sides of the comparison, and
+the check is an equality again. `fixtures/Cases/registered-replacements`
+carries one of each and requires the answer to be 4; under the previous
+rule it is 5.
+
+Accessors are the same problem in the other direction. A computed
+property is one declaration and one record *per accessor*, so a
+`{ get set }` edit registered two where one was asked for. What FR-13
+compares against is therefore a sum of
+`PatchableDeclaration.replacementCount` rather than a count of
+declarations.
+
+This evidence is weaker than the Swift section's, and the code says so:
+a category method whose selector the class already has replaces it, one
+it does not have is added, and nothing readable from the image tells
+them apart.
+
 ## 14. LLVM ORC/JITLink phase
 
 ### 14.1 Why it is deferred
@@ -1898,18 +2052,22 @@ below is `fixtures/run.sh` and `swift test` actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 27.0b4  6.4     macosx26.0    39/39  39/39 (iOS 27.0)   189/189
+local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   199/199
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
 
-The counts differ by row because the matrix grew, from 26 cases to 39, and
-the test suite with it. Only the Xcode 27.0b4 row has been re-run against the
+The counts differ by row because the matrix grew, from 26 cases to 43, and
+the test suite with it. The host column reads 40 of 43 rather than a
+failure: the three UIKit cases are Simulator-only and are skipped by
+name, which `fixtures/run.sh` counts separately. Only the Xcode 27.0b4 row has been re-run against the
 current matrix; the others report what they were actually measured against.
-The thirteen added cases were run separately on the host under Xcode 26.2,
-26.3 and 26.5 and pass on all three --- including the seven that depend on
-`-enable-private-imports`, which matters most, since that is a second
-undocumented frontend option. Nothing suggests the older rows would differ,
+Of the seventeen cases added since those rows, thirteen were run separately
+on the host under Xcode 26.2, 26.3 and 26.5 and pass on all three ---
+including the seven that depend on `-enable-private-imports`, which
+matters most, since that is a second undocumented frontend option. The
+other four --- the three UIKit cases and `registered-replacements` --- have
+been run only on Xcode 27.0b4. Nothing suggests the older rows would differ,
 but a row is not re-measured until it is re-run.
 
 The last two rows come from `.ci-results/*.yaml` uploaded by the run,
@@ -1919,10 +2077,17 @@ deployment target, which is where `some View` erases to `AnyView`
 instead of `DebugReplaceableView`. That difference is what the first CI
 run caught.
 
-Nothing measured differs between them. The unsafe cases produce SIGSEGV
-on all four, the SwiftUI erasure to `DebugReplaceableView` is present on
-all four, and a full reload of the sample app works on Xcode 26.5 at
-434 ms.
+Nothing measured differs between them. The SwiftUI erasure to
+`DebugReplaceableView` is present on all four, and a full reload of the
+sample app works on Xcode 26.5 at 434 ms.
+
+The unsafe cases are the exception, and they differ by *target* rather
+than by toolchain: `opaque-inside-a-type` produces SIGSEGV everywhere,
+while `opaque-result-type-changed` produces SIGSEGV on the Simulator and
+`exit 0; g0: old g1: 42` on the host. Both files record what they
+observed; an earlier sentence here claimed SIGSEGV for all of them,
+which the results files have never agreed with. Undefined is undefined,
+which is the conclusion those cases exist to support.
 
 Reproduce a row with:
 
@@ -2333,8 +2498,9 @@ host        arm64-apple-macosx26.0
 simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
 ```
 
-The matrix was run on both targets. All 39 cases pass on both, and every
-result below holds for both except where noted.
+The matrix was run on both targets. All 43 cases pass on the Simulator;
+40 pass on the host, the other three being UIKit cases that are skipped
+there by name. Every result below holds for both except where noted.
 
 Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
 simulator`, which regenerate `fixtures/results-macos.yaml` and

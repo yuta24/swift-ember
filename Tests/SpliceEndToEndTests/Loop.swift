@@ -145,7 +145,8 @@ enum Loop {
     ///
     /// For checks about the *artifact* rather than about what it does when
     /// loaded --- the shape of its replacement section, say.
-    static func compileOnly(baseline: String, plan: PatchPlan) throws -> CompiledPatch {
+    static func compileOnly(baseline: String, plan: PatchPlan,
+                            imports: [String] = []) throws -> CompiledPatch {
         let work = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("splice-section-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
@@ -159,7 +160,8 @@ enum Loop {
         try compileApplication(sources: [harness, appSource], module: module,
                                into: work, binary: binary)
 
-        let generated = try ReplacementGenerator.generate(module: module, generation: 1, plan: plan)
+        let generated = try ReplacementGenerator.generate(module: module, generation: 1, plan: plan,
+                                                          imports: imports)
         let patchSource = work.appendingPathComponent("Patch.swift")
         try generated.write(to: patchSource, atomically: true, encoding: .utf8)
 

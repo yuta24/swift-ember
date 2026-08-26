@@ -40,7 +40,7 @@ private func connectedRuntime(to server: IPCServer,
 
     runtime.responder = { envelope in
         guard envelope.type == "loadPatch" else { return nil }
-        let result = LoadPatchResult.loaded(generation: 3, durationMs: 1.5, registered: 1)
+        let result = LoadPatchResult.loaded(generation: 3, durationMs: 1.5, registered: 1, refreshed: nil)
         return ("loadResult", try! JSONEncoder().encode(result))
     }
 
@@ -48,7 +48,7 @@ private func connectedRuntime(to server: IPCServer,
                                    buildIdentity: "test-identity", buildUUIDs: [], declarations: ["A.f()"])
     let result = try await server.request(type: "loadPatch", payload: request,
                                           expecting: LoadPatchResult.self)
-    guard case .loaded(let generation, _, _) = result else {
+    guard case .loaded(let generation, _, _, _) = result else {
         Issue.record("expected .loaded, got \(result)")
         return
     }
@@ -240,7 +240,7 @@ private final class Reported: @unchecked Sendable {
             "the stale teardown wiped the current session")
 
     relaunched.responder = { envelope in
-        ("loadResult", try! JSONEncoder().encode(LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1)))
+        ("loadResult", try! JSONEncoder().encode(LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil)))
     }
     let result = try await server.request(
         type: "loadPatch",
@@ -401,7 +401,7 @@ private final class Reported: @unchecked Sendable {
     #expect(await app.connect())
     app.responder = { envelope in
         guard envelope.type == "loadPatch" else { return nil }
-        let result = LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1)
+        let result = LoadPatchResult.loaded(generation: 1, durationMs: 1, registered: 1, refreshed: nil)
         return ("loadResult", try! JSONEncoder().encode(result))
     }
     try app.send(type: "hello", payload: Hello(
@@ -461,5 +461,135 @@ private final class Reported: @unchecked Sendable {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
         #expect(ms < 1000, "waited \(Int(ms)) ms for an answer it could never read")
         #expect("\(error)".contains("upgrade one side"), "was: \(error)")
+    }
+}
+
+/// A runtime built before the protocol moved is the ordinary case after this
+/// tool is updated and the application is not rebuilt, and it must say so.
+///
+/// The hello is rejected, so no session is ever created. Every later request
+/// then failed as "no app is connected" with an action of "restart the app" --
+/// a loop with no exit, since restarting relaunches the same old runtime. What
+/// is needed is a build, and now that is what it says.
+@Test func aRuntimeAtAnOlderProtocolVersionSaysSoOnEveryRequest() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+
+    // By hand, because FakeRuntime always stamps the current version.
+    let hello = try JSONEncoder().encode(Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    var line = Data(#"{"protocolVersion":4,"type":"hello","requestId":"x","payload":"#.utf8)
+    line.append(Data("\"\(hello.base64EncodedString())\"}\n".utf8))
+    app.sendRaw(line)
+    try await Task.sleep(for: .milliseconds(300))
+
+    #expect(server.currentSession == nil, "a runtime this daemon cannot read must not hold the session")
+
+    let request = LoadPatchRequest(generation: 1, path: "/tmp/x", buildIdentity: "id",
+                                   buildUUIDs: [], declarations: [])
+    do {
+        _ = try await server.request(type: "loadPatch", payload: request,
+                                     expecting: LoadPatchResult.self, timeout: .seconds(2))
+        Issue.record("expected the request to fail")
+    } catch let error as IPCServer.IPCError {
+        guard case .versionMismatch(let version) = error else {
+            Issue.record("expected .versionMismatch, got \(error)")
+            return
+        }
+        #expect(version == 4)
+        #expect("\(error)".contains("protocol 4"))
+    }
+
+    // And it stops being the answer once a runtime this daemon can read shows
+    // up. The flag outlived the problem: after a rebuild fixed it, quitting
+    // the app reported "rebuild it" again.
+    let rebuilt = FakeRuntime(port: port)
+    #expect(await rebuilt.connect())
+    try rebuilt.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 2, loadedGenerations: [], buildMatchesProcess: true))
+    for _ in 0..<200 where server.currentSession == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(server.currentSession != nil, "the rebuilt runtime should hold the session")
+
+    rebuilt.disconnect()
+    for _ in 0..<200 where server.currentSession != nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    do {
+        _ = try await server.request(type: "loadPatch", payload: request,
+                                     expecting: LoadPatchResult.self, timeout: .seconds(2))
+        Issue.record("expected the request to fail")
+    } catch let error as IPCServer.IPCError {
+        guard case .notConnected = error else {
+            Issue.record("expected .notConnected after the mismatch was resolved, got \(error)")
+            return
+        }
+    }
+}
+
+/// A version this daemon cannot read explains why there is *no* session. It
+/// must not be allowed to describe one that exists.
+///
+/// The version guard runs before the type switch and before the token check,
+/// so every envelope from every unauthenticated socket reached it. One stray
+/// message at an old version, from anything at all on the loopback port, and a
+/// healthy session was reported to the developer as needing a rebuild --- which
+/// is the invariant `accept()` was rewritten to hold: nothing decides what the
+/// daemon says about the session until it has proved it came from the app.
+@Test func aStrayMessageAtAnOldVersionCannotSpeakForALiveSession() async throws {
+    let server = try IPCServer()
+    let port = try await server.start()
+    defer { server.stop() }
+
+    let app = FakeRuntime(port: port)
+    #expect(await app.connect())
+    try app.send(type: "hello", payload: Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 1, loadedGenerations: [], buildMatchesProcess: true))
+    for _ in 0..<200 where server.currentSession == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(server.currentSession != nil)
+
+    // Something else on the loopback port, with no token, at an old version.
+    let stray = FakeRuntime(port: port)
+    #expect(await stray.connect())
+    stray.sendRaw(Data(#"{"protocolVersion":4,"type":"loadResult","requestId":"x","payload":"e30="}"#.utf8) + Data("\n".utf8))
+    // And an old-version hello too, which is the shape that does get recorded
+    // when there is no session to protect.
+    let hello = try JSONEncoder().encode(Hello(
+        token: server.token, buildIdentity: "id", moduleName: "M",
+        processId: 9, loadedGenerations: [], buildMatchesProcess: true))
+    var line = Data(#"{"protocolVersion":4,"type":"hello","requestId":"y","payload":"#.utf8)
+    line.append(Data("\"\(hello.base64EncodedString())\"}\n".utf8))
+    stray.sendRaw(line)
+    try await Task.sleep(for: .milliseconds(300))
+
+    #expect(server.currentSession != nil, "the stray peer must not take the session")
+
+    // The app quits normally. The answer is that nothing is connected, not
+    // that the app needs rebuilding.
+    app.disconnect()
+    for _ in 0..<200 where server.currentSession != nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    let request = LoadPatchRequest(generation: 1, path: "/tmp/x", buildIdentity: "id",
+                                   buildUUIDs: [], declarations: [])
+    do {
+        _ = try await server.request(type: "loadPatch", payload: request,
+                                     expecting: LoadPatchResult.self, timeout: .seconds(2))
+        Issue.record("expected the request to fail")
+    } catch let error as IPCServer.IPCError {
+        guard case .notConnected = error else {
+            Issue.record("a stray socket decided what the daemon says: \(error)")
+            return
+        }
     }
 }

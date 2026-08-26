@@ -31,6 +31,16 @@ public struct PatchableDeclaration: Sendable {
     /// changes what every existing call to `kind` resolves to, including from
     /// bodies the edit did not touch and the patch does not replace.
     public let simpleName: String
+    /// How many replaceable entities this declaration emits.
+    ///
+    /// One for a function. For a computed property it is one per accessor, and
+    /// the difference matters: FR-13 compares what the patch asked for against
+    /// what the loaded image says it carries, and the image counts accessors.
+    /// Measured, a `var x: T { get set }` contributes two records for one
+    /// declaration, so counting declarations reported every get/set property
+    /// edit as a reload nobody could confirm.
+    public let replacementCount: Int
+
     /// Whether this declaration could be *added* by a patch.
     ///
     /// False for an `override`, which an extension cannot declare, and for an
@@ -400,6 +410,7 @@ public enum DeclarationIndexer {
             node: DeclSyntax(function),
             displayName: display,
             simpleName: function.name.text,
+            replacementCount: 1,
             carryable: carryable),
             fingerprint: fingerprint)
     }
@@ -481,8 +492,18 @@ public enum DeclarationIndexer {
             node: DeclSyntax(variable),
             displayName: identity,
             simpleName: name,
+            replacementCount: accessorCount(accessors),
             carryable: carryable),
             fingerprint: fingerprint)
+    }
+
+    /// How many accessors a property declares, which is how many replacement
+    /// records it emits. A bare `{ ... }` is one implicit getter.
+    private static func accessorCount(_ accessors: AccessorBlockSyntax) -> Int {
+        switch accessors.accessors {
+        case .getter: return 1
+        case .accessors(let list): return max(list.count, 1)
+        }
     }
 
     /// The accessors a property declares, as a stable string.

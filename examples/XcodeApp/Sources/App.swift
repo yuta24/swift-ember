@@ -38,6 +38,11 @@ struct ContentView: View {
                 Section("From a package") {
                     LabeledContent("Greeting", value: Greeter().greeting())
                 }
+                // UIKit, reloaded the way UIKit has to be: the patch lands
+                // and the runtime tells the process to lay out again.
+                Section("UIKit") {
+                    Receipt(cart: cart).frame(height: 22)
+                }
                 Section("Add") {
                     Button("Add Juice") { cart.add("Juice", cents: 500) }
                 }

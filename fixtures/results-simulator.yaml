@@ -187,6 +187,12 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
+  - id: registered-replacements
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "the runtime's own FR-13 reader: a Swift record, an @objc category method, and a category property's two accessors count 4, and a carried @objc helper counts 0"
   - id: static-method
     supported: true
     kind: replace
@@ -224,3 +230,21 @@ cases:
     state_preserved: true
     result: pass
     note: "the most recently loaded generation wins; no chaining flag needed"
+  - id: uikit-data-source
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "an @objc protocol requirement on a separate object is replaced, and reloadData is enough to run it"
+  - id: uikit-live-instance
+    supported: true
+    kind: replace
+    state_preserved: true
+    result: pass
+    note: "every UIKit entry point that is called again reaches the replacement, on the instance already on screen"
+  - id: uikit-view-did-load
+    supported: true
+    kind: replace
+    state_preserved: true
+    result: pass
+    note: "a replaced viewDidLoad does not re-run by itself; discarding the view re-runs it with the controller's state intact, and the rebuilt view is measured as not reinstalled"

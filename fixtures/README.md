@@ -24,7 +24,8 @@ maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
 Both checked-in result files come from Xcode 27.0 Beta 4; the Simulator run
-used an iPhone 17 Pro on iOS 27.0. All 39 cases pass on both targets.
+used an iPhone 17 Pro on iOS 27.0. All 43 cases pass on the Simulator; the three UIKit cases have nothing to
+say on the host and are skipped there, leaving 40.
 
 ## Case layout
 
@@ -48,6 +49,8 @@ so the value predates the patch.
 
 | key | default | meaning |
 | --- | --- | --- |
+| `PLATFORMS` | `macos simulator` | where the case can build; elsewhere it is skipped and named |
+| `EXTRA_SOURCES` | | repository-relative sources compiled into the application, with `SPLICE_ENABLED` defined |
 | `SUPPORTED` | `yes` | whether the change is meant to be hot reloadable |
 | `KIND` | `replace` | `replace`, `reject-compile`, `crash`, or `unsafe` |
 | `PATCHES` | `Patch.swift` | patch sources, loaded in order |
@@ -57,6 +60,53 @@ so the value predates the patch.
 | `EXPECT_COMPILE_ERROR` | | substring the patch build must emit, for `reject-compile` |
 | `EXPECT_SIGNAL` | | signal number, for `crash` |
 | `NOTE` | | recorded in `results.yaml` |
+
+## What the UIKit cases establish
+
+Three cases, Simulator-only (`PLATFORMS="simulator"`), behind the question
+DESIGN.md section 13a exists to answer: SwiftUI reaches a `body` through code
+generated at compile time and never sees a replacement, so does UIKit have the
+same problem? It does not.
+
+- `uikit-live-instance` --- `layoutSubviews`, `viewWillLayoutSubviews`,
+  `draw(_:)` and an `@objc` method, all reached on the controller and view
+  that already exist. Every one of them runs the replacement once something
+  asks for a layout or a render pass. This is the case SwiftUI fails.
+- `uikit-data-source` --- the same conclusion for a protocol requirement on a
+  separate object rather than an override on a subclass.
+- `uikit-view-did-load` --- the exception, and the limit. Nothing calls
+  `viewDidLoad` again, so replacing it changes nothing; discarding the
+  controller's view does re-run it, with the controller's own state intact,
+  and the rebuilt view is measured as **not** reinstalled where the old one
+  was. That last line is why the runtime does not offer this as a feature.
+
+They run as a console process with no `UIApplication`, so the views are alive
+but on no screen, and the render pass a real app would perform is forced by
+hand. What they pin is dispatch --- whether a call reaches the replacement ---
+not the runtime's window discovery, which needs a real application.
+
+All three patches carry an Objective-C category and no `__swift5_replace`
+section, because every entry point above is `@objc`. That is the mechanism
+DESIGN.md section 13a.2 describes, and it is worth knowing when reading them:
+these cases exercise one dispatch shape, not two.
+
+`registered-replacements` is the case that turns that mechanism into a number.
+It compiles `runtime/Sources/RegisteredReplacements.swift` --- the reader the
+daemon's FR-13 check depends on --- into the fixture application and asks it
+about the image the harness just loaded. The subject carries a Swift record, an
+`@objc` category method, an `@objc` `{ get set }` property, and one declaration
+the patch merely *carries*. The answer has to be 4: the carried one replaced
+nothing and does not count.
+
+Which class each of those lives in decides what the case covers. `@objcMembers`
+reaches every member, so a plain method placed beside the others becomes `@objc`
+and the image stops carrying a `__swift5_replace` section at all --- the total
+stays 4, the case still passes, and the whole Swift-section half of the reader
+goes unexercised. That happened once. The plain method has a class of its own
+for that reason.
+
+It is the only case that runs runtime code rather than observing runtime
+behaviour, which is what `EXTRA_SOURCES` exists for.
 
 ## What the negative cases establish
 

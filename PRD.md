@@ -114,7 +114,10 @@ Full rebuild required.
 
 -   Sub-second median hot-reload latency on medium-sized projects.
 -   SwiftUI-oriented reload support with state preservation.
--   UIKit support.
+-   UIKit support. Method bodies reload on the instance already on
+    screen, and the runtime invalidates layout and reloads lists so the
+    edit is visible; `viewDidLoad` is reported as already run rather
+    than silently missed. DESIGN.md section 13a.
 -   async/await and actor-aware replacement.
 -   Generic function support where ABI-compatible.
 -   Multi-module projects and Swift packages. Local packages work: the

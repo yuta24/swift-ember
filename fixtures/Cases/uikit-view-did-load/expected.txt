@@ -1,0 +1,4 @@
+g0: nudged: not called labels=["old"]
+g0: reloaded: viewDidLoad=old labels=["old"] session=abc123 inWindow=false
+g1: nudged: not called labels=["old"]
+g1: reloaded: viewDidLoad=new labels=["new"] session=abc123 inWindow=false

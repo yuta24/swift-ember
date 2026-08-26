@@ -106,24 +106,57 @@ run_fixtures() { ./fixtures/run.sh; }
 # earlier, so building on whichever toolchain happens to be newest proves
 # nothing; this compiles the runtime under every one installed.
 check_runtime_across_toolchains() {
-    local any=0 failed=0 work
+    local any=0 failed=0 work arch
     work="$(mktemp -d)"
+    # The host's architecture, like fixtures/run.sh. Hardcoding arm64 meant an
+    # x86_64 machine checked a target it could not run.
+    arch="$(uname -m)"
     while read -r _ version dir; do
-        any=1
+        any=$((any + 1))
         printf '  swift %-8s ' "$version"
-        if DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
+
+        # Both targets, because half the runtime only exists on one of them:
+        # the UIKit adapter is behind `canImport(UIKit)`, so a host-only sweep
+        # compiled every file except the one that changes most and reported
+        # the toolchain as covered.
+        # Numbered, not named by version: `select-xcode.sh` can report the
+        # same Swift version for two Xcodes -- a beta and its release -- and
+        # two toolchains then wrote the same module path.
+        local sdk sdkversion ok=1 slot="$any"
+        sdk="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null)"
+        sdkversion="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)"
+        : > "$work/log"
+
+        DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
              -D SPLICE_ENABLED -emit-module \
-             -emit-module-path "$work/SpliceRuntime-$version.swiftmodule" \
-             -module-name SpliceRuntime runtime/Sources/*.swift > "$work/log" 2>&1; then
-            echo "ok"
+             -emit-module-path "$work/SpliceRuntime-$slot-host.swiftmodule" \
+             -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+
+        if [ -n "$sdk" ] && [ -n "$sdkversion" ]; then
+            DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
+                 -D SPLICE_ENABLED -emit-module \
+                 -target "$arch-apple-ios$sdkversion-simulator" -sdk "$sdk" \
+                 -emit-module-path "$work/SpliceRuntime-$slot-ios.swiftmodule" \
+                 -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+        else
+            echo "no iphonesimulator SDK" >> "$work/log"
+            ok=0
+        fi
+
+        if [ "$ok" -eq 1 ]; then
+            echo "ok  (host and simulator)"
         else
             echo "FAILED"
-            sed -n '1,6p' "$work/log"
+            # The error lines, not the first lines. Both legs share one log, so
+            # `sed -n '1,6p'` printed the host's warnings and hid the simulator
+            # failure underneath them -- which is exactly the leg this sweep
+            # was extended to cover.
+            grep -m6 -E 'error:|no iphonesimulator SDK' "$work/log" || sed -n '1,6p' "$work/log"
             failed=1
         fi
     done < <("$ROOT/scripts/select-xcode.sh" --list --supported)
     rm -rf "$work"
-    [ "$any" -eq 1 ] || { echo "no toolchains to check" >&2; return 1; }
+    [ "$any" -gt 0 ] || { echo "no toolchains to check" >&2; return 1; }
     return "$failed"
 }
 

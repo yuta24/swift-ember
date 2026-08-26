@@ -14,6 +14,42 @@ public enum Splice {
         public var lines: [String] = []
     }
 
+    /// What to do to a UIKit application after a generation loads, so that a
+    /// replaced body is not only in the process but on the screen.
+    ///
+    /// Declared unconditionally, like `start` and `loadPendingPatches` below,
+    /// so a call site needs no `#if` of its own. On a platform with no UIKit
+    /// nothing reads it.
+    public struct RefreshOptions: OptionSet, Sendable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+
+        /// Invalidate layout, constraints, and drawing, then lay out.
+        ///
+        /// `layoutSubviews`, `draw(_:)` and `viewWillLayoutSubviews` are
+        /// measured as reached (`fixtures/Cases/uikit-live-instance`).
+        /// `setNeedsUpdateConstraints` is sent for the same reason and no
+        /// fixture covers it. Nothing is discarded.
+        public static let layout = RefreshOptions(rawValue: 1 << 0)
+        /// `reloadData()` on every table and collection view, which is what
+        /// calls a data source method again. Selection is lost.
+        public static let data = RefreshOptions(rawValue: 1 << 1)
+        // There is deliberately no tier that re-runs `viewDidLoad`.
+        //
+        // Discarding a controller's view does re-run it -- the fixture
+        // `uikit-view-did-load` measures exactly that, and the controller's own
+        // state survives. What the fixture does not measure, and what killed
+        // the idea, is putting the new view back: a controller's view is held
+        // by whatever installed it, so the replacement is built and never
+        // reaches the screen. Tried against the example app, it left a black
+        // window -- the SwiftUI hosting controller's view was discarded and
+        // nothing rebuilt it. An edit to `viewDidLoad` reaches controllers
+        // created after it instead, which is what `watch` says.
+
+        public static let `default`: RefreshOptions = [.layout, .data]
+        public static let none: RefreshOptions = []
+    }
+
     private static let state = StateBox()
 
     /// Called once from the application.
@@ -21,9 +57,11 @@ public enum Splice {
     /// The call site needs no `#if` of its own: without `SPLICE_ENABLED` this
     /// does nothing, and nothing that dials, loads, or watches is compiled at
     /// all. Callers get one entry point that is safe in every configuration.
-    public static func start(onUpdate: @escaping @Sendable (Status) -> Void = { _ in }) {
+    public static func start(refresh: RefreshOptions = .default,
+                             onUpdate: @escaping @Sendable (Status) -> Void = { _ in }) {
         #if SPLICE_ENABLED
         state.onUpdate = onUpdate
+        state.refresh = refresh
         let client = SpliceClient(state: state)
         state.retain(client)
         client.start()
@@ -111,7 +149,22 @@ public enum Splice {
     final class StateBox: @unchecked Sendable {
         private let lock = NSLock()
         private var status = Status()
-        var onUpdate: (@Sendable (Status) -> Void)?
+
+        /// Guarded like everything else here. It is written by the application
+        /// from `start()` and read from the runtime's own queue, so a second
+        /// `start()` -- a scene delegate, a preview, a test -- raced an
+        /// assignment against a read.
+        private var updateHandler: (@Sendable (Status) -> Void)?
+        var onUpdate: (@Sendable (Status) -> Void)? {
+            get { lock.withLock { updateHandler } }
+            set { lock.withLock { updateHandler = newValue } }
+        }
+
+        private var refreshOptions = RefreshOptions.default
+        var refresh: RefreshOptions {
+            get { lock.withLock { refreshOptions } }
+            set { lock.withLock { refreshOptions = newValue } }
+        }
 
         var snapshot: Status { lock.withLock { status } }
 

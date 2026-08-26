@@ -68,6 +68,11 @@ this package and link `SpliceRuntime` to your app target. Call `Splice.start()`
 once at launch; it needs no `#if` around it, because the package compiles the
 dialling and loading code only for Debug.
 
+`Splice.start()` also decides what a UIKit app does when a patch lands. By
+default it invalidates layout and reloads lists, which is what makes the edit
+visible; `Splice.start(refresh: .none)` turns that off if the app would rather
+do it itself.
+
 Then check the setup and start watching:
 
 ```
@@ -124,7 +129,16 @@ they reach. Concretely:
   without it, 5 of 32 ordinary body edits reach a running process. With it, 31.
   Most method bodies in most types touch private state;
 - **declarations you just added**. A new helper is carried in the patch rather
-  than replacing anything, since nothing already running could be calling it.
+  than replacing anything, since nothing already running could be calling it;
+- **UIKit**. `layoutSubviews`, `draw(_:)`, `viewWillLayoutSubviews`, an
+  `@objc` action, a data source method --- anything UIKit calls again reaches
+  the replacement, on the controller that is already on screen. The runtime
+  invalidates layout and reloads lists after a patch lands, so the edit shows
+  up without a tap; `Splice.RefreshOptions` is how an app turns that off.
+
+  `viewDidLoad` is the exception, and `watch` says so rather than letting you
+  wonder: it has already run, so the new body reaches the next controller of
+  that type instead of the one you are looking at.
 
 Anything that changes a type's layout, a signature, or the set of things a
 protocol requires is a rebuild, and so is any declaration removed or any
@@ -141,8 +155,8 @@ Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
 runtime/               the in-app half: connect, load, report
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              39 cases pinning what Swift dynamic replacement does
-Tests/                 189 tests: what the classifier decides, what the
+fixtures/              43 cases pinning what Swift dynamic replacement does
+Tests/                 199 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
@@ -195,6 +209,8 @@ nothing.
 Release builds, physical devices, and anything that changes a type's layout.
 
 SwiftUI `body` is a rebuild too, though not for the reason you would guess.
+UIKit has no such problem --- see above --- because it dispatches when it
+calls, not when it compiles.
 `View` carries a type eraser, so a return type of exactly `some View` is
 already concrete and patching one is safe — it just does nothing. Nested
 opaque positions such as `(some View)?` are not erased and remain genuinely

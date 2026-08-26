@@ -187,6 +187,12 @@ cases:
     kind: replace
     state_preserved: false
     result: pass
+  - id: registered-replacements
+    supported: true
+    kind: replace
+    state_preserved: false
+    result: pass
+    note: "the runtime's own FR-13 reader: a Swift record, an @objc category method, and a category property's two accessors count 4, and a carried @objc helper counts 0"
   - id: static-method
     supported: true
     kind: replace
@@ -224,3 +230,18 @@ cases:
     state_preserved: true
     result: pass
     note: "the most recently loaded generation wins; no chaining flag needed"
+  - id: uikit-data-source
+    supported: true
+    kind: replace
+    result: skipped
+    platforms: "simulator"
+  - id: uikit-live-instance
+    supported: true
+    kind: replace
+    result: skipped
+    platforms: "simulator"
+  - id: uikit-view-did-load
+    supported: true
+    kind: replace
+    result: skipped
+    platforms: "simulator"

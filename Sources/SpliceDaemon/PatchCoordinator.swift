@@ -115,6 +115,17 @@ public actor PatchCoordinator {
                      /// Whether the runtime could count what the image registered.
                      /// False means the reload happened and nothing confirmed it.
                      verified: Bool,
+                     /// What the runtime counted, and what it should have been,
+                     /// so an unverified reload can say which way the count was
+                     /// wrong rather than only that it was. Nil means the
+                     /// runtime could not read the image at all.
+                     registered: (counted: Int, expected: Int)?,
+                     /// What the runtime's UIKit adapter touched to make the
+                     /// generation visible, or nil when it touched nothing.
+                     refreshed: String?,
+                     /// Replaced declarations that UIKit has already called and
+                     /// will not call again on its own.
+                     oneShot: [OneShotNote],
                      timeline: StageTimeline)
         /// Refused without being examined, because the running process can no
         /// longer be described. Carries the failure that caused it.
@@ -165,6 +176,54 @@ public actor PatchCoordinator {
     /// not finish binding -- so those do not poison. The stages reserved for
     /// "cannot vouch" are REGISTER and VERIFY, which nothing emits yet; naming
     /// them here is what lets a future failure mode say so.
+    /// UIKit entry points that have already run for every object that exists,
+    /// and that nothing calls again just because a patch loaded.
+    ///
+    /// Replacing one is correct and invisible, which is the outcome this tool
+    /// treats as worse than a refusal, so it is said out loud rather than
+    /// left for the developer to discover by staring at an unchanged screen.
+    /// It is a caveat and not a rejection, because the reload itself stands:
+    /// any object created from now on gets the new body. There is no option
+    /// that makes it visible sooner --- one was built and removed; see
+    /// `Splice.RefreshOptions` --- so this note is the whole of the answer.
+    ///
+    /// Matched on the replacement target --- the name with its argument labels
+    /// --- and only for a member of some type. A method of one's own called
+    /// `viewDidLoad` earns the same note; the cost of that is a line of output,
+    /// and what the line says of it is still true, since UIKit is not going to
+    /// call it again either. If the developer's own code calls it, they can see
+    /// that from the same screen they are reading.
+    ///
+    /// Every entry carries its parentheses, and that is what keeps a *property*
+    /// named `viewDidLoad` out: a property's replacement target is the bare
+    /// name, so it cannot match. Pinned by
+    /// `everyOneShotTargetIsSpelledAsAFunction`, because the protection is in
+    /// the spelling rather than in a check anybody can see. `contextPath` does
+    /// the rest: a top-level function has no type for the advice to name.
+    ///
+    /// The scope is not decoration. A view or a scene can be made again inside
+    /// the live process, which holds the patch, so the next one runs the new
+    /// body. An application delegate cannot: there is one per process, and a
+    /// relaunched process starts from the built binary with nothing loaded ---
+    /// so for those the honest advice is the opposite one.
+    static let oneShotLifecycleTargets: [String: OneShotScope] = [
+        "loadView()": .instance,
+        "viewDidLoad()": .instance,
+        "awakeFromNib()": .instance,
+        "scene(_:willConnectTo:options:)": .instance,
+        "application(_:didFinishLaunchingWithOptions:)": .process,
+        "applicationDidFinishLaunching(_:)": .process,
+    ]
+
+    private static func oneShotLifecycleMethods(among declarations: [PatchableDeclaration]) -> [OneShotNote] {
+        declarations.compactMap { declaration in
+            guard declaration.contextPath != nil,
+                  let scope = oneShotLifecycleTargets[declaration.replacementTarget]
+            else { return nil }
+            return OneShotNote(name: declaration.displayName, scope: scope)
+        }
+    }
+
     private static func cannotDescribeProcess(after error: any Error) -> Bool {
         switch error {
         case IPCServer.IPCError.timedOut, IPCServer.IPCError.disconnected:
@@ -293,7 +352,26 @@ public actor PatchCoordinator {
                 try deliverOverride?(artifact.imageURL) ?? container.deliver(artifact.imageURL)
             }
 
+            // What the loaded image should say it replaced. Declarations, not
+            // their count: a computed property with a getter and a setter is
+            // one declaration and two records.
+            //
+            // Carried declarations are deliberately absent from this sum. They
+            // replace nothing, and the runtime does not count them -- see
+            // `RegisteredReplacements`, which distinguishes the two by how
+            // many selectors reach an implementation. An earlier version
+            // allowed for them with a range instead, and the range cancelled
+            // the check: an `@objcMembers` class where the edit also extracted
+            // a helper produced a patch whose replacement was missing
+            // entirely, whose carried helper made up the difference, and which
+            // was therefore reported as a verified reload. Measured, and
+            // cumulative --- `SessionMemory` re-emits carried declarations, so
+            // the slack grew with every save for the rest of the session.
+            let expected = declarations.reduce(0) { $0 + $1.replacementCount }
+
             var verified = false
+            var counted: Int?
+            var refreshed: String?
             let start = DispatchTime.now().uptimeNanoseconds
             let request = LoadPatchRequest(generation: next, path: delivered.path,
                                            buildIdentity: context.identity,
@@ -305,8 +383,15 @@ public actor PatchCoordinator {
                                                   expecting: LoadPatchResult.self)
             } catch {
                 timeline.record(.load, since: start, success: false)
+                // A version mismatch is not fixed by restarting: the runtime is
+                // compiled into the application, so the app has to be built
+                // again. Reported as `.restart`, it sent people round a loop
+                // that could not end.
+                let recovery: SpliceError.Recovery
+                if case IPCServer.IPCError.versionMismatch = error { recovery = .rebuild }
+                else { recovery = .restart }
                 let failure = SpliceError(stage: .load, subject: url.lastPathComponent,
-                                          reason: "\(error)", recovery: .restart)
+                                          reason: "\(error)", recovery: recovery)
                 // No answer is not the same as no load: a request that was
                 // sent may have been carried out and its reply lost. One that
                 // never left the daemon, because nothing was connected, leaves
@@ -316,7 +401,7 @@ public actor PatchCoordinator {
             }
 
             switch result {
-            case .loaded(let echoed, _, let registered):
+            case .loaded(let echoed, _, let registered, let refresh):
                 timeline.record(.load, since: start, success: true)
                 // The generation came back for a reason. A runtime answering
                 // about a different one is not a runtime whose answer about
@@ -335,22 +420,24 @@ public actor PatchCoordinator {
                 // runtime reads -- so a patch that loaded and replaced nothing
                 // is a failure with a stage of its own rather than a reload
                 // nobody can tell from a real one.
-                if let registered, registered < declarations.count {
+                if let registered, registered < expected {
                     throw poison(SpliceError(
                         stage: .register, subject: url.lastPathComponent,
                         reason: registered == 0
                             ? "the patch loaded and registered no replacements at all"
-                            : "the patch registered \(registered) replacements; \(declarations.count) were generated",
+                            : "the patch registered \(registered) replacements; \(expected) were generated",
                         recovery: .restart))
                 }
-                // Fewer than generated is the failure FR-13 names: the patch did
-                // less than it said. *More* than generated is not, because a
-                // patch cannot register a replacement it does not contain --- so
-                // a count above the expected one says the reader misread the
-                // image, not that the process is wrong. Treating that as a
-                // failure would end a session every time a toolchain moved a
-                // field. It is reported as unverified instead.
-                verified = registered == declarations.count
+                // Fewer than expected is the failure FR-13 names: the patch did
+                // less than it said. More is not a failure --- a patch cannot
+                // register a replacement it does not contain, so a count above
+                // the expected one says the reader misread the image rather
+                // than that the process is wrong, and ending a session every
+                // time a toolchain moved a field would be worse than saying so.
+                // It is reported as unverified instead.
+                verified = registered == expected
+                counted = registered
+                refreshed = refresh
             case .rejected(let reason):
                 timeline.record(.load, since: start, success: false)
                 // The runtime declined before loading anything, so the process
@@ -372,7 +459,11 @@ public actor PatchCoordinator {
             memories[url, default: SessionMemory()].remember(plan)
             return .applied(generation: next, declarations: declarations.map(\.displayName),
                             carried: plan.carried.map(\.displayName),
-                            verified: verified, timeline: timeline)
+                            verified: verified,
+                            registered: counted.map { ($0, expected) },
+                            refreshed: refreshed,
+                            oneShot: Self.oneShotLifecycleMethods(among: declarations),
+                            timeline: timeline)
         } catch let error as SpliceError {
             return .rejected(error)
         } catch {
@@ -474,4 +565,26 @@ final class SimulatorContainer: @unchecked Sendable {
         }
         return destination
     }
+}
+
+/// A replaced declaration that has already run, and how far out of reach the
+/// new body is.
+public struct OneShotNote: Sendable, Equatable {
+    public let name: String
+    public let scope: OneShotScope
+
+    public init(name: String, scope: OneShotScope) {
+        self.name = name
+        self.scope = scope
+    }
+}
+
+public enum OneShotScope: Sendable, Equatable {
+    /// Another one can be made inside this process, and it will run the new
+    /// body: a view controller, a view, a scene.
+    case instance
+    /// There is one per process. A relaunch is the only way to make another,
+    /// and a relaunched process starts from the built binary with no patch in
+    /// it, so the new body needs a build rather than a restart.
+    case process
 }

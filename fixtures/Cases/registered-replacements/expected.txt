@@ -1,0 +1,2 @@
+g0: patch1.dylib: not loaded
+g1: patch1.dylib: 4

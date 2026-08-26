@@ -152,7 +152,8 @@ public enum Watch {
                     \(cause.reason)
                     """)
                     print("")
-                case .applied(let generation, let declarations, let carried, let verified, let timeline):
+                case .applied(let generation, let declarations, let carried, let verified,
+                              let registered, let refreshed, let oneShot, let timeline):
                     let count = declarations.count
                     let noun = count == 1 ? "declaration" : "declarations"
                     print("")
@@ -172,7 +173,53 @@ public enum Watch {
                     // tool refuses SwiftUI `body` is that a reload which lies is
                     // worse than a refusal.
                     if !verified {
-                        print("  not verified: the runtime could not count what the image registered")
+                        // Which way the count was wrong, not only that it was.
+                        // "Could not count" and "counted more than were asked
+                        // for" are different problems and were reported with
+                        // the same sentence.
+                        if let registered {
+                            // "Contributed", not "declared": for an `@objc`
+                            // member the evidence is an Objective-C category,
+                            // which says the image brought a method and not
+                            // that it replaced one.
+                            // Always plural: a count below the expected one
+                            // ends the session before it reaches here, and the
+                            // expected count is never zero, so the smallest
+                            // number this line can carry is two.
+                            print("  not verified: the image replaced \(registered.counted) declarations "
+                                  + "and \(registered.expected) were generated")
+                        } else {
+                            print("  not verified: the runtime could not read the image's records")
+                        }
+                    }
+                    // What it took to put the change on screen. A UIKit process
+                    // is told to lay out again, and a list to reload; without
+                    // that the body is replaced in the process and the screen
+                    // keeps whatever it drew last.
+                    if let refreshed {
+                        print("  refreshed: \(refreshed)")
+                    }
+                    // The entry points a refresh cannot reach on its own. Said
+                    // rather than left to be discovered, for the same reason
+                    // `some View` is refused outright: an edit that loads and
+                    // changes nothing is the worst outcome this tool has.
+                    // Grouped by how far out of reach the new body is. A view
+                    // controller can be made again inside this process and will
+                    // run it; an application delegate cannot, and a relaunch
+                    // starts from the built binary with no patch in it -- so
+                    // telling someone to make another one would be advice that
+                    // does not work.
+                    let reachable = oneShot.filter { $0.scope == .instance }
+                    let unreachable = oneShot.filter { $0.scope == .process }
+                    if !reachable.isEmpty {
+                        print("  already ran: \(reachable.map(\.name).joined(separator: ", "))")
+                        print("  replaced, but UIKit will not call it again for anything that")
+                        print("  already exists; the next instance of that type runs the new body")
+                    }
+                    if !unreachable.isEmpty {
+                        print("  already ran: \(unreachable.map(\.name).joined(separator: ", "))")
+                        print("  there is one of these per process, and relaunching starts from the")
+                        print("  built binary, so seeing this change takes a build")
                     }
                     print(timeline.summary())
                     print("")

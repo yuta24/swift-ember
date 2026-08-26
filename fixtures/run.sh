@@ -53,10 +53,42 @@ SDKROOT="$(xcrun --sdk "$SDK" --show-sdk-path)" || exit 1
 SWIFT_VERSION="$(xcrun swiftc --version 2>/dev/null | head -1)"
 XCODE_PATH="$(xcode-select -p)"
 
+# Every case's configuration is checked before any case is built.
+#
+# Two reasons it is a pass of its own. A bad value used to be found only when
+# the loop reached that case, so a typo in the last one threw away the whole
+# matrix and left a stale results file behind. And validating a value that is
+# present is not the same as requiring one: `PLATFORMS=""` passed the old
+# check, matched no platform, was skipped everywhere, and the run still exited
+# 0 -- the exact hole this validation exists to close.
+for dir in "$ROOT"/Cases/*/; do
+    [ -f "$dir/case.conf" ] || continue
+    (
+        id="$(basename "$dir")"
+        PLATFORMS="macos simulator"
+        EXTRA_SOURCES=""
+        # shellcheck disable=SC1090
+        . "$dir/case.conf"
+        [ -n "$PLATFORMS" ] || { echo "$id: PLATFORMS is empty" >&2; exit 64; }
+        for name in $PLATFORMS; do
+            case "$name" in
+                macos|simulator) ;;
+                *) echo "$id: unknown platform in PLATFORMS: $name" >&2; exit 64 ;;
+            esac
+        done
+        for source in $EXTRA_SOURCES; do
+            [ -f "$ROOT/../$source" ] || {
+                echo "$id: EXTRA_SOURCES names a file that does not exist: $source" >&2
+                exit 64
+            }
+        done
+    ) || exit 64
+done
+
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
-pass=0; fail=0; report=""
+pass=0; fail=0; skip=0; report=""
 
 for dir in "$ROOT"/Cases/*/; do
     id="$(basename "$dir")"
@@ -65,6 +97,14 @@ for dir in "$ROOT"/Cases/*/; do
     SUPPORTED=yes
     KIND=replace
     PATCHES="Patch.swift"
+    # Which platforms the case can build on. A UIKit case has nothing to say on
+    # the host, and skipping is not the same as passing: a skipped case is
+    # counted and named so a run cannot quietly cover less than it appears to.
+    PLATFORMS="macos simulator"
+    # Sources compiled into the application alongside App.swift, relative to
+    # the repository root. One case uses it to run the runtime's own reader
+    # against a real loaded image rather than against a description of one.
+    EXTRA_SOURCES=""
     APP_TESTABILITY=yes
     APP_PRIVATE_IMPORTS=yes
     STATE_PRESERVED=no
@@ -74,6 +114,21 @@ for dir in "$ROOT"/Cases/*/; do
     observed=""
     # shellcheck disable=SC1090
     [ -f "$dir/case.conf" ] && . "$dir/case.conf"
+
+    case " $PLATFORMS " in
+        *" $PLATFORM "*) ;;
+        *)
+            skip=$((skip + 1))
+            printf '  \033[33mSKIP\033[0m  %s -- %s only\n' "$id" "$PLATFORMS"
+            report="$report  - id: $id
+    supported: $([ "$SUPPORTED" = yes ] && echo true || echo false)
+    kind: $KIND
+    result: skipped
+    platforms: \"$PLATFORMS\"
+"
+            continue
+            ;;
+    esac
 
     out="$BUILD/$id"
     mkdir -p "$out"
@@ -88,10 +143,20 @@ for dir in "$ROOT"/Cases/*/; do
     privflag=()
     [ "$APP_PRIVATE_IMPORTS" = yes ] && privflag=(-Xfrontend -enable-private-imports)
 
+    # The runtime's sources are compiled out without this, so a case that
+    # borrows one gets it. Cases that do not borrow anything are unaffected:
+    # nothing else in Cases/ mentions the flag.
+    extra=()
+    if [ -n "$EXTRA_SOURCES" ]; then
+        extra=(-D SPLICE_ENABLED)
+        for source in $EXTRA_SOURCES; do extra+=("$ROOT/../$source"); done
+    fi
+
     if ! xcrun swiftc -parse-as-library -Onone \
             -target "$TRIPLE" -sdk "$SDKROOT" \
             ${testflag[@]+"${testflag[@]}"} \
             ${privflag[@]+"${privflag[@]}"} \
+            ${extra[@]+"${extra[@]}"} \
             -Xfrontend -enable-implicit-dynamic \
             -module-name "$MODULE" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \
@@ -187,12 +252,22 @@ for dir in "$ROOT"/Cases/*/; do
 done
 
 echo
-echo "$pass passed, $fail failed  ($PLATFORM, $TRIPLE)"
+summary="$pass passed, $fail failed"
+[ "$skip" -gt 0 ] && summary="$summary, $skip skipped"
+echo "$summary  ($PLATFORM, $TRIPLE)"
 
 # A run that matched no cases used to exit 0, so a renamed directory or a
 # filter with a typo was indistinguishable from a clean pass.
-if [ $((pass + fail)) -eq 0 ]; then
+if [ $((pass + fail + skip)) -eq 0 ]; then
     echo "no cases ran${FILTER:+ (--case $FILTER matched nothing)}" >&2
+    exit 1
+fi
+
+# Asking for one case by name and having it skipped is not a pass. The whole
+# run reporting success when the one thing requested never executed is the
+# shape of failure this script refuses everywhere else.
+if [ -n "$FILTER" ] && [ $((pass + fail)) -eq 0 ]; then
+    echo "--case $FILTER was skipped on $PLATFORM and nothing ran" >&2
     exit 1
 fi
 

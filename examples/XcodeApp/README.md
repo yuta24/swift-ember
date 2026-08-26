@@ -21,7 +21,11 @@ swift-splice watch  --project examples/XcodeApp/XcodeApp.xcodeproj \
 ```
 
 Install and launch the built app, then edit a method body in
-`Sources/Cart.swift`. Running from Xcode itself works the same way; the daemon
+`Sources/Cart.swift`, or `ReceiptController.total()` in
+`Sources/Receipt.swift` --- the UIKit half, which reloads on the controller
+already on screen because the runtime tells it to lay out again. Editing
+`ReceiptController.viewDidLoad()` shows the other half of that story: the
+reload stands and `watch` says the method has already run. Running from Xcode itself works the same way; the daemon
 only needs the project, the scheme, and a running process.
 
 ## How a project opts in

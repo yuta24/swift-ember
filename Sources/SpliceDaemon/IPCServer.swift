@@ -34,6 +34,11 @@ public final class IPCServer: @unchecked Sendable {
     private var connectionGeneration: UInt64 = 0
     /// The one peer that has presented the token. Only this one is sent to.
     private var sessionPeer: UInt64?
+    /// A peer that announced a protocol version this daemon cannot read, if
+    /// one did and there was no session for it to be measured against. Kept so
+    /// that requests made afterwards say why there is no session, and keyed by
+    /// peer so it goes away with the peer that caused it.
+    private var mismatched: (peer: UInt64, version: Int)?
     private var session: Session?
     private var pending: [String: CheckedContinuation<Envelope, Error>] = [:]
 
@@ -140,7 +145,7 @@ public final class IPCServer: @unchecked Sendable {
 
         listener.cancel()
         for peer in lock.withLock({ Array(peers.values) }) { peer.connection.cancel() }
-        lock.withLock { peers.removeAll(); sessionPeer = nil; session = nil }
+        lock.withLock { peers.removeAll(); sessionPeer = nil; session = nil; mismatched = nil }
         failAllPending(IPCError.disconnected)
     }
 
@@ -217,6 +222,10 @@ public final class IPCServer: @unchecked Sendable {
     private func handleDisconnect(_ id: UInt64) {
         let wasSession = lock.withLock { () -> Bool in
             peers[id] = nil
+            // The explanation goes with the peer that needed explaining. Kept
+            // past its own socket, it outlived the problem: with nothing
+            // connected at all, saves still reported a version mismatch.
+            if mismatched?.peer == id { mismatched = nil }
             guard sessionPeer == id else { return false }
             sessionPeer = nil
             session = nil
@@ -293,6 +302,33 @@ public final class IPCServer: @unchecked Sendable {
             // Section 11.2: a version mismatch fails with a clear diagnostic
             // rather than by misreading the payload.
             onEvent?("protocol version \(envelope.protocolVersion) from the runtime, expected \(SpliceProtocol.version); upgrade one side")
+            // Remembered, because for a *hello* the settle above has nothing
+            // to settle: no session is ever created, and every later save then
+            // failed as "no app is connected -- restart the app". Restarting
+            // cannot fix a version mismatch, and this is the ordinary case
+            // after the daemon is updated and the app is not rebuilt.
+            //
+            // Both conditions are load-bearing, and both were missing. The
+            // guard runs before the type switch and before the token check, so
+            // without them *any* envelope from *any* unauthenticated socket set
+            // this: one stray `loadResult` at an old version, and a healthy
+            // session was described to the developer as needing a rebuild. That
+            // is the invariant `accept()` exists to hold -- nothing decides what
+            // the daemon says about the session until it has proved it came
+            // from the app -- and this had quietly reversed it.
+            //
+            // A hello is the only message that could have created a session, so
+            // it is the only one whose version explains the absence of one. And
+            // with a session already in hand there is nothing to explain: the
+            // old runtime that keeps redialling after a rebuild would otherwise
+            // re-poison this on every redial.
+            if envelope.type == "hello" {
+                lock.withLock {
+                    if sessionPeer == nil {
+                        mismatched = (peer.id, envelope.protocolVersion)
+                    }
+                }
+            }
             // And settles whatever was waiting on it. Dropping the reply left
             // the request to burn its whole ten-second timeout and then fail as
             // "the app did not answer", which ends the session -- for a runtime
@@ -324,6 +360,14 @@ public final class IPCServer: @unchecked Sendable {
             // it before is superseded. The order matters: the old socket goes
             // first, then anything it was carrying is settled, and only then is
             // the new session announced.
+            // A runtime this daemon can read has arrived, so the version it
+            // could not read is no longer the reason there is no session.
+            // Left standing, it outlived the problem: after the developer
+            // rebuilt and relaunched, quitting the app reported "rebuild it"
+            // instead of "no app is connected" -- sending them round the loop
+            // they had just escaped.
+            lock.withLock { mismatched = nil }
+
             let superseded: (peer: Peer, hadSession: Bool)? = lock.withLock {
                 guard let previous = sessionPeer, previous != peer.id,
                       let old = peers[previous] else {
@@ -423,6 +467,12 @@ public final class IPCServer: @unchecked Sendable {
             guard let id = sessionPeer, session != nil else { return nil }
             return peers[id]?.connection
         }) else {
+            // A runtime that spoke the wrong version is connected but never
+            // became the session. Saying which it is turns an unfixable
+            // "restart the app" into "rebuild it".
+            if let version = lock.withLock({ mismatched?.version }) {
+                throw IPCError.versionMismatch(version)
+            }
             throw IPCError.notConnected
         }
 

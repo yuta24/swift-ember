@@ -1,0 +1,10 @@
+g0: viewWillLayoutSubviews=old
+g0: layoutSubviews=old
+g0: draw=old
+g0: draw=old
+g0: tapped=old
+g1: viewWillLayoutSubviews=new
+g1: layoutSubviews=new
+g1: draw=new
+g1: draw=new
+g1: tapped=new

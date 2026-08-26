@@ -12,8 +12,10 @@ public enum SpliceProtocol {
     /// the count of replacements the loaded image registered, which is what
     /// FR-13 rests on. Version 4 added the session token to the handshake,
     /// which until then was generated, written into the session file, and
-    /// never looked at by either side.
-    public static let version = 4
+    /// never looked at by either side. Version 5 added what the runtime did to
+    /// make the generation visible, which for a UIKit application is the
+    /// difference between a loaded patch and a changed screen.
+    public static let version = 5
     public static let defaultPort: UInt16 = 51_237
 }
 
@@ -117,7 +119,10 @@ public enum LoadPatchResult: Codable, Sendable {
     /// or nil when the runtime could not examine it. The daemon compares it
     /// against what it asked for: `dlopen` returning a handle says the image
     /// mapped, not that anything in it was bound.
-    case loaded(generation: UInt64, durationMs: Double, registered: Int?)
+    /// `refreshed` is what the runtime's UIKit adapter touched, or nil when
+    /// there was nothing to touch -- no window yet, no UIKit, or the
+    /// application turned the refresh off.
+    case loaded(generation: UInt64, durationMs: Double, registered: Int?, refreshed: String?)
     case rejected(reason: String)
     case failed(stage: Stage, message: String)
 }
