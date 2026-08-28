@@ -1302,7 +1302,7 @@ the underlying type free to change.
 
 Two conditions, both measured by changing one thing at a time:
 
--   **The eraser.** At an iOS 18 deployment target `some View` erases to
+-   **The eraser.** At iOS 16 and 18 deployment targets `some View` erases to
     `AnyView`, which tolerates a type change because that is what
     `AnyView` is for, and the same patch renders correctly. At iOS 26
     and later it is `DebugReplaceableView`, and it aborts.
@@ -1480,8 +1480,10 @@ The rendering fixture drives the same `Splice.load(generation:path:)` function
 as the daemon; `loadPendingPatches()` only supplies its inbox and synthetic
 generation number. This keeps the standalone fixture independent of IPC while
 preventing the notification paths from drifting. The opt-in case is also run
-at deployment targets 18 and 27: below the `DebugReplaceableView` availability
-floor and above it.
+at deployment targets 16, 18, and 27: below the `DebugReplaceableView`
+availability floor and above it. The 16 and 18 runs establish deployment-target
+compatibility on the booted current-SDK runtime; they do not claim execution on
+an iOS 16 or 18 Simulator runtime. The fixture reports both values separately.
 
 State preservation has the normal SwiftUI boundary. State owned by the
 annotated View survives, as measured. State inside a subtree whose identity or

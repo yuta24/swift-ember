@@ -18,10 +18,12 @@ measured answer lives.
 ```
 ./run.sh                     # every case
 ./run.sh --case <id>         # one case
-DEPLOY=18.0 ./run.sh         # a different deployment target
+DEPLOY=16.0 ./run.sh         # the supported deployment floor
 ```
 
-Boot a simulator first. The default deployment target is the SDK's own version.
+Boot a simulator first. `DEPLOY` selects the compile-time deployment target,
+not the booted Simulator runtime; the summary prints both separately. The
+default deployment target is the SDK's own version.
 
 ## How a case is decided
 

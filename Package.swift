@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "swift-splice",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS(.v16)],
     products: [
         .executable(name: "swift-splice", targets: ["swift-splice"]),
         // What an application links. Everything else in this package is host

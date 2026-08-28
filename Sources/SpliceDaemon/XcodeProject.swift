@@ -80,7 +80,7 @@ public struct XcodeProject: Sendable {
         // assembled from the architecture, the platform, and the deployment
         // target, which is the one place here that is genuinely a derivation
         // rather than a lookup.
-        let triple = try targetTriple(from: settings)
+        let triple = try Self.targetTriple(from: settings)
 
         // Everything that changes how the patched body is *interpreted* has to
         // reach the patch compile. A `#if` taking the other branch is the
@@ -318,7 +318,7 @@ public struct XcodeProject: Sendable {
         return applications[0].compactMapValues { $0 as? String }
     }
 
-    private func targetTriple(from settings: [String: String]) throws -> String {
+    static func targetTriple(from settings: [String: String]) throws -> String {
         // CURRENT_ARCH resolves to the literal "undefined_arch" outside a real
         // build, so it is not in this chain.
         // NATIVE_ARCH is the *host's* architecture, which a build need not
@@ -342,9 +342,9 @@ public struct XcodeProject: Sendable {
 
         return switch platform {
         case "iphonesimulator":
-            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "17.0"))-simulator"
+            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "16.0"))-simulator"
         case "iphoneos":
-            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "17.0"))"
+            "\(arch)-apple-ios\(try deployment("IPHONEOS_DEPLOYMENT_TARGET", default: "16.0"))"
         case "macosx":
             "\(arch)-apple-macosx\(try deployment("MACOSX_DEPLOYMENT_TARGET", default: "14.0"))"
         default:

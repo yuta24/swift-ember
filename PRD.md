@@ -4,7 +4,7 @@
 > Audience: OSS contributors, maintainers, coding agents (including
 > Claude Code)\
 > Working name: `SwiftHotReload`\
-> Initial target: iOS Simulator / Debug builds\
+> Initial target: iOS Simulator / Debug builds, deployment target iOS 16+\
 > Last updated: 2026-08-29
 
 ## 1. Summary
@@ -76,7 +76,8 @@ scripting-language iteration than to a full Xcode rebuild.
 
 ### 4.1 MVP goals
 
--   Support iOS Simulator Debug builds.
+-   Support iOS Simulator Debug builds with an iOS 16 or later deployment
+    target.
 -   Use the exact Swift/Xcode toolchain used to build the target.
 -   Detect Swift source changes.
 -   Identify changes that are eligible for hot replacement.

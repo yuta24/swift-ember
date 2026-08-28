@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Feature",
-    platforms: [.iOS(.v18)],
+    platforms: [.iOS(.v16)],
     products: [.library(name: "Feature", targets: ["Feature"])],
     targets: [
         .target(

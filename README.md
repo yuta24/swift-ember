@@ -190,7 +190,7 @@ runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              43 cases pinning what Swift dynamic replacement does,
                        and 4 more under ui/ that need a rendering process
-Tests/                 214 tests: what the classifier decides, what the
+Tests/                 216 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
@@ -202,9 +202,10 @@ PRD.md                 scope, tiers, milestones
 
 ## Requirements
 
-Xcode 26.2 or later, and an arm64 macOS host. Verified on Swift 6.2.3 through
-6.4 across six configurations, four locally and two on CI — every fixture and
-every test passes on all of them.
+Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
+of iOS 16 or later. Verified on Swift 6.2.3 through 6.4 across six
+configurations, four locally and two on CI — every fixture and every test
+passes on all of them.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The

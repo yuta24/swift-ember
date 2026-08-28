@@ -122,12 +122,11 @@ check_runtime_across_toolchains() {
         # Numbered, not named by version: `select-xcode.sh` can report the
         # same Swift version for two Xcodes -- a beta and its release -- and
         # two toolchains then wrote the same module path.
-        local sdk sdkversion ok=1 slot="$any" hostdir iosdir
+        local sdk ok=1 slot="$any" hostdir iosdir ios_deployment="16.0"
         hostdir="$work/$slot/host"
         iosdir="$work/$slot/ios"
         mkdir -p "$hostdir" "$iosdir"
         sdk="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null)"
-        sdkversion="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)"
         : > "$work/log"
 
         DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
@@ -139,15 +138,15 @@ check_runtime_across_toolchains() {
              -emit-module-path "$hostdir/SpliceSwiftUI.swiftmodule" \
              -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
 
-        if [ -n "$sdk" ] && [ -n "$sdkversion" ]; then
+        if [ -n "$sdk" ]; then
             DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
                  -D SPLICE_ENABLED -emit-module \
-                 -target "$arch-apple-ios$sdkversion-simulator" -sdk "$sdk" \
+                 -target "$arch-apple-ios$ios_deployment-simulator" -sdk "$sdk" \
                  -emit-module-path "$iosdir/SpliceRuntime.swiftmodule" \
                  -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
             DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
                  -D SPLICE_ENABLED -emit-module -I "$iosdir" \
-                 -target "$arch-apple-ios$sdkversion-simulator" -sdk "$sdk" \
+                 -target "$arch-apple-ios$ios_deployment-simulator" -sdk "$sdk" \
                  -emit-module-path "$iosdir/SpliceSwiftUI.swiftmodule" \
                  -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
         else
@@ -156,7 +155,7 @@ check_runtime_across_toolchains() {
         fi
 
         if [ "$ok" -eq 1 ]; then
-            echo "ok  (core and SwiftUI adapter, host and simulator)"
+            echo "ok  (core and SwiftUI adapter, host and iOS $ios_deployment target)"
         else
             echo "FAILED"
             # The error lines, not the first lines. Both legs share one log, so
@@ -240,6 +239,13 @@ boot_simulator() {
 # though a runner had produced them.
 run_simulator_fixtures() { ./fixtures/run.sh --platform simulator --results "$RESULTS_DIR/simulator.yaml"; }
 
+run_ui_fixtures() {
+    ./fixtures/ui/run.sh || return 1
+    # Compile and run the production opt-in at the advertised deployment
+    # floor as well as the active SDK's default target.
+    DEPLOY=16.0 ./fixtures/ui/run.sh --case body-shape-change-enabled-in-list
+}
+
 build_examples() {
     ./examples/CounterApp/build.sh > /dev/null || return 1
     echo "CounterApp debug ok"
@@ -276,7 +282,7 @@ if [ "$SKIP_SIMULATOR" -eq 0 ]; then
     step simulator boot_simulator
     step fixtures-simulator run_simulator_fixtures
     step examples build_examples
-    step ui-fixtures ./fixtures/ui/run.sh
+    step ui-fixtures run_ui_fixtures
     step doctor run_doctor
 fi
 

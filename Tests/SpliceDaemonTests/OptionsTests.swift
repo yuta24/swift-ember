@@ -94,6 +94,24 @@ private func parse(_ arguments: String...) throws -> Options {
     #expect(context.linkTarget == "/tmp/App.app/App.debug.dylib")
 }
 
+@Test func aMissingDeploymentTargetUsesTheSupportedIOSFloor() throws {
+    let common = ["ARCHS": "arm64"]
+    #expect(try XcodeProject.targetTriple(from: common.merging(
+        ["PLATFORM_NAME": "iphonesimulator"], uniquingKeysWith: { _, new in new }))
+        == "arm64-apple-ios16.0-simulator")
+    #expect(try XcodeProject.targetTriple(from: common.merging(
+        ["PLATFORM_NAME": "iphoneos"], uniquingKeysWith: { _, new in new }))
+        == "arm64-apple-ios16.0")
+}
+
+@Test func aReportedDeploymentTargetStillWinsOverTheFloor() throws {
+    #expect(try XcodeProject.targetTriple(from: [
+        "ARCHS": "arm64",
+        "PLATFORM_NAME": "iphonesimulator",
+        "IPHONEOS_DEPLOYMENT_TARGET": "18.2",
+    ]) == "arm64-apple-ios18.2-simulator")
+}
+
 // MARK: - Search paths
 
 // Xcode reports these as one space-separated string with quoted entries, and a

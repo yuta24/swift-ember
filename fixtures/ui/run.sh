@@ -5,7 +5,7 @@
 #
 #   ./run.sh                     # every case
 #   ./run.sh --case <id>         # one case
-#   DEPLOY=18.0 ./run.sh         # a different deployment target
+#   DEPLOY=16.0 ./run.sh         # the supported deployment floor
 #
 # Why these are not in fixtures/run.sh: that harness is a console process, and
 # what these measure needs SwiftUI's own rendering. `swiftui-body-direct-call`
@@ -45,6 +45,8 @@ if ! xcrun simctl list devices booted | grep -q Booted; then
     echo "no booted simulator" >&2
     exit 1
 fi
+RUNTIME="$(xcrun simctl getenv booted SIMULATOR_RUNTIME_VERSION 2>/dev/null)"
+[ -n "$RUNTIME" ] || RUNTIME=unknown
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
@@ -213,7 +215,7 @@ done
 echo
 summary="$pass passed, $fail failed"
 [ "$skip" -gt 0 ] && summary="$summary, $skip skipped"
-echo "$summary  (iOS $DEPLOY, $TRIPLE)"
+echo "$summary  (deployment target iOS $DEPLOY, runtime iOS $RUNTIME, $TRIPLE)"
 
 if [ $((pass + fail + skip)) -eq 0 ]; then
     echo "no cases ran${FILTER:+ (--case $FILTER matched nothing)}" >&2
