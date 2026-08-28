@@ -49,6 +49,35 @@ fi
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
+# Build the optional adapter as its real two-module product, then link its
+# objects into each tiny fixture application. Keeping the module boundary here
+# catches an SPI or exported-import mistake that compiling the files beside a
+# case in one module would hide.
+adapter="$BUILD/SpliceSwiftUI"
+mkdir -p "$adapter"
+runtime_sources=("$ROOT"/../../runtime/Sources/*.swift)
+swiftui_sources=("$ROOT"/../../runtime/SwiftUI/*.swift)
+
+if ! xcrun swiftc -parse-as-library -whole-module-optimization \
+        -target "$TRIPLE" -sdk "$SDK" -Onone -D SPLICE_ENABLED \
+        -module-name SpliceRuntime \
+        -emit-module -emit-module-path "$adapter/SpliceRuntime.swiftmodule" \
+        -emit-object -o "$adapter/SpliceRuntime.o" \
+        "${runtime_sources[@]}" > "$adapter/runtime-build.log" 2>&1; then
+    echo "SpliceRuntime build failed; see $adapter/runtime-build.log" >&2
+    exit 1
+fi
+
+if ! xcrun swiftc -parse-as-library -whole-module-optimization \
+        -target "$TRIPLE" -sdk "$SDK" -Onone -D SPLICE_ENABLED \
+        -module-name SpliceSwiftUI -I "$adapter" \
+        -emit-module -emit-module-path "$adapter/SpliceSwiftUI.swiftmodule" \
+        -emit-object -o "$adapter/SpliceSwiftUI.o" \
+        "${swiftui_sources[@]}" > "$adapter/swiftui-build.log" 2>&1; then
+    echo "SpliceSwiftUI build failed; see $adapter/swiftui-build.log" >&2
+    exit 1
+fi
+
 pass=0; fail=0; skip=0
 
 for dir in "$ROOT"/Cases/*/; do
@@ -56,6 +85,9 @@ for dir in "$ROOT"/Cases/*/; do
     [ -n "$FILTER" ] && [ "$id" != "$FILTER" ] && continue
 
     EXPECT=alive
+    EXPECT_REGISTERED=""
+    EXPECT_RENDERED_PREFIX=""
+    PRESERVE_RENDERED_SUFFIX=no
     # The lowest deployment target the case says anything at. The abort needs
     # the iOS 26 eraser, so running it at 18 measures a different thing rather
     # than a regression -- it is skipped and named instead of failing.
@@ -79,18 +111,24 @@ for dir in "$ROOT"/Cases/*/; do
             -target "$TRIPLE" -sdk "$SDK" \
             -Xclang-linker -isysroot -Xclang-linker "$SDK" \
             -Onone -enable-testing \
+            -D SPLICE_ENABLED \
             -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports \
             -module-name "$MODULE" \
+            -I "$adapter" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \
             -emit-executable -o "$app/$MODULE" \
-            "$ROOT/Harness/Loader.swift" "$dir/App.swift" > "$out/app-build.log" 2>&1; then
+            "$adapter/SpliceRuntime.o" "$adapter/SpliceSwiftUI.o" \
+            "$ROOT/Harness/Loader.swift" \
+            "$ROOT/../../runtime/Sources/RegisteredReplacements.swift" \
+            "$dir/App.swift" > "$out/app-build.log" 2>&1; then
         verdict=FAIL; detail="application build failed; see $out/app-build.log"
     fi
 
     if [ -z "$verdict" ]; then
         sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" "$ROOT/Info.plist" > "$app/Info.plist"
         if ! xcrun swiftc -Onone -target "$TRIPLE" -sdk "$SDK" \
-                -emit-library -o "$out/Patch.dylib" -module-name Patch1 -I "$out" \
+                -emit-library -o "$out/Patch.dylib" -module-name Patch1 \
+                -I "$out" -I "$adapter" \
                 "$dir/Patch.swift" \
                 -Xlinker -undefined -Xlinker dynamic_lookup > "$out/patch-build.log" 2>&1; then
             verdict=FAIL; detail="patch build failed; see $out/patch-build.log"
@@ -105,6 +143,7 @@ for dir in "$ROOT"/Cases/*/; do
 
         data="$(xcrun simctl get_app_container booted "$BUNDLE_ID" data 2>/dev/null)"
         before="$(cat "$data/Documents/heartbeat" 2>/dev/null || echo "")"
+        rendered_before="$(cat "$data/Documents/rendered" 2>/dev/null || echo "")"
         if [ -z "$before" ]; then
             verdict=FAIL; detail="the application never started beating"
         else
@@ -119,6 +158,8 @@ for dir in "$ROOT"/Cases/*/; do
             first="$(cat "$data/Documents/heartbeat" 2>/dev/null || echo "")"
             sleep 3
             after="$(cat "$data/Documents/heartbeat" 2>/dev/null || echo "")"
+            rendered_after="$(cat "$data/Documents/rendered" 2>/dev/null || echo "")"
+            registered="$(cat "$data/Documents/registered" 2>/dev/null || echo "")"
 
             # The heartbeat, not the process list: a process that had already
             # aborted was still listed by launchctl, which would have let a
@@ -135,6 +176,29 @@ for dir in "$ROOT"/Cases/*/; do
             else
                 verdict=FAIL; detail="expected $EXPECT, observed $observed ($detail)"
             fi
+
+            if [ "$verdict" = PASS ] && [ -n "$EXPECT_REGISTERED" ] && [ "$registered" != "$EXPECT_REGISTERED" ]; then
+                verdict=FAIL
+                detail="expected $EXPECT_REGISTERED registered replacements, observed ${registered:-none}"
+            fi
+
+            if [ "$verdict" = PASS ] && [ -n "$EXPECT_RENDERED_PREFIX" ]; then
+                case "$rendered_after" in
+                    "$EXPECT_RENDERED_PREFIX"*) ;;
+                    *) verdict=FAIL; detail="expected rendered prefix '$EXPECT_RENDERED_PREFIX', observed '${rendered_after:-none}'" ;;
+                esac
+            fi
+
+            if [ "$verdict" = PASS ] && [ "$PRESERVE_RENDERED_SUFFIX" = yes ]; then
+                before_suffix="${rendered_before#*|}"
+                after_suffix="${rendered_after#*|}"
+                if [ -z "$rendered_before" ] || [ "$before_suffix" != "$after_suffix" ]; then
+                    verdict=FAIL
+                    detail="rendered state changed: '${rendered_before:-none}' -> '${rendered_after:-none}'"
+                fi
+            fi
+
+            [ "$verdict" = PASS ] && detail="$detail, rendered '${rendered_before:-none}' -> '${rendered_after:-none}', registered ${registered:-none}"
         fi
         xcrun simctl terminate booted "$BUNDLE_ID" > /dev/null 2>&1
     fi

@@ -28,6 +28,12 @@ already on screen because the runtime tells it to lay out again. Editing
 reload stands and `watch` says the method has already run. Running from Xcode itself works the same way; the daemon
 only needs the project, the scheme, and a running process.
 
+`ContentView.body` is opted into SwiftUI replacement too. Its source imports
+`SpliceSwiftUI`, declares `@ObserveSplice`, and applies `.enableSplice()` to
+the outermost body expression. You can therefore change the body tree itself;
+the loaded generation invalidates the existing View and the explicit
+`AnyView` boundary keeps a concrete-type change safe.
+
 ## How a project opts in
 
 Two steps.
@@ -37,15 +43,24 @@ sets the four things that make a binary patchable, and `doctor` names each one
 separately when it is missing, so a half-configured project gets told which
 half.
 
-**Add the package and link `SpliceRuntime`.** The runtime's dialling and
-loading code is compiled only when `SPLICE_ENABLED` is defined, which the
-package does for Debug and only Debug. A Release build of an app that links it
-carries an inert entry point and nothing else, so the call site needs no `#if`
-of its own:
+**Add the package and link `SpliceSwiftUI`.** It re-exports `SpliceRuntime`, so
+one product supplies both the loader and the SwiftUI opt-in API. A UIKit-only
+app can link `SpliceRuntime` directly. The active code is compiled only when
+`SPLICE_ENABLED` is defined, which the package does for Debug and only Debug.
+A Release build carries inert entry points, so call sites need no `#if`:
 
 ```swift
-.onAppear {
-    Splice.start { status in ... }
+import SwiftUI
+import SpliceSwiftUI
+
+struct Screen: View {
+    @ObserveSplice private var splice
+
+    var body: some View {
+        Content()
+            .onAppear { Splice.start { status in ... } }
+            .enableSplice()
+    }
 }
 ```
 

@@ -45,7 +45,7 @@ Cases/<id>/
 
 `Harness/Loader.swift` supplies the heartbeat and the inbox poller.
 
-## What these three establish
+## What these four establish
 
 They exist to pin `DESIGN.md` section 13.1, which is the part of this project
 that has been wrong most often.
@@ -62,6 +62,11 @@ that has been wrong most often.
   type identical survives in the same `List`. That is the safe subset, and the
   reason the classifier refuses it anyway is that nothing syntactic separates
   it from the first case.
-
+- **`body-shape-change-enabled-in-list`** — the first case with the production
+  `SpliceSwiftUI` opt-in. `@ObserveSplice` makes the row evaluate after the
+  real loader publishes a generation, and the outermost `.enableSplice()`
+  keeps the stored child at `AnyView`. The process stays alive, the new
+  `VStack` renders, the row's `@State` UUID survives, and the loaded image
+  reports the expected two replacement records.
 A toolchain that changes any of this should fail here rather than in somebody's
 application.

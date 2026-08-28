@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A1000010 /* SpliceRuntime */ = {isa = PBXBuildFile; productRef = A1000009 /* SpliceRuntime */; };
+		A1000010 /* SpliceSwiftUI */ = {isa = PBXBuildFile; productRef = A1000009 /* SpliceSwiftUI */; };
 		A1000031 /* Feature */ = {isa = PBXBuildFile; productRef = A1000030 /* Feature */; };
 /* End PBXBuildFile section */
 
@@ -25,7 +25,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1000010 /* SpliceRuntime */,
+				A1000010 /* SpliceSwiftUI */,
 				A1000031 /* Feature */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -69,7 +69,7 @@
 			);
 			name = XcodeApp;
 			packageProductDependencies = (
-				A1000009 /* SpliceRuntime */,
+				A1000009 /* SpliceSwiftUI */,
 				A1000030 /* Feature */,
 			);
 			productName = XcodeApp;
@@ -228,9 +228,9 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A1000009 /* SpliceRuntime */ = {
+		A1000009 /* SpliceSwiftUI */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = SpliceRuntime;
+			productName = SpliceSwiftUI;
 		};
 		A1000030 /* Feature */ = {
 			isa = XCSwiftPackageProductDependency;

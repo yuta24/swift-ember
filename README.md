@@ -35,7 +35,9 @@ and getting it into the process.
 
 Status: **M5 of 5**, and it works against a real `.xcodeproj`. Bodies reload
 end to end on a Simulator app --- overrides and `private` helpers among them ---
-and the classifier's refusals are pinned by tests. SwiftUI `body` is not among them, for a measured reason — see below.
+and the classifier's refusals are pinned by tests. SwiftUI `body` reloads too
+when the View opts into a stable type-erasure boundary; an unannotated body is
+still refused for a measured reason --- see below.
 Read `PRD.md` for what is and is not promised.
 
 A reload takes about 350 ms and, unlike a build, does not care how big your
@@ -64,9 +66,32 @@ not pass the app's compiler flags into package targets. See
 `integrations/xcode/Package.md`.
 
 Base your Debug configuration on `integrations/xcode/Splice.xcconfig`, then add
-this package and link `SpliceRuntime` to your app target. Call `Splice.start()`
-once at launch; it needs no `#if` around it, because the package compiles the
-dialling and loading code only for Debug.
+this package. A UIKit app links `SpliceRuntime`; a SwiftUI app links
+`SpliceSwiftUI`, which brings and re-exports the runtime. Call `Splice.start()`
+once at launch; it needs no `#if` around it, because both products compile
+their active code only for Debug.
+
+A SwiftUI View whose `body` should reload adds two explicit boundaries:
+
+``` swift
+import SpliceSwiftUI
+
+struct ReceiptView: View {
+    @ObserveSplice private var splice
+
+    var body: some View {
+        ReceiptContents()
+            .enableSplice()
+    }
+}
+```
+
+The observer makes SwiftUI evaluate the replaced body after a patch, and the
+outermost modifier pins the value SwiftUI stores to `AnyView`. Adding the two
+lines changes the View's layout, so do it before launching the session and
+rebuild once. The source file must import `SpliceSwiftUI` directly so the
+conservative classifier can prove that both names are this package's API. Both
+opt-ins are no-ops in Release.
 
 `Splice.start()` also decides what a UIKit app does when a patch lands. By
 default it invalidates layout and reloads lists, which is what makes the edit
@@ -132,6 +157,11 @@ they reach. Concretely:
   Most method bodies in most types touch private state;
 - **declarations you just added**. A new helper is carried in the patch rather
   than replacing anything, since nothing already running could be calling it;
+- **opted-in SwiftUI `body`**. A View with `@ObserveSplice` in the same file and
+  `.enableSplice()` as the body's outermost expression may change its whole
+  tree. In the measured `List` case, `Text` became a `VStack`, the screen
+  updated, the process stayed alive, and the View's existing `@State` kept the
+  same identity;
 - **UIKit**. `layoutSubviews`, `draw(_:)`, `viewWillLayoutSubviews`, an
   `@objc` action, a data source method --- anything UIKit calls again reaches
   the replacement, on the controller that is already on screen. The runtime
@@ -144,9 +174,9 @@ they reach. Concretely:
 
 Anything that changes a type's layout, a signature, or the set of things a
 protocol requires is a rebuild, and so is any declaration removed or any
-declaration returning an opaque result type. `PRD.md` section 8 is the full
-tier list, and `DESIGN.md` section 7.3b is where those two numbers come
-from.
+declaration returning an opaque result type except the explicitly erased
+SwiftUI shape above. `PRD.md` section 8 is the full tier list, and `DESIGN.md`
+section 7.3b is where those two numbers come from.
 
 ## Layout
 
@@ -155,11 +185,12 @@ Sources/SpliceCore     shared types: build context, wire protocol, diagnostics
 Sources/SpliceGen      SwiftSyntax: what changed, and what to generate for it
 Sources/SpliceDaemon   watching, compiling, talking to the app
 Sources/SpliceCLI      swift-splice doctor | watch | status
-runtime/               the in-app half: connect, load, report
+runtime/Sources        the in-app half: connect, load, report
+runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              43 cases pinning what Swift dynamic replacement does,
-                       and 3 more under ui/ that need a rendering process
-Tests/                 203 tests: what the classifier decides, what the
+                       and 4 more under ui/ that need a rendering process
+Tests/                 214 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
@@ -176,8 +207,9 @@ Xcode 26.2 or later, and an arm64 macOS host. Verified on Swift 6.2.3 through
 every test passes on all of them.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
-`some View` erases to `AnyView` rather than `DebugReplaceableView`. Both are
-concrete, so nothing about what is safe to patch changes.
+`some View` erases to `AnyView` rather than `DebugReplaceableView`. The
+unannotated failure mode changes, but the conservative classification and the
+explicit opt-in do not.
 
 Other toolchains are untested rather than unsupported. `fixtures/run.sh` is how
 you find out where a new one stands:
@@ -212,13 +244,15 @@ nothing.
 
 Release builds, physical devices, and anything that changes a type's layout.
 
-SwiftUI `body` is a rebuild too, and the reason took three attempts to get
-right. `View` carries a type eraser, so the patch is safe to load, and a
-replaced body does run when SwiftUI evaluates that view --- it renders. What
-it also does, when the body's concrete type changes and the view is a row of
-a `List`, is abort the process: the eraser stores its child in a generic box
-that the graph downcasts to the type it saw first. Adding `.padding()` is
-enough. `DESIGN.md` section 13.1 has the measurements, including the two
-earlier answers that were wrong.
+An unannotated SwiftUI `body` is a rebuild, and the reason took three attempts
+to get right. `View` carries a type eraser, so the patch is safe to load, and a
+replaced body does run when SwiftUI evaluates that view --- it renders. What it
+also does, when the body's concrete type changes and the view is a row of a
+`List`, is abort the process: the eraser stores its child in a generic box that
+the graph downcasts to the type it saw first. Adding `.padding()` is enough.
+`.enableSplice()` moves the changing tree behind an `AnyView` that is present
+from the first build; it is an explicit opt-in, not a reason to weaken the
+default refusal. `DESIGN.md` section 13.1 has the original measurements and
+section 13.4 has the opt-in result.
 
 The full list is `PRD.md` section 5.

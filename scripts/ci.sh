@@ -122,29 +122,41 @@ check_runtime_across_toolchains() {
         # Numbered, not named by version: `select-xcode.sh` can report the
         # same Swift version for two Xcodes -- a beta and its release -- and
         # two toolchains then wrote the same module path.
-        local sdk sdkversion ok=1 slot="$any"
+        local sdk sdkversion ok=1 slot="$any" hostdir iosdir
+        hostdir="$work/$slot/host"
+        iosdir="$work/$slot/ios"
+        mkdir -p "$hostdir" "$iosdir"
         sdk="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null)"
         sdkversion="$(DEVELOPER_DIR="$dir" xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)"
         : > "$work/log"
 
         DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
              -D SPLICE_ENABLED -emit-module \
-             -emit-module-path "$work/SpliceRuntime-$slot-host.swiftmodule" \
+             -emit-module-path "$hostdir/SpliceRuntime.swiftmodule" \
              -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+        DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
+             -D SPLICE_ENABLED -emit-module -I "$hostdir" \
+             -emit-module-path "$hostdir/SpliceSwiftUI.swiftmodule" \
+             -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
 
         if [ -n "$sdk" ] && [ -n "$sdkversion" ]; then
             DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
                  -D SPLICE_ENABLED -emit-module \
                  -target "$arch-apple-ios$sdkversion-simulator" -sdk "$sdk" \
-                 -emit-module-path "$work/SpliceRuntime-$slot-ios.swiftmodule" \
+                 -emit-module-path "$iosdir/SpliceRuntime.swiftmodule" \
                  -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+            DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
+                 -D SPLICE_ENABLED -emit-module -I "$iosdir" \
+                 -target "$arch-apple-ios$sdkversion-simulator" -sdk "$sdk" \
+                 -emit-module-path "$iosdir/SpliceSwiftUI.swiftmodule" \
+                 -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
         else
             echo "no iphonesimulator SDK" >> "$work/log"
             ok=0
         fi
 
         if [ "$ok" -eq 1 ]; then
-            echo "ok  (host and simulator)"
+            echo "ok  (core and SwiftUI adapter, host and simulator)"
         else
             echo "FAILED"
             # The error lines, not the first lines. Both legs share one log, so

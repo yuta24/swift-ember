@@ -15,10 +15,25 @@ public enum UIHarness {
     }
 
     public static func beat(_ tick: Int, rendered: String) {
+        heartbeat(tick)
+        render(rendered)
+    }
+
+    public static func heartbeat(_ tick: Int) {
         try? "\(tick)".write(to: documents.appendingPathComponent("heartbeat"),
                              atomically: true, encoding: .utf8)
+    }
+
+    public static func render(_ rendered: String) {
         try? rendered.write(to: documents.appendingPathComponent("rendered"),
                             atomically: true, encoding: .utf8)
+    }
+
+    public static func recordRegistered(_ count: Int?) {
+        try? String(count.map(String.init) ?? "unreadable").write(
+            to: documents.appendingPathComponent("registered"),
+            atomically: true,
+            encoding: .utf8)
     }
 
     /// Polls the inbox the runner delivers into and loads anything new, the
@@ -34,7 +49,9 @@ public enum UIHarness {
                 seen.insert(name)
                 let path = inbox.appendingPathComponent(name).path
                 NSLog("UIFIXTURE loading \(name)")
-                _ = dlopen(path, RTLD_NOW)
+                if dlopen(path, RTLD_NOW) != nil {
+                    recordRegistered(RegisteredReplacements.count(inImageAt: path))
+                }
             }
         }
     }

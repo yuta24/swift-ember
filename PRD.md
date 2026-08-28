@@ -5,7 +5,7 @@
 > Claude Code)\
 > Working name: `SwiftHotReload`\
 > Initial target: iOS Simulator / Debug builds\
-> Last updated: 2026-08-23
+> Last updated: 2026-08-29
 
 ## 1. Summary
 
@@ -249,7 +249,14 @@ and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
     `-Xfrontend -enable-private-imports` on the module's build, which gives
     them replacement keys like any other declaration; the patch names them
     through `@_private(sourceFile:)`. Without the setting they are refused at
-    COMPILE with the setting spelled out.
+    COMPILE with the setting spelled out,
+-   a SwiftUI `body` change when the file imports `SpliceSwiftUI` directly, the
+    enclosing View declares an instance `@ObserveSplice` stored property in
+    that file, and the body's outermost expression is `.enableSplice()` before
+    and after the edit. The observer causes SwiftUI to evaluate the replacement
+    after load; the modifier fixes the stored child at `AnyView`. A `Text` to
+    `VStack` change in a `List` renders without an abort and preserves the
+    View's existing `@State`. Both opt-ins are no-ops in Release.
 
 ### Tier B: Potentially hot reloadable
 
@@ -272,7 +279,8 @@ Examples:
 -   ABI-relevant conformance/layout changes,
 -   build settings changed,
 -   imported module graph changed in an unsupported way,
--   any declaration returning an opaque result type. Changing the type
+-   any declaration returning an opaque result type, except the explicitly
+    erased SwiftUI `body` shape in Tier A. Changing the type
     behind `some P` passes both the compiler and the loader without a
     diagnostic and is then undefined at runtime, observed variously as
     the new value, as garbage, and as a crash. `some View` fails
@@ -525,11 +533,13 @@ Every pipeline stage SHOULD emit timing telemetry locally for profiling.
 
 MVP support is iOS Simulator runtimes supported by the selected Xcode.
 
-Core function replacement carries no special deployment-target floor.
-SwiftUI-specific support built on `DebugReplaceableView` does: that type
-is declared in SwiftUICore (re-exported by SwiftUI) and is available
-only on iOS 26.0 / macOS 26.0 and later. SwiftUI support MUST document
-this floor separately from core support.
+Core function replacement carries no special deployment-target floor beyond
+the package minimum. Neither does `SpliceSwiftUI`: it places its own `AnyView`
+boundary outside the changing tree rather than depending on
+`DebugReplaceableView`. The original failure still differs by target --- the
+unannotated `List` case aborts where `DebugReplaceableView` is selected and
+survives where SwiftUI falls back to `AnyView` --- so both remain in the
+compatibility fixtures.
 
 The project MUST NOT initially promise physical-device support.
 
@@ -730,32 +740,47 @@ answering "nothing changed" is the worst of the available answers.
 
 ### M4 --- SwiftUI spike
 
-Complete. The answer changed twice, and the second answer is the
-measured one.
+Complete. The answer changed twice before the unsafe default was understood;
+an explicit boundary then made the useful subset safe.
 
 -   [x] Investigate `DebugReplaceableView` and current Xcode behaviour.
 -   [x] Determine opaque-result-type constraints.
--   [ ] Demonstrate a state-preserving SwiftUI edit. A `body` edit does
-    reach the screen with the session token unchanged, but only for an
-    edit that leaves the body's concrete type identical; anything else
-    aborts the process. Not shippable as a feature.
+-   [x] Demonstrate a state-preserving SwiftUI edit. With
+    `@ObserveSplice` and an outermost `.enableSplice()`, a `Text` row became a
+    two-child `VStack` in a live `List`; the new tree rendered, the heartbeat
+    continued, and the View's `@State` UUID was unchanged.
 
-`View` carries `@_typeEraser(DebugReplaceableView)`, so `some View` is
-already concrete and changing a view tree's shape is safe --- not the
-undefined behaviour section 12.7 describes for other opaque result
-types. The replacement loads and dispatches on a direct call to `body`.
+`View` carries `@_typeEraser(DebugReplaceableView)`, so the opaque ABI of
+`some View` is already concrete and the replacement loads and dispatches on a
+direct call to `body` --- unlike the undefined behaviour section 12.7
+describes for other opaque result types. SwiftUI's generic storage introduces
+the separate failure below.
 
 SwiftUI makes that call too --- a replaced body runs when SwiftUI
 evaluates that view, and renders. The paragraph that used to stand here
 said it never does, and it was reading a body SwiftUI had no reason to
 evaluate as a body SwiftUI evaluated and ignored.
 
-`body` stays Tier C anyway, for the reason underneath both of those. The
+An unannotated `body` stays Tier C, for the reason underneath both of those. The
 eraser makes the return type concrete and keeps the child in a generic
 box; changing the body's concrete type makes the graph downcast that box
 to the type it saw first, and the process aborts. Measured on iOS 26 and
 later, for a view that is a row of a `List`. Adding `.padding()` is
 enough to trigger it.
+
+The opt-in does not attempt to infer that the concrete type stayed equal.
+`.enableSplice()` returns `AnyView` in Debug from the first build onward, so
+the `DebugReplaceableView` storage sees the same child type in every
+generation. `@ObserveSplice` subscribes the enclosing View to the runtime's
+generation event, which makes the replaced getter run even when application
+state would not otherwise invalidate it. The source must import
+`SpliceSwiftUI` unconditionally at top level. Generated patch source assigns
+the edited outer call to `SwiftUI.AnyView`, whose result context selects the
+erasing overload over a same-spelled overload returning `Self`. The daemon
+reserves `enableSplice` across watched files in the same module to protect the
+running generation, whose original overload resolution cannot be reproduced
+in the patch module. In Release the modifier returns
+`Self` and the observer has no storage.
 
 `DESIGN.md` section 13.1 has the measurements and both earlier answers.
 
@@ -866,10 +891,10 @@ Still open:
     copy and replace every caller --- worked and was withdrawn: two reviews
     found ten defects in it, every one a consequence of copying rather than
     replacing. DESIGN.md 7.3c has the measurements.
-13. Is there any way to detect an opaque-result-type underlying change
-    before loading, given that the compiler accepts it silently? Failing
-    that, is rejecting every opaque-result-type declaration too blunt to
-    be useful for SwiftUI?
+13. Answered for SwiftUI without detecting the underlying type. The opt-in
+    fixes the body at `AnyView` before the first generation and the classifier
+    requires that boundary on both sides of every edit. Other opaque result
+    types remain refused.
 
 ## 17. References
 

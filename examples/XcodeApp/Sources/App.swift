@@ -1,5 +1,5 @@
 import SwiftUI
-import SpliceRuntime
+import SpliceSwiftUI
 import Feature
 
 @main
@@ -15,6 +15,7 @@ struct XcodeApp: App {
 
 struct ContentView: View {
     @ObservedObject var cart: Cart
+    @ObserveSplice private var splice
 
     var body: some View {
         NavigationStack {
@@ -64,6 +65,10 @@ struct ContentView: View {
                     }
                 }
             }
+            // The explicit boundary keeps the concrete body type at AnyView
+            // in Debug. Together with the observer above, this makes edits to
+            // this body safe and visible without replacing the View's state.
+            .enableSplice()
         }
     }
 }

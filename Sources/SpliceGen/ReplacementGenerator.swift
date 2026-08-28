@@ -1,5 +1,6 @@
 import Foundation
 import SpliceCore
+import SwiftParser
 import SwiftSyntax
 
 /// What one save turns into: declarations to replace in the running process,
@@ -14,7 +15,6 @@ public struct PatchPlan: Sendable {
     /// Declarations the edit introduced, emitted into the patch under their own
     /// names so a replaced body can call them.
     public let carried: [PatchableDeclaration]
-
     public init(replacements: [PatchableDeclaration], carried: [PatchableDeclaration]) {
         self.replacements = replacements
         self.carried = carried
@@ -165,9 +165,10 @@ public enum ChangeClassifier {
         // edit that uses it arrives, and both land together.
         if replacedIdentities.isEmpty { return .noChange }
 
+        let replacements = replacedIdentities.compactMap { after.patchable[$0] }
+            .sorted { $0.identity < $1.identity }
         return .hotPatch(PatchPlan(
-            replacements: replacedIdentities.compactMap { after.patchable[$0] }
-                .sorted { $0.identity < $1.identity },
+            replacements: replacements,
             carried: carriedIdentities.compactMap { after.patchable[$0] }
                 .sorted { $0.identity < $1.identity }))
     }
@@ -277,9 +278,22 @@ public enum ReplacementGenerator {
         }
 
         if var variable = declaration.node.as(VariableDeclSyntax.self),
-           let binding = variable.bindings.first {
+           !variable.bindings.isEmpty {
+            if declaration.requiresAnyViewBoundaryValidation {
+                variable = try enforcingAnyViewBoundary(
+                    in: variable,
+                    temporaryName: "__swift_splice_current_\(generation)_"
+                        + sanitise(declaration.identity))
+            }
+            guard let rewrittenBinding = variable.bindings.first else {
+                throw SpliceError(stage: .generate, subject: declaration.identity,
+                                  reason: "the SwiftUI boundary lost its binding while generating",
+                                  recovery: .rebuild)
+            }
             variable.bindings = PatternBindingListSyntax([
-                binding.with(\.pattern, PatternSyntax(IdentifierPatternSyntax(identifier: .identifier(newName))))
+                rewrittenBinding.with(
+                    \.pattern,
+                    PatternSyntax(IdentifierPatternSyntax(identifier: .identifier(newName))))
             ])
             variable.attributes = strip(variable.attributes)
             variable.modifiers = strip(variable.modifiers)
@@ -289,6 +303,64 @@ public enum ReplacementGenerator {
         throw SpliceError(stage: .generate, subject: declaration.identity,
                           reason: "this generator only emits functions and computed properties",
                           recovery: .rebuild)
+    }
+
+    /// Replaces the final boundary call with a binding whose declared type is
+    /// module-qualified `SwiftUI.AnyView`.
+    ///
+    /// Besides proving the edited body has the boundary, this result context
+    /// makes overload resolution choose the erasing package overload instead
+    /// of a same-spelled overload returning `Self`. Parsing two generated
+    /// statements is less fragile than reconstructing a user's declaration.
+    /// Every statement before the final expression stays as its original
+    /// syntax node; only the already-classified outer call is substituted.
+    private static func enforcingAnyViewBoundary(
+        in variable: VariableDeclSyntax, temporaryName: String
+    ) throws -> VariableDeclSyntax {
+        guard var binding = variable.bindings.first,
+              var accessors = binding.accessorBlock,
+              case .getter(let items) = accessors.accessors,
+              let last = items.last
+        else {
+            throw SpliceError(stage: .generate, subject: variable.trimmedDescription,
+                              reason: "the SwiftUI boundary is not an implicit getter",
+                              recovery: .rebuild)
+        }
+
+        let expression: ExprSyntax?
+        switch last.item {
+        case .expr(let value): expression = value
+        case .stmt(let statement):
+            expression = statement.as(ReturnStmtSyntax.self)?.expression
+        default: expression = nil
+        }
+        guard let expression else {
+            throw SpliceError(stage: .generate, subject: variable.trimmedDescription,
+                              reason: "the SwiftUI boundary has no final expression",
+                              recovery: .rebuild)
+        }
+
+        let probe = Parser.parse(source: """
+            func __swift_splice_probe() {
+                let \(temporaryName): SwiftUI.AnyView = \(expression.trimmedDescription)
+                return \(temporaryName)
+            }
+            """)
+        guard case .decl(let declaration)? = probe.statements.first?.item,
+              let function = declaration.as(FunctionDeclSyntax.self),
+              let generated = function.body?.statements
+        else {
+            throw SpliceError(stage: .generate, subject: variable.trimmedDescription,
+                              reason: "could not generate the SwiftUI boundary type check",
+                              recovery: .rebuild)
+        }
+
+        let rewritten = Array(items.dropLast()) + Array(generated)
+        accessors.accessors = .getter(CodeBlockItemListSyntax(rewritten))
+        binding.accessorBlock = accessors
+        var result = variable
+        result.bindings = PatternBindingListSyntax([binding])
+        return result
     }
 
     /// A carried declaration keeps its own name, and its access level with it,

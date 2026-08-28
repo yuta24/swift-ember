@@ -242,6 +242,171 @@ private func expectRebuild(_ baseline: String, _ current: String,
     #expect(!reason.contains("undefined at runtime"))
 }
 
+@Test func anOptedInSwiftUIBodyIsHotPatchable() throws {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View {
+            Text("old")
+                .enableSplice()
+        }
+    }
+    """
+    let current = baseline.replacingOccurrences(
+        of: "Text(\"old\")",
+        with: "VStack { Text(\"new\"); Text(\"second\") }")
+
+    guard case .hotPatch(let plan) = classify(baseline, current) else {
+        Issue.record("the measured SwiftUI opt-in was refused")
+        return
+    }
+    #expect(plan.replacements.count == 1)
+    // The image carries the getter and its opaque-result descriptor. The UI
+    // fixture reads two from the loaded replacement section.
+    #expect(plan.replacements[0].replacementCount == 2)
+    let generated = try ReplacementGenerator.generate(
+        module: "M", generation: 1, plan: plan,
+        imports: DeclarationIndexer.index(source: current).imports)
+    #expect(generated.contains(".enableSplice()"))
+    #expect(generated.contains("import SpliceSwiftUI"))
+    #expect(generated.components(separatedBy: "SwiftUI.AnyView").count - 1 == 1,
+            "the edited body must be compiler-checked")
+}
+
+@Test func anOptedInBodyMayLiveInAnExtensionInTheSameFile() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View { @ObserveSplice private var splice }
+    extension Screen {
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    let current = baseline.replacingOccurrences(of: "old", with: "new")
+    guard case .hotPatch = classify(baseline, current) else {
+        Issue.record("the observer on the nominal type was not found by its extension")
+        return
+    }
+}
+
+@Test func aLookalikeSwiftUISpliceAPIWithoutTheModuleImportIsRefused() {
+    let baseline = """
+    import SwiftUI
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "does not import")
+}
+
+@Test func aQualifiedLookalikeObserverIsNotOurOptIn() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View {
+        @Other.ObserveSplice private var splice
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "@ObserveSplice")
+}
+
+@Test func aConditionalSpliceSwiftUIImportDoesNotProveTheOptInBinding() {
+    let baseline = """
+    import SwiftUI
+    #if canImport(SpliceSwiftUI)
+    import SpliceSwiftUI
+    #endif
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "does not import")
+}
+
+@Test func aLocalEnableSpliceDeclarationCannotShadowTheBoundary() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    extension Text { func enableSplice() -> Text { self } }
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "reserved")
+}
+
+@Test func enableSpliceWithoutTheObserverIsRefused() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View {
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "@ObserveSplice")
+}
+
+@Test func aStaticObserveSpliceDoesNotPromiseViewInvalidation() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View {
+        @ObserveSplice static var splice
+        var body: some View { Text("old").enableSplice() }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "@ObserveSplice")
+}
+
+@Test func enableSpliceMustEraseTheWholeBody() {
+    let baseline = """
+    import SwiftUI
+    import SpliceSwiftUI
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View {
+            VStack { Text("old").enableSplice() }
+        }
+    }
+    """
+    expectRebuild(baseline,
+                  baseline.replacingOccurrences(of: "old", with: "new"),
+                  because: "outermost expression")
+}
+
+@Test func addingTheSwiftUIOptInRequiresARebuildFirst() {
+    let baseline = """
+    import SwiftUI
+    struct Screen: View { var body: some View { Text("old") } }
+    """
+    let current = """
+    import SwiftUI
+    struct Screen: View {
+        @ObserveSplice private var splice
+        var body: some View { Text("new").enableSplice() }
+    }
+    """
+    expectRebuild(baseline, current, because: "outside a replaceable declaration")
+}
+
 @Test func anOpaqueReturnThatIsNotAViewIsStillRefused() {
     // The eraser is what makes `some View` safe, and it is specific to `View`.
     // Everything else behind `some` is still the undefined-behaviour case.

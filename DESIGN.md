@@ -1252,11 +1252,12 @@ the type behind it free to change, because `DebugReplaceableView` keeps
 its child in a generic box that the graph downcasts to whatever it saw
 first. So section 12.7 is relocated rather than escaped.
 
-The classifier refuses `some View`, with wording of its own rather than
-the undefined-behaviour one, because "undefined at runtime" is the wrong
-description of a clean `SIGABRT` in a cast --- and because the two
-earlier wordings, "does nothing" and "is safe and useless", were both
-measured wrong.
+The classifier refuses `some View` by default, with wording of its own rather
+than the undefined-behaviour one, because "undefined at runtime" is the wrong
+description of a clean `SIGABRT` in a cast --- and because the two earlier
+wordings, "does nothing" and "is safe and useless", were both measured wrong.
+Section 13.4 describes the explicit boundary that lifts this refusal without
+trying to infer the underlying type.
 
 ### 13.1 Three answers, and the measurements that separate them
 
@@ -1319,16 +1320,17 @@ outside it. Nothing syntactic tells those apart reliably, and the cost
 of being wrong is the developer's process, so the whole shape is
 refused.
 
-**Three: refused, because a change to the underlying type aborts.**
-That is the current answer, and unlike the first two it names a
+**Three: refused by default, because a change to the underlying type aborts.**
+That remains the answer for an unannotated body, and unlike the first two it names a
 mechanism that was reproduced from a clean container, with a single
 patch, on two deployment targets.
 
 It is also the first of the three with an artifact. `fixtures/ui/`
 builds a rendering application, delivers one patch, and asks whether the
-process is still beating; three cases hold the whole statement in place
+process is still beating; four cases hold the whole statement in place
 --- the abort in a `List`, the same patch surviving in a `VStack`, and a
-literal-only edit surviving in the `List`. The console matrix could not
+literal-only edit surviving in the `List`, plus the shape change surviving
+behind the opt-in boundary with its `@State` unchanged. The console matrix could not
 have caught any of this, and `swiftui-body-direct-call` passed happily
 through both wrong answers because a direct read of `body` never touches
 the storage that aborts.
@@ -1337,16 +1339,15 @@ The measurement that would change it is Apple making the storage
 non-generic, or `some View` ceasing to erase to `DebugReplaceableView`.
 Neither is something this project can arrange.
 
-### 13.2 What is still open
+### 13.2 What the opt-in does not attempt
 
-Nothing about reaching a body: that is answered, twice over. What is
-open is whether a safe subset can be identified soundly --- an edit that
-provably cannot change the body's concrete type. A token-level
-comparison that ignores literal contents is the obvious candidate and is
-not obviously sound, since a literal's *type* can change what a generic
-expression instantiates to. It is not worth attempting under the
-assumption that being wrong costs a rebuild; being wrong costs the
-process.
+Nothing about reaching a body is open. Nor does the implementation attempt to
+identify edits that happen to leave the concrete type equal. A token-level
+comparison that ignores literal contents is not sound, since a literal's
+*type* can change what a generic expression instantiates to. The opt-in instead
+makes the body concrete type `AnyView` before the session starts. That is a
+property the classifier can see on both sides of an edit, not a claim about
+what an arbitrary view-builder expression means.
 
 ### 13.3 The `DebugReplaceableView` route, followed and closed
 
@@ -1401,19 +1402,93 @@ scenarios. Three facts constrain its use:
     Below iOS 26 or macOS 26 the second eraser, `AnyView`, applies
     instead.
 
-Any SwiftUI support built on it therefore carries a hard
-deployment-target floor that core function replacement does not.
-Record this in the compatibility matrix (section 20).
+Any SwiftUI support that calls this private invalidation route directly would
+therefore carry a hard deployment-target floor that core function replacement
+does not. `SpliceSwiftUI` does not use the route: its explicit `AnyView`
+boundary works below and above that floor.
 
 `SWIFT_ENABLE_OPAQUE_TYPE_ERASURE` maps to
 `-enable-experimental-feature OpaqueTypeErasure` and defaults to NO, but
 erasure of `some View` was observed with the flag on, off, and absent, so
 on this toolchain the setting is not what turns it on.
 
-The project should investigate the current Xcode/SwiftUI preview
-pipeline rather than assume ordinary method replacement is sufficient.
+### 13.4 Explicit `AnyView` boundary
 
-Proposed layering:
+The shippable route uses two source-level opt-ins and no SwiftUI internals:
+
+``` swift
+struct ReceiptView: View {
+    @ObserveSplice private var splice
+
+    var body: some View {
+        ReceiptContents()
+            .enableSplice()
+    }
+}
+```
+
+In Debug, `.enableSplice()` returns `AnyView`. Because it is the outermost
+expression from the initial build onward, the generic child stored by
+`DebugReplaceableView` is `AnyView` in every generation even when the tree
+inside it changes. In Release it is an inlined identity returning `Self`.
+
+`@ObserveSplice` is a `DynamicProperty` containing an `@ObservedObject`. The
+core runtime publishes a generation only after `dlopen` succeeds; the separate
+`SpliceSwiftUI` target maps that framework-neutral SPI event onto the main
+actor and increments the object. SwiftUI therefore invalidates the enclosing
+View and calls the replaced getter. Keeping the adapter in a separate target
+means a UIKit-only application links `SpliceRuntime` without importing
+SwiftUI or Combine.
+
+Measured in `fixtures/ui/Cases/body-shape-change-enabled-in-list`, on the same
+iOS 27 `List` where an unannotated body aborts:
+
+``` text
+body                         Text -> VStack<Text, Text>
+process                      alive
+rendered                     old -> new
+Row @State UUID              unchanged
+registered replacements      2
+```
+
+Two replacement records are expected: one for the getter and one for its
+opaque-result descriptor. The classifier records both, so REGISTER can verify
+the image instead of treating every SwiftUI reload as an unexplained overcount.
+
+The method spelling is not trusted as a type proof. Generated source assigns
+the edited body's outer call to a module-qualified `SwiftUI.AnyView` temporary.
+That result context makes the compiler select the erasing overload instead of
+a same-spelled overload returning `Self`. For the running generation, the
+daemon reserves `enableSplice` across the watched source files in the same
+module, because overload lookup performed in the patch module cannot reproduce
+the original app module's choice for an imported extension.
+
+The syntax rule is deliberately narrow. The enclosing nominal type must have
+`@ObserveSplice` in the same file, that file must import `SpliceSwiftUI`
+unconditionally as a top-level whole-module import, the declaration must be
+`body: some View`, and the implicit
+getter's outermost expression must be `.enableSplice()` in both the built and
+edited source. The import prevents an unrelated same-spelled API from widening
+the opaque-result exception. Adding either opt-in changes layout or type
+semantics and therefore requires one rebuild before a reload session. Applying
+the modifier to a child, using an explicit accessor shape not measured, using
+only a conditional, declaration-level, or re-exported import, qualifying the
+observer through another module, or placing the observer in another file is
+refused. These are false negatives, not invitations to guess.
+
+The rendering fixture drives the same `Splice.load(generation:path:)` function
+as the daemon; `loadPendingPatches()` only supplies its inbox and synthetic
+generation number. This keeps the standalone fixture independent of IPC while
+preventing the notification paths from drifting. The opt-in case is also run
+at deployment targets 18 and 27: below the `DebugReplaceableView` availability
+floor and above it.
+
+State preservation has the normal SwiftUI boundary. State owned by the
+annotated View survives, as measured. State inside a subtree whose identity or
+shape the edit replaces follows SwiftUI reconciliation and is not promised to
+survive.
+
+Implemented layering:
 
 ``` text
 CoreReplacementEngine
@@ -1424,9 +1499,9 @@ CoreReplacementEngine
         |
         +-- SwiftUI adapter
               |
-              +-- opaque result handling
-              +-- invalidation trigger
-              +-- state preservation experiments
+              +-- explicit AnyView boundary
+              +-- generation observer
+              +-- state-preservation fixture
 ```
 
 Do not couple core runtime correctness to undocumented SwiftUI
@@ -1831,10 +1906,10 @@ different one clears the flag.
 The stage that turns "the image loaded" into "the image replaced something".
 
 `dlopen` returning a handle says the image mapped. It says nothing about the
-Swift runtime having bound anything in it, and this project's stated reason for
-refusing SwiftUI `body` is that a reload which lies is worse than a refusal ---
-so reporting a reload on the strength of `dlopen` alone was the same fault in a
-smaller font.
+Swift runtime having bound anything in it, and this project's default refusal
+of an unsafe SwiftUI `body` follows the same rule: a reload which lies is worse
+than a refusal. Reporting a reload on the strength of `dlopen` alone was that
+fault in a smaller font.
 
 After loading, the runtime reads the image's `__TEXT,__swift5_replace` section,
 which is the one the Swift runtime itself reads, and counts the replacements it
@@ -2401,7 +2476,8 @@ a process.
 
 ### Step 7: SwiftUI research
 
-Separate spike.
+Done. The unannotated failure and explicit opt-in are both pinned by rendering
+fixtures; section 13 records the route and the two earlier wrong answers.
 
 ### Step 8: Profile
 
@@ -2465,16 +2541,16 @@ Mitigation:
 Upgraded in severity. Changing the underlying type of an opaque result
 type compiles cleanly and then crashes the process with `SIGSEGV` and no
 diagnostic (section 12.7). This is a memory-safety failure rather than a
-degraded-behavior failure, and it covers the ordinary
-`var body: some View` case.
+degraded-behavior failure. The ordinary unannotated `var body: some View` case
+fails through `DebugReplaceableView`'s generic storage instead.
 
 Mitigation:
 
--   classify any opaque-result-type declaration as rebuild-required
-    unless the underlying type is proven identical,
--   separate SwiftUI adapter,
--   investigate Apple's debug replacement mechanisms, noting the
-    iOS 26.0 floor on `DebugReplaceableView`.
+-   classify opaque-result-type declarations as rebuild-required by default;
+-   allow only the measured SwiftUI opt-in whose initial and patched outer
+    value is `AnyView`;
+-   keep the SwiftUI adapter separate from the core runtime;
+-   retain the iOS 26 `DebugReplaceableView` crash as a compatibility fixture.
 
 ### R5: Existing stack frames
 

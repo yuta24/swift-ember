@@ -95,10 +95,12 @@ public enum Splice {
             guard !state.hasLoaded(url.lastPathComponent) else { continue }
             state.markLoaded(url.lastPathComponent)
             let line: String
-            if dlopen(url.path, RTLD_NOW) != nil {
+            let generation = UInt64(state.generations.count + 1)
+            switch load(generation: generation, path: url.path) {
+            case .loaded:
                 line = "\(url.lastPathComponent): loaded"
-            } else {
-                line = "\(url.lastPathComponent): \(String(cString: dlerror()))"
+            case .failed(_, let message):
+                line = "\(url.lastPathComponent): \(message)"
             }
             state.note(line)
             reported.append(line)
@@ -133,6 +135,7 @@ public enum Splice {
         }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
         state.recordLoaded(generation)
+        SpliceGenerationEvents.publish(generation)
         return .loaded(generation: generation, durationMs: ms,
                        registered: RegisteredReplacements.count(inImageAt: path))
     }

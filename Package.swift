@@ -9,6 +9,10 @@ let package = Package(
         // What an application links. Everything else in this package is host
         // tooling and never reaches a device or simulator.
         .library(name: "SpliceRuntime", targets: ["SpliceRuntime"]),
+        // Opt-in SwiftUI support. Kept out of SpliceRuntime so a UIKit-only
+        // application does not acquire a SwiftUI/Combine dependency merely by
+        // enabling the core loader.
+        .library(name: "SpliceSwiftUI", targets: ["SpliceSwiftUI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "603.0.0"),
@@ -21,6 +25,9 @@ let package = Package(
         // That is what makes DESIGN.md section 5.3 hold without asking the
         // integrating project to remember anything.
         .target(name: "SpliceRuntime", path: "runtime/Sources",
+                swiftSettings: [.define("SPLICE_ENABLED", .when(configuration: .debug))]),
+        .target(name: "SpliceSwiftUI", dependencies: ["SpliceRuntime"],
+                path: "runtime/SwiftUI",
                 swiftSettings: [.define("SPLICE_ENABLED", .when(configuration: .debug))]),
         .target(name: "SpliceGen", dependencies: [
             "SpliceCore",

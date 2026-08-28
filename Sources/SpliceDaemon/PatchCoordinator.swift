@@ -277,6 +277,24 @@ public actor PatchCoordinator {
         }
         let declarations = plan.replacements
 
+        // Syntax can identify the boundary call but cannot reproduce overload
+        // resolution for a method declared in another source file of the app
+        // module. Reserve the name across every watched source before trusting
+        // the boundary. Generated source still adds a SwiftUI.AnyView binding
+        // as a compiler check; this scan protects the running generation,
+        // whose source was compiled in the app module rather than the patch.
+        if declarations.contains(where: \.requiresAnyViewBoundaryValidation),
+           let conflict = spliceBoundaryNameConflict(excluding: url) {
+            return .rejected(SpliceError(
+                stage: .classify, subject: url.lastPathComponent,
+                reason: """
+                    \(conflict.lastPathComponent) declares `enableSplice`, which is \
+                    reserved while a SwiftUI body uses the splice boundary. A \
+                    shadowing overload can remove `AnyView`; rename it and rebuild.
+                    """,
+                recovery: .rebuild))
+        }
+
         // After the filters. Checked first, a poisoned session printed the
         // whole paragraph for every touched file -- and a build or a checkout
         // touches many, none of which would have been patched anyway.
@@ -471,6 +489,20 @@ public actor PatchCoordinator {
             return .rejected(SpliceError(stage: .verify, subject: url.lastPathComponent,
                                          reason: "unattributed failure: \(error)", recovery: .rebuild))
         }
+    }
+
+    /// A declaration in another watched file that can shadow the adapter's
+    /// modifier. The edited file was already checked by its FileIndex.
+    private func spliceBoundaryNameConflict(excluding edited: URL) -> URL? {
+        let editedModule = resolver.resolve(edited).module
+        for candidate in baselines.keys where candidate != edited {
+            guard resolver.resolve(candidate).module == editedModule else { continue }
+            guard let source = try? String(contentsOf: candidate, encoding: .utf8) else { continue }
+            if DeclarationIndexer.index(source: source).declaresEnableSplice {
+                return candidate
+            }
+        }
+        return nil
     }
 }
 

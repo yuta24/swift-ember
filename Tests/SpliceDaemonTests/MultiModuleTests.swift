@@ -135,6 +135,50 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     #expect(error.reason.contains("App"), "and say what is patchable")
 }
 
+@Test func aSwiftUIBoundaryIsRefusedWhenAnotherFileCanShadowIt() async throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("splice-swiftui-shadow-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let subject = root.appendingPathComponent("Row.swift")
+    let baseline = """
+        import SwiftUI
+        import SpliceSwiftUI
+        struct Row: View {
+            @ObserveSplice private var splice
+            var body: some View { Text("old").enableSplice() }
+        }
+        """
+    try baseline.write(to: subject, atomically: true, encoding: .utf8)
+    try "func enableSplice() {}"
+        .write(to: root.appendingPathComponent("Shadow.swift"), atomically: true, encoding: .utf8)
+
+    let server = try IPCServer()
+    _ = try await server.start()
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/true", swiftCompilerVersion: "t",
+        targetTriple: "arm64-apple-macosx26.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: root.appendingPathComponent("app").path,
+        moduleSearchPaths: [root.path], extraCompilerFlags: [],
+        sourceRoots: [root.path], bundleIdentifier: "dev.swift-splice.tests")
+    let coordinator = PatchCoordinator(
+        context: context, server: server, workDirectory: root.appendingPathComponent("p"),
+        inventory: ModuleInventory(keys: ["App": 20]))
+    await coordinator.primeBaselines(from: [root])
+
+    try baseline.replacingOccurrences(of: "Text(\"old\")", with: "VStack { Text(\"new\") }")
+        .write(to: subject, atomically: true, encoding: .utf8)
+
+    guard case .rejected(let error) = await coordinator.handle(change: subject) else {
+        Issue.record("a cross-file enableSplice declaration was trusted")
+        return
+    }
+    #expect(error.stage == .classify)
+    #expect(error.reason.contains("Shadow.swift"))
+    #expect(error.reason.contains("rename it and rebuild"))
+}
+
 // MARK: - A package's language mode is its own
 
 /// The build settings report the targets of the scheme, and a local package's

@@ -40,10 +40,22 @@ public struct PatchableDeclaration: Sendable {
     /// contributes two records for one declaration, so counting declarations
     /// reported every get/set property edit as a reload nobody could confirm.
     ///
-    /// An opaque return brings a record of its own as well --- measured, a
-    /// `some View` body emits two --- which is not accounted for here because
-    /// nothing opaque reaches a patch.
+    /// An opaque return brings a record of its own as well. Measured, an
+    /// opted-in `some View` body emits two, so its count is the getter plus
+    /// one opaque-result record.
     public let replacementCount: Int
+
+    /// Whether generated source must prove that this body's outer boundary
+    /// resolves to SwiftUI's `AnyView` rather than merely sharing our method's
+    /// spelling.
+    ///
+    /// SwiftSyntax cannot resolve overloads. A concrete View extension in
+    /// another file can shadow the package's `.enableSplice()` and return
+    /// `Self`; accepting that on name alone recreates the opaque-result crash
+    /// this opt-in exists to prevent. The generator uses this bit to add a
+    /// compiler-checked `SwiftUI.AnyView` binding for the edited generation;
+    /// the daemon separately protects the running generation.
+    public let requiresAnyViewBoundaryValidation: Bool
 
     /// Whether this declaration could be *added* by a patch.
     ///
@@ -71,6 +83,10 @@ public struct FileIndex: Sendable {
     /// original file had; without them the patch fails at COMPILE with
     /// "cannot find type in scope", which reads like the tool's bug.
     public let imports: [String]
+    /// Whether this source declares the modifier name reserved by the SwiftUI
+    /// adapter. Used by the daemon to reject cross-file shadowing before it
+    /// compiles a boundary patch.
+    public let declaresEnableSplice: Bool
     /// Everything else in the file, hashed, so that a change nobody indexed
     /// still forces a rebuild instead of passing unnoticed.
     public let residue: String
@@ -176,20 +192,31 @@ public enum DeclarationIndexer {
 
         let imports = collectImports(file.statements.map(\.item))
         let importsSwiftUI = SwiftUIImportFinder.found(in: file)
+        let importsSpliceSwiftUI = importsSpliceSwiftUIDirectly(file)
+        let declaresEnableSplice = EnableSpliceDeclarationFinder.found(in: file)
+        let observedContexts = observeSpliceContexts(
+            in: file.statements.map(\.item), context: [])
 
         walk(members: file.statements.map(\.item), context: [],
-             importsSwiftUI: importsSwiftUI, into: &builder)
+             importsSwiftUI: importsSwiftUI,
+             importsSpliceSwiftUI: importsSpliceSwiftUI,
+             declaresEnableSplice: declaresEnableSplice,
+             observedContexts: observedContexts, into: &builder)
 
         // Not sorted: order is part of the fingerprint. Sorting made a pure
         // reordering of declarations -- enum cases, say -- invisible.
         return FileIndex(patchable: builder.patchable,
                          unsupported: builder.unsupported, imports: imports,
+                         declaresEnableSplice: declaresEnableSplice,
                          residue: builder.residue.joined(separator: "\n"),
                          declaresFileLocal: detector.found)
     }
 
     private static func walk(members: [CodeBlockItemSyntax.Item], context: [String],
                              importsSwiftUI: Bool,
+                             importsSpliceSwiftUI: Bool,
+                             declaresEnableSplice: Bool,
+                             observedContexts: Set<String>,
                              into builder: inout IndexBuilder) {
         for item in members {
             guard case .decl(let decl) = item else {
@@ -197,12 +224,18 @@ public enum DeclarationIndexer {
                 continue
             }
             visit(decl, context: context, importsSwiftUI: importsSwiftUI,
+                  importsSpliceSwiftUI: importsSpliceSwiftUI,
+                  declaresEnableSplice: declaresEnableSplice,
+                  observedContexts: observedContexts,
                   into: &builder)
         }
     }
 
     private static func visit(_ decl: DeclSyntax, context: [String],
                               importsSwiftUI: Bool,
+                              importsSpliceSwiftUI: Bool,
+                              declaresEnableSplice: Bool,
+                              observedContexts: Set<String>,
                               into builder: inout IndexBuilder) {
         // Before the branch below, not after: ProtocolDeclSyntax conforms to
         // both DeclGroupSyntax and NamedDeclSyntax, so it would otherwise be
@@ -225,6 +258,9 @@ public enum DeclarationIndexer {
             builder.note(normalise(head))
             walk(members: type.memberBlock.members.map { .decl($0.decl) },
                  context: context + [name], importsSwiftUI: importsSwiftUI,
+                 importsSpliceSwiftUI: importsSpliceSwiftUI,
+                 declaresEnableSplice: declaresEnableSplice,
+                 observedContexts: observedContexts,
                  into: &builder)
             return
         }
@@ -242,6 +278,9 @@ public enum DeclarationIndexer {
             builder.note(normalise(head))
             walk(members: ext.memberBlock.members.map { .decl($0.decl) },
                  context: [name], importsSwiftUI: importsSwiftUI,
+                 importsSpliceSwiftUI: importsSpliceSwiftUI,
+                 declaresEnableSplice: declaresEnableSplice,
+                 observedContexts: observedContexts,
                  into: &builder)
             return
         }
@@ -254,11 +293,62 @@ public enum DeclarationIndexer {
 
         if let variable = decl.as(VariableDeclSyntax.self) {
             record(variable: variable, context: context,
-                   importsSwiftUI: importsSwiftUI, into: &builder)
+                   importsSwiftUI: importsSwiftUI,
+                   importsSpliceSwiftUI: importsSpliceSwiftUI,
+                   declaresEnableSplice: declaresEnableSplice,
+                   observesSplice: observedContexts.contains(context.joined(separator: ".")),
+                   into: &builder)
             return
         }
 
         builder.note(normalise(decl))
+    }
+
+    /// Nominal types that contain the redraw half of the SwiftUI opt-in as an
+    /// instance stored property.
+    ///
+    /// Collected before declarations are indexed so `body` may live in an
+    /// extension later in the same file. Cross-file extensions stay refused:
+    /// this syntactic classifier cannot prove that another file's stored
+    /// property belongs to the same declaration, and a false negative costs a
+    /// rebuild while accepting an unobserved body reports a reload the screen
+    /// may never evaluate.
+    private static func observeSpliceContexts(
+        in members: [CodeBlockItemSyntax.Item], context: [String]
+    ) -> Set<String> {
+        var found: Set<String> = []
+        for item in members {
+            guard case .decl(let decl) = item,
+                  let type = decl.asProtocol(NamedDeclSyntax.self)
+                    as? (any DeclGroupSyntax & NamedDeclSyntax),
+                  !decl.is(ProtocolDeclSyntax.self)
+            else { continue }
+
+            let path = context + [type.name.text]
+            let declarations = type.memberBlock.members.map(\.decl)
+            if declarations.contains(where: { declaration in
+                guard let variable = declaration.as(VariableDeclSyntax.self) else { return false }
+                let isTypeProperty = variable.modifiers.contains { modifier in
+                    modifier.name.tokenKind == .keyword(.static)
+                        || modifier.name.tokenKind == .keyword(.class)
+                }
+                guard !isTypeProperty,
+                      variable.bindings.count == 1,
+                      variable.bindings.first?.accessorBlock == nil
+                else { return false }
+                return variable.attributes.contains { element in
+                    guard case .attribute(let attribute) = element else { return false }
+                    let name = attribute.attributeName.trimmedDescription
+                    return name == "ObserveSplice"
+                        || name == "SpliceSwiftUI.ObserveSplice"
+                }
+            }) {
+                found.insert(path.joined(separator: "."))
+            }
+            found.formUnion(observeSpliceContexts(
+                in: type.memberBlock.members.map { .decl($0.decl) }, context: path))
+        }
+        return found
     }
 
     /// Imports, including those inside `#if`.
@@ -354,6 +444,39 @@ public enum DeclarationIndexer {
         }
     }
 
+    /// Whether the file opts into this package's SwiftUI adapter directly.
+    ///
+    /// A spelling match on `@ObserveSplice` and `.enableSplice()` alone is not
+    /// enough: another module (or the file itself) can declare those names.
+    /// Requiring the whole-module import keeps that lookalike from widening the
+    /// one opaque-result exception. As with the SwiftUI check above, a
+    /// re-export is conservatively refused because syntax cannot prove it.
+    private static func importsSpliceSwiftUIDirectly(_ file: SourceFileSyntax) -> Bool {
+        file.statements.contains { item in
+            guard case .decl(let declaration) = item.item,
+                  let node = declaration.as(ImportDeclSyntax.self)
+            else { return false }
+            return node.importKindSpecifier == nil
+                && node.path.count == 1
+                && node.path.first?.name.text == "SpliceSwiftUI"
+        }
+    }
+
+    private final class EnableSpliceDeclarationFinder: SyntaxVisitor {
+        private var seen = false
+
+        static func found(in file: SourceFileSyntax) -> Bool {
+            let finder = EnableSpliceDeclarationFinder(viewMode: .sourceAccurate)
+            finder.walk(file)
+            return finder.seen
+        }
+
+        override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+            if node.name.text == "enableSplice" { seen = true }
+            return seen ? .skipChildren : .visitChildren
+        }
+    }
+
     // MARK: - Functions
 
     private static func record(function: FunctionDeclSyntax, context: [String],
@@ -426,6 +549,7 @@ public enum DeclarationIndexer {
             displayName: display,
             simpleName: function.name.text,
             replacementCount: 1,
+            requiresAnyViewBoundaryValidation: false,
             carryable: carryable),
             fingerprint: fingerprint)
     }
@@ -434,6 +558,9 @@ public enum DeclarationIndexer {
 
     private static func record(variable: VariableDeclSyntax, context: [String],
                                importsSwiftUI: Bool,
+                               importsSpliceSwiftUI: Bool,
+                               declaresEnableSplice: Bool,
+                               observesSplice: Bool,
                                into builder: inout IndexBuilder) {
 
 
@@ -489,10 +616,35 @@ public enum DeclarationIndexer {
         }
 
         let declaredType = binding.typeAnnotation?.type
+        var extraReplacementCount = 0
         if containsOpaqueType(declaredType) {
             let erasedView = isErasedSwiftUIView(declaredType, importsSwiftUI: importsSwiftUI)
-            builder.reject(identity, erasedView ? swiftUIBodyReason : opaqueReason, fingerprint)
-            return
+            guard erasedView,
+                  name == "body",
+                  importsSpliceSwiftUI,
+                  !declaresEnableSplice,
+                  observesSplice,
+                  endsInEnableSplice(accessors)
+            else {
+                let reason: String
+                if erasedView, name == "body", endsInEnableSplice(accessors),
+                   declaresEnableSplice {
+                    reason = swiftUIShadowReason
+                } else if erasedView, name == "body", endsInEnableSplice(accessors),
+                          !importsSpliceSwiftUI {
+                    reason = swiftUIImportReason
+                } else if erasedView, name == "body", endsInEnableSplice(accessors),
+                          !observesSplice {
+                    reason = swiftUIObserverReason
+                } else {
+                    reason = erasedView ? swiftUIBodyReason : opaqueReason
+                }
+                builder.reject(identity, reason, fingerprint)
+                return
+            }
+            // One descriptor for the getter and one for its opaque result,
+            // read from the loaded image by the UI fixture.
+            extraReplacementCount = 1
         }
 
         let carryable = isCarryable(attributes: variable.attributes, modifiers: variable.modifiers)
@@ -505,9 +657,42 @@ public enum DeclarationIndexer {
             node: DeclSyntax(variable),
             displayName: identity,
             simpleName: name,
-            replacementCount: accessorCount(accessors),
+            replacementCount: accessorCount(accessors) + extraReplacementCount,
+            requiresAnyViewBoundaryValidation: extraReplacementCount == 1,
             carryable: carryable),
             fingerprint: fingerprint)
+    }
+
+    /// Whether the implicit getter's outermost expression is our explicit
+    /// type-erasure boundary.
+    ///
+    /// Applying the modifier to a child is insufficient: the value stored by
+    /// `DebugReplaceableView` would still be the outer generic view. Explicit
+    /// `get` accessors are refused for now; the public API's normal `body`
+    /// spelling uses the implicit getter, and widening syntax before the one
+    /// measured shape would turn an ergonomics feature into a safety guess.
+    private static func endsInEnableSplice(_ accessors: AccessorBlockSyntax) -> Bool {
+        guard case .getter(let items) = accessors.accessors,
+              let last = items.last else { return false }
+
+        let expression: ExprSyntax?
+        switch last.item {
+        case .expr(let value):
+            expression = value
+        case .stmt(let statement):
+            expression = statement.as(ReturnStmtSyntax.self)?.expression
+        default:
+            expression = nil
+        }
+
+        guard let expression,
+              let call = expression.as(FunctionCallExprSyntax.self),
+              call.arguments.isEmpty,
+              call.trailingClosure == nil,
+              call.additionalTrailingClosures.isEmpty,
+              let member = call.calledExpression.as(MemberAccessExprSyntax.self)
+        else { return false }
+        return member.declName.baseName.text == "enableSplice"
     }
 
     /// How many accessors a property declares, which is how many replacement
@@ -612,7 +797,27 @@ public enum DeclarationIndexer {
     static let swiftUIBodyReason = """
         returns `some View`; the patch loads and runs, but a change to the \
         view's concrete type aborts the process when that view is a row of a \
-        List (measured on iOS 26 and later)
+        List (measured on iOS 26 and later). Add `@ObserveSplice` to the View \
+        and make `.enableSplice()` the body's outermost expression, then rebuild
+        """
+
+    static let swiftUIObserverReason = """
+        erases its body with `.enableSplice()` but the enclosing View has no \
+        `@ObserveSplice` property in this file, so a loaded body is not guaranteed \
+        to be evaluated. Add the observer and rebuild
+        """
+
+    static let swiftUIImportReason = """
+        looks like a SwiftUI splice boundary but the file does not import \
+        `SpliceSwiftUI` as a whole module, so the classifier cannot prove those \
+        names are this package's opt-in API. Import `SpliceSwiftUI` and rebuild
+        """
+
+    static let swiftUIShadowReason = """
+        uses `.enableSplice()` in a source file that also declares that name. \
+        The modifier name is reserved while SwiftUI splicing is enabled because \
+        a shadowing overload can remove the `AnyView` boundary. Rename the local \
+        declaration and rebuild
         """
 
     /// Whether this is the one shape measured to be erased, and therefore the
