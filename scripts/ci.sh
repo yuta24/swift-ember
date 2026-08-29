@@ -20,7 +20,7 @@ cd "$ROOT"
 # Stages that need a booted simulator are listed separately rather than
 # inferred, so that skipping "the simulator" does not quietly skip a build that
 # never needed one.
-ALWAYS_STAGES="toolchain build tests fixtures runtime-toolchains xcode-build"
+ALWAYS_STAGES="toolchain script-tests build tests fixtures runtime-toolchains xcode-build"
 SIMULATOR_STAGES="simulator fixtures-simulator examples ui-fixtures doctor"
 ALL_STAGES="$ALWAYS_STAGES $SIMULATOR_STAGES"
 
@@ -230,14 +230,7 @@ boot_simulator() {
 
     local device
     device="$(xcrun simctl list devices available \
-        | awk -v want="-- iOS $wanted --" '
-            $0 == want { inside = 1; next }
-            /^-- / { inside = 0 }
-            inside && /iPhone/ { match($0, /\(([A-F0-9-]+)\)/, m); print m[1]; exit }' 2>/dev/null)"
-    if [ -z "$device" ]; then
-        device="$(xcrun simctl list devices available | sed -n "/-- iOS $wanted --/,/^-- /p" \
-            | grep iPhone | head -1 | sed 's/.*(\([A-F0-9-]*\)).*/\1/')"
-    fi
+        | bash "$ROOT/scripts/select-simulator-device.sh" "$wanted")"
     if [ -z "$device" ]; then
         echo "no iPhone simulator on an iOS $wanted runtime, which is what this Xcode's SDK targets" >&2
         xcrun simctl list devices available >&2
@@ -288,6 +281,7 @@ RESULTS_DIR="${SPLICE_RESULTS_DIR:-$ROOT/.ci-results}"
 mkdir -p "$RESULTS_DIR"
 
 step toolchain check_toolchain
+step script-tests bash "$ROOT/scripts/tests.sh"
 step build build_package
 step tests run_tests
 step fixtures ./fixtures/run.sh --results "$RESULTS_DIR/macos.yaml"
