@@ -44,9 +44,11 @@ A reload takes about 350 ms and, unlike a build, does not care how big your
 project is. On a module of ten thousand declarations a full build takes 50
 seconds and a patch still takes 352 ms.
 
-Build the daemon with `swift build -c release`. Classification is SwiftSyntax
-parsing, and unoptimised it costs fourteen times as much — enough to be most of
-the loop on a large file.
+Build the daemon with
+`swift build -c release --package-path Tools/swift-splice`. Classification is
+SwiftSyntax parsing, and unoptimised it costs fourteen times as much — enough
+to be most of the loop on a large file. The host tool is a separate package so
+applications that add the root package resolve no SwiftSyntax dependency.
 
 ## Try it
 
@@ -200,18 +202,17 @@ section 7.3b is where those two numbers come from.
 ## Layout
 
 ```
-Sources/SpliceCore     shared types: build context, wire protocol, diagnostics
-Sources/SpliceGen      SwiftSyntax: what changed, and what to generate for it
-Sources/SpliceDaemon   watching, compiling, talking to the app
-Sources/SpliceCLI      swift-splice doctor | watch | status
+Tools/swift-splice/    host-only package; owns the SwiftSyntax dependency
+  Sources/SpliceCore   shared types: build context, wire protocol, diagnostics
+  Sources/SpliceGen    SwiftSyntax: what changed, and what to generate for it
+  Sources/SpliceDaemon watching, compiling, talking to the app
+  Sources/SpliceCLI    swift-splice doctor | watch | status
+  Tests/               classifier, generated-patch, and daemon tests
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              43 cases pinning what Swift dynamic replacement does,
                        and 4 more under ui/ that need a rendering process
-Tests/                 225 tests: what the classifier decides, what the
-                       generated patch does in a process, what the daemon
-                       does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
 examples/XcodeApp      the same thing as a real .xcodeproj, in SwiftUI
 examples/UIKitApp      storyboards, a navigation controller, a table view

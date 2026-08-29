@@ -14,6 +14,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TOOL_PACKAGE="$ROOT/Tools/swift-splice"
 cd "$ROOT"
 
 # Stages that need a booted simulator are listed separately rather than
@@ -94,11 +95,25 @@ check_toolchain() {
 # and loading code to nothing -- which is how a type-checker crash in that file
 # went unnoticed on three shipping toolchains.
 build_package() {
+    # Build the dependency-free package exactly as applications consume it,
+    # then build the separately distributed host tool in both configurations.
+    local app_dependencies
+    app_dependencies="$(swift package show-dependencies --format text)" || return 1
+    case "$app_dependencies" in
+        "No external dependencies found") ;;
+        *)
+            echo "the application package must not have external dependencies:" >&2
+            printf '%s\n' "$app_dependencies" >&2
+            return 1
+            ;;
+    esac
     swift build || return 1
-    swift build -c release
+    swift build -c release || return 1
+    swift build --package-path "$TOOL_PACKAGE" || return 1
+    swift build -c release --package-path "$TOOL_PACKAGE"
 }
 
-run_tests() { swift test; }
+run_tests() { swift test --package-path "$TOOL_PACKAGE"; }
 
 run_fixtures() { ./fixtures/run.sh; }
 
@@ -258,7 +273,7 @@ build_examples() {
 # integrations/xcode produce something actually patchable.
 run_doctor() {
     local splice ok=0 project
-    splice="$(swift build --show-bin-path)/swift-splice"
+    splice="$(swift build --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-splice"
     for project in XcodeApp UIKitApp; do
         echo "  $project"
         "$splice" doctor --project "examples/$project/$project.xcodeproj" \

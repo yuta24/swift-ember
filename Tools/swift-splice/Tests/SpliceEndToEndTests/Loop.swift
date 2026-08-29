@@ -24,6 +24,8 @@ enum Loop {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // SpliceEndToEndTests
             .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // swift-splice tool package
+            .deletingLastPathComponent()   // Tools
             .deletingLastPathComponent()   // repo
     }
 

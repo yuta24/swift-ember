@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
+TOOL_PACKAGE="$REPO/Tools/swift-splice"
 BUNDLE_ID=dev.swift-splice.CounterApp
 SHOTS="${SHOTS_DIR:-$ROOT/.build/demo}"
 SUBJECT="$ROOT/Sources/Cart.swift"
@@ -34,8 +35,8 @@ trap cleanup EXIT
 # on a 2,000-line file that is 244 ms against 18 ms, turning a 366 ms reload
 # into a 591 ms one. The first build of this takes a couple of minutes.
 echo "==> building the daemon (release)"
-swift build -c release --package-path "$REPO" > /dev/null
-SPLICE="$(swift build -c release --package-path "$REPO" --show-bin-path)/swift-splice"
+swift build -c release --package-path "$TOOL_PACKAGE" > /dev/null
+SPLICE="$(swift build -c release --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-splice"
 
 echo "==> building and launching the app"
 "$ROOT/build.sh" > /dev/null

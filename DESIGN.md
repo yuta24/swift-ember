@@ -262,6 +262,13 @@ entry point and nothing that dials or loads. That is what lets a call
 site say `Splice.start()` with no `#if` around it, which matters because
 a conditional at every call site is a thing projects get wrong.
 
+The repository contains two package manifests with deliberately different
+consumers. The root package exposes only `SpliceRuntime` and `SpliceSwiftUI`
+and has no external dependencies. The host daemon lives in
+`Tools/swift-splice`; only that package resolves SwiftSyntax. This keeps the
+parser out of an application's dependency graph without coupling the daemon
+to a toolchain-private SwiftSyntax build.
+
 ### 5.3 Release isolation
 
 A project integrating SwiftHotReload MUST be able to verify:
@@ -1139,7 +1146,7 @@ corrupts a process. A review found this check missing entirely --- the
 signature text `var body: some View` is identical before and after, so
 neither the signature comparison nor the residue noticed --- which meant
 the case the design calls its most dangerous was undefended in the
-implementation. `Tests/SpliceGenTests/SoundnessTests.swift` pins it.
+implementation. `Tools/swift-splice/Tests/SpliceGenTests/SoundnessTests.swift` pins it.
 ### 12.8 What implicit dynamic does not cover
 
 `-enable-implicit-dynamic` is not exhaustive. Measured coverage
@@ -1928,7 +1935,7 @@ scope     uint32 flags
           descriptors...
 ```
 
-`Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins that a patch
+`Tools/swift-splice/Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins that a patch
 emitting one replacement declares one and a patch emitting three declares
 three, so a toolchain that moves this fails there rather than in a session.
 
@@ -1957,7 +1964,7 @@ is what stopped it. What the checks cannot catch is a layout that is different
 but *valid*, where the Swift runtime is content and these offsets read the
 wrong field --- which is why the count is treated as evidence, the "higher than
 expected" case is not fatal, and
-`Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins the layout so a
+`Tools/swift-splice/Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins the layout so a
 change fails there first.
 
 ## 18. Observability
@@ -1991,7 +1998,7 @@ justified. It has now been collected; section 18.1 has it.
 
 ### 18.1 Measured
 
-`Sources/SpliceBench` generates a synthetic application of a given size,
+`Tools/swift-splice/Sources/SpliceBench` generates a synthetic application of a given size,
 builds it, and drives the real classifier, generator, and compiler
 through an edit. Median of five patches after a discarded warmup,
 milliseconds, from an optimised build of the daemon:
@@ -2198,7 +2205,7 @@ covered today are listed in `fixtures/README.md`.
 -   inheritance changed.
 
 All must fail closed. Implemented as
-`Tests/SpliceGenTests/RebuildRequiredTests.swift`, one test per entry
+`Tools/swift-splice/Tests/SpliceGenTests/RebuildRequiredTests.swift`, one test per entry
 above so the list cannot quietly narrow.
 
 Two of these are order-sensitive rather than text-sensitive, and both
@@ -2258,7 +2265,8 @@ toolchains:
 ```
 
 Four toolchains measured, three of them shipping releases. Every entry
-below is `fixtures/run.sh` and `swift test` actually run, not inferred:
+below is `fixtures/run.sh` and `swift test --package-path Tools/swift-splice`
+actually run, not inferred:
 
 ``` text
                      swift   host target   host   simulator          tests
