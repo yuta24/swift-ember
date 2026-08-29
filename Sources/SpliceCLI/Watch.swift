@@ -5,6 +5,7 @@ import SpliceGen
 
 public enum Watch {
     public static func run(context: BuildContext) async throws {
+        try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
         let work = URL(fileURLWithPath: ".splice/patches")
 
@@ -71,24 +72,45 @@ public enum Watch {
         watcher.prime()
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
-        print("listening on 127.0.0.1:\(port)")
+        if let device = context.deviceIdentifier {
+            print("targeting physical device \(device) through CoreDevice")
+        } else {
+            print("listening on 127.0.0.1:\(port)")
+        }
         print("")
 
-        // While nothing is connected, keep republishing where to dial. A
-        // reinstall moves the app to a new container, and the session file in
-        // the old one is unreachable from the new process -- so without this
-        // the daemon waits forever for a connection the app cannot make.
+        // While nothing is connected, keep republishing where to dial. On a
+        // physical device a slower status heartbeat notices a reinstall, which
+        // moves the app to a new container, before republishing there.
         let reannounce = Task.detached {
             // Detached so the wait between attempts is not held on the caller.
             // It does not keep `simctl` off the coordinator: `announceSession`
             // is actor-isolated, so a save landing in that 94 ms window queues
             // behind it either way. The comment here used to claim otherwise.
-            // It only runs while nothing is connected, so the window is one a
-            // developer is unlikely to be saving into.
+            // Simulator publication only runs while disconnected. Physical
+            // status checks continue at a lower rate while connected.
             var consecutiveFailures = 0
+            var physicalConnected = await coordinator.hasPhysicalProcess
             while !Task.isCancelled {
                 let backoff = min(2 << min(consecutiveFailures, 4), 60)
-                try? await Task.sleep(for: .seconds(consecutiveFailures == 0 ? 2 : backoff))
+                let normalDelay = context.deviceIdentifier != nil && physicalConnected ? 10 : 2
+                try? await Task.sleep(for: .seconds(
+                    consecutiveFailures == 0 ? normalDelay : backoff))
+
+                if context.deviceIdentifier != nil {
+                    do {
+                        physicalConnected = try await coordinator.maintainPhysicalSession()
+                        consecutiveFailures = 0
+                    } catch {
+                        physicalConnected = false
+                        consecutiveFailures += 1
+                        if consecutiveFailures == 1 {
+                            print("cannot reach the app's container: \(error)")
+                        }
+                    }
+                    continue
+                }
+
                 guard server.currentSession == nil else {
                     consecutiveFailures = 0
                     continue
@@ -217,6 +239,20 @@ public enum Watch {
                     print("")
                 }
             }
+        }
+    }
+
+    static func validatePhysicalDevice(_ context: BuildContext) throws {
+        guard context.deviceIdentifier != nil else { return }
+        guard context.sdkName == "iphoneos", !context.targetTriple.contains("-simulator") else {
+            throw SpliceError(stage: .watch, subject: context.moduleName,
+                              reason: "--device resolved a simulator build; select the same physical device as the Xcode destination",
+                              recovery: .configure)
+        }
+        guard context.codeSigningIdentity?.isEmpty == false else {
+            throw SpliceError(stage: .watch, subject: context.moduleName,
+                              reason: "physical-device patches require Development signing; configure the Debug build or pass --signing-identity",
+                              recovery: .configure)
         }
     }
 }

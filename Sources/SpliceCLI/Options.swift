@@ -19,6 +19,8 @@ public struct Options {
     public var scheme: String?
     public var configuration = "Debug"
     public var sourceRoots: [String] = []
+    public var device: String?
+    public var signingIdentity: String?
 
     public static let usage = """
     swift-splice <command> [options]
@@ -33,6 +35,8 @@ public struct Options {
       --scheme <name>                required with either
       --configuration <name>         default Debug
       --sources <dir>[,<dir>...]     default the project's SRCROOT
+      --device <CoreDevice-ID>       target a connected physical iOS device
+      --signing-identity <name|SHA>  override the patch signing identity
 
     Pointing at a build that emits its own manifest:
 
@@ -83,6 +87,8 @@ public struct Options {
                 options.sourceRoots = try value(after: argument)
                     .split(separator: ",")
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
+            case "--device": options.device = try value(after: argument)
+            case "--signing-identity": options.signingIdentity = try value(after: argument)
             case "-h", "--help":
                 throw ParseError.usage
             default:
@@ -112,17 +118,25 @@ public struct Options {
         else { return nil }
 
         return try XcodeProject(container: container, scheme: scheme!,
-                                configuration: configuration)
+                                configuration: configuration,
+                                deviceIdentifier: device)
             .resolve(sourceRoots: sourceRoots)
     }
 
     /// The project when there is one, the manifest otherwise.
     public func buildContext(project: XcodeProject.Resolved?) throws -> BuildContext {
-        if let project { return project.context }
+        if let project {
+            var context = project.context
+            if let signingIdentity { context.codeSigningIdentity = signingIdentity }
+            return context
+        }
 
         let url = URL(fileURLWithPath: contextPath)
         do {
-            return try BuildContext.load(from: url)
+            var context = try BuildContext.load(from: url)
+            if let device { context.deviceIdentifier = device }
+            if let signingIdentity { context.codeSigningIdentity = signingIdentity }
+            return context
         } catch {
             throw SpliceError(stage: .watch, subject: url.lastPathComponent, reason: """
                 no project and no build context.

@@ -12,7 +12,8 @@ public actor PatchCoordinator {
     private let context: BuildContext
     private let server: IPCServer
     private let compiler: PatchCompiler
-    private let container: SimulatorContainer
+    private let simulatorContainer: SimulatorContainer?
+    private let physicalDevice: PhysicalDeviceBridge?
     private let resolver: ModuleResolver
     /// Read once per session from the running binary. A rebuild changes it,
     /// and a rebuild means a relaunch, which is a new session.
@@ -38,6 +39,7 @@ public actor PatchCoordinator {
     private var uncertain: SpliceError?
     /// The process the flag is about. Clearing needs a different one.
     private var uncertainProcess: Int32?
+    private var physicalProcessId: Int32?
 
     private var baselines: [URL: String] = [:]
     /// The baseline's parsed form, kept because it only changes when a patch
@@ -68,7 +70,13 @@ public actor PatchCoordinator {
         self.context = context
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
-        self.container = SimulatorContainer(bundleIdentifier: context.bundleIdentifier)
+        if context.deviceIdentifier == nil {
+            self.simulatorContainer = SimulatorContainer(bundleIdentifier: context.bundleIdentifier)
+            self.physicalDevice = nil
+        } else {
+            self.simulatorContainer = nil
+            self.physicalDevice = PhysicalDeviceBridge(context: context, workDirectory: workDirectory)
+        }
         self.resolver = ModuleResolver(appModule: context.moduleName)
         self.deliverOverride = deliver
         self.inventoryOverride = inventory
@@ -103,9 +111,47 @@ public actor PatchCoordinator {
     /// old container, the app never found it, and the daemon waited for a
     /// connection that could not happen.
     public func announceSession() throws {
-        container.invalidate()
-        try container.writeSession(port: server.port, token: server.token,
-                                   buildIdentity: context.identity, buildUUIDs: buildUUIDs)
+        if let physicalDevice {
+            try physicalDevice.writeSession(token: server.token,
+                                            buildIdentity: context.identity,
+                                            buildUUIDs: buildUUIDs)
+            if let processId = physicalDevice.connectedProcess() {
+                sessionDidConnect(processId: processId)
+                physicalProcessId = processId
+            }
+        } else if let simulatorContainer {
+            simulatorContainer.invalidate()
+            try simulatorContainer.writeSession(port: server.port, token: server.token,
+                                                buildIdentity: context.identity, buildUUIDs: buildUUIDs)
+        }
+    }
+
+    public var hasPhysicalProcess: Bool { physicalProcessId != nil }
+
+    /// Keeps the file-based device session reachable without copying the
+    /// session file on every polling tick. A connected app only needs a cheap
+    /// status heartbeat; the session is republished when that heartbeat can no
+    /// longer see this watch token, which also covers an app reinstall moving
+    /// its data container.
+    @discardableResult
+    public func maintainPhysicalSession() throws -> Bool {
+        guard let physicalDevice else { return false }
+        if let processId = physicalDevice.connectedProcess() {
+            sessionDidConnect(processId: processId)
+            physicalProcessId = processId
+            return true
+        }
+
+        physicalProcessId = nil
+        try physicalDevice.writeSession(token: server.token,
+                                        buildIdentity: context.identity,
+                                        buildUUIDs: buildUUIDs)
+        if let processId = physicalDevice.connectedProcess() {
+            sessionDidConnect(processId: processId)
+            physicalProcessId = processId
+            return true
+        }
+        return false
     }
 
     public enum Outcome: Sendable {
@@ -158,7 +204,7 @@ public actor PatchCoordinator {
     /// come through here.
     private func poison(_ error: SpliceError) -> SpliceError {
         uncertain = error
-        uncertainProcess = server.currentSession?.hello.processId
+        uncertainProcess = server.currentSession?.hello.processId ?? physicalProcessId
         return error
     }
 
@@ -224,7 +270,7 @@ public actor PatchCoordinator {
         }
     }
 
-    private static func cannotDescribeProcess(after error: any Error) -> Bool {
+    static func cannotDescribeProcess(after error: any Error) -> Bool {
         switch error {
         case IPCServer.IPCError.timedOut, IPCServer.IPCError.disconnected:
             true            // sent; the outcome is unknown
@@ -237,9 +283,28 @@ public actor PatchCoordinator {
             // here would be both wrong and unhelpful: what is needed is a
             // matching runtime.
             false
+        case let failure as SpliceError:
+            // The physical bridge has already classified its failures. A
+            // rebuild/configuration response proves the runtime rejected the
+            // request; `.restart` is reserved for a timeout or another result
+            // whose effect on the process is unknown.
+            failure.recovery == .restart
         default:
             true            // an unrecognised failure around the send
         }
+    }
+
+    /// Keeps the bridge's structured recovery advice intact. In particular a
+    /// protocol mismatch needs a rebuild and a signing failure needs project
+    /// configuration; wrapping every physical-device failure as `.restart`
+    /// sent the developer toward an action that could not fix either one.
+    static func loadFailure(from error: any Error, subject: String) -> SpliceError {
+        if let failure = error as? SpliceError { return failure }
+        let recovery: SpliceError.Recovery
+        if case IPCServer.IPCError.versionMismatch = error { recovery = .rebuild }
+        else { recovery = .restart }
+        return SpliceError(stage: .load, subject: subject,
+                           reason: "\(error)", recovery: recovery)
     }
 
     private static func cannotDescribeProcess(afterRuntimeStage stage: Stage) -> Bool {
@@ -298,6 +363,10 @@ public actor PatchCoordinator {
         // After the filters. Checked first, a poisoned session printed the
         // whole paragraph for every touched file -- and a build or a checkout
         // touches many, none of which would have been patched anyway.
+        if let physicalDevice, let processId = physicalDevice.connectedProcess() {
+            sessionDidConnect(processId: processId)
+            physicalProcessId = processId
+        }
         if let uncertain { return .sessionUncertain(uncertain) }
 
         // Which module owns this file decides what the patch imports and what
@@ -366,7 +435,14 @@ public actor PatchCoordinator {
                                                 flags: flags, timeline: timeline)
 
             let delivered = try timeline.measure(.transfer) {
-                try deliverOverride?(artifact.imageURL) ?? container.deliver(artifact.imageURL)
+                if let deliverOverride { return try deliverOverride(artifact.imageURL) }
+                if let physicalDevice { return try physicalDevice.deliver(artifact.imageURL) }
+                guard let simulatorContainer else {
+                    throw SpliceError(stage: .transfer, subject: artifact.imageURL.lastPathComponent,
+                                      reason: "no app-container transport was configured",
+                                      recovery: .configure)
+                }
+                return try simulatorContainer.deliver(artifact.imageURL)
             }
 
             // What the loaded image should say it replaced. Declarations, not
@@ -396,19 +472,19 @@ public actor PatchCoordinator {
                                            declarations: declarations.map(\.displayName))
             let result: LoadPatchResult
             do {
-                result = try await server.request(type: "loadPatch", payload: request,
-                                                  expecting: LoadPatchResult.self)
+                if let physicalDevice {
+                    let reply = try await physicalDevice.requestLoad(request)
+                    sessionDidConnect(processId: reply.processId)
+                    physicalProcessId = reply.processId
+                    result = reply.result
+                } else {
+                    result = try await server.request(type: "loadPatch", payload: request,
+                                                      expecting: LoadPatchResult.self)
+                }
             } catch {
                 timeline.record(.load, since: start, success: false)
-                // A version mismatch is not fixed by restarting: the runtime is
-                // compiled into the application, so the app has to be built
-                // again. Reported as `.restart`, it sent people round a loop
-                // that could not end.
-                let recovery: SpliceError.Recovery
-                if case IPCServer.IPCError.versionMismatch = error { recovery = .rebuild }
-                else { recovery = .restart }
-                let failure = SpliceError(stage: .load, subject: url.lastPathComponent,
-                                          reason: "\(error)", recovery: recovery)
+                let failure = Self.loadFailure(from: error,
+                                               subject: url.lastPathComponent)
                 // No answer is not the same as no load: a request that was
                 // sent may have been carried out and its reply lost. One that
                 // never left the daemon, because nothing was connected, leaves

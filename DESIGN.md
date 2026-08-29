@@ -8,7 +8,7 @@
 ## 1. Executive summary
 
 SwiftHotReload applies ABI-compatible Swift implementation changes to a
-running iOS Simulator application while preserving process state.
+running iOS Simulator or development-device application while preserving process state.
 
 The initial architecture is:
 
@@ -17,9 +17,9 @@ Xcode build
    |
    +--> capture build/toolchain context
    |
-Running Simulator App
+Running iOS App
    ^
-   | load patch
+   | load patch (socket on Simulator, CoreDevice files on device)
    |
 HotReload Runtime <---- IPC ---- Host Daemon
                               |
@@ -42,7 +42,7 @@ The MVP uses:
 -   existing Swift compiler,
 -   Debug-only dynamic instrumentation,
 -   Swift `@_dynamicReplacement`,
--   Mach-O/dylib loading in the Simulator,
+-   Mach-O/dylib loading in the Simulator and same-Team-signed development apps,
 -   conservative compatibility checking.
 
 LLVM ORC/JITLink is explicitly a Phase 2/3 optimization. It should
@@ -73,9 +73,11 @@ effective build configuration as the running binary.
 
 If compatibility cannot be proven sufficiently, require a rebuild.
 
-### 2.5 Simulator first
+### 2.5 Simulator first, device without semantic drift
 
-Do not distort the architecture to support physical iOS devices in v0.x.
+Prove replacement semantics on Simulator first. Physical-device support must
+reuse the same classifier, generator, build identity checks, loader, and UI
+refresh; only signing and transport may differ.
 
 ### 2.6 Separate correctness from speed
 
@@ -2601,10 +2603,18 @@ semantics; reimplementation would dramatically expand scope.
 
 ### D-002: Simulator-only MVP
 
-Accepted.
+Superseded after the physical-device feasibility spike.
 
 Reason: development value is high and code-signing/JIT restrictions on
 physical devices would distract from proving the core model.
+
+The core model is now proven. Physical devices use a same-Team-signed dylib
+and CoreDevice application-container transfer. The daemon copies the complete
+image before publishing a request JSON; the runtime writes a response JSON
+after applying the same identity, UUID, registration, and refresh checks used
+by the Simulator socket client. A per-watch session token is included in the
+remote image name so restarting watch cannot make dyld return an older image
+at a reused `Patch_001.dylib` path.
 
 ### D-003: Dynamic replacement before machine-code interposition
 

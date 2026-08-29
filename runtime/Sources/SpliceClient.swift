@@ -18,19 +18,17 @@ final class SpliceClient: @unchecked Sendable {
     }
 
     private let state: Splice.StateBox
-    /// What the session file said this process was built as. Compared against
-    /// every incoming patch.
-    private var expectedBuildIdentity = ""
-    /// The link target's UUIDs, as the daemon read them off disk. Unlike the
-    /// identity above, this is checked against the process itself.
-    private var expectedBuildUUIDs: [String] = []
+    private let applier: RuntimePatchApplier
     private let queue = DispatchQueue(label: "dev.swift-splice.runtime")
     private var connection: NWConnection?
     private var buffer = Data()
     private var redialScheduled = false
     private let lock = NSLock()
 
-    init(state: Splice.StateBox) { self.state = state }
+    init(state: Splice.StateBox) {
+        self.state = state
+        self.applier = RuntimePatchApplier(state: state)
+    }
 
     private var sessionURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -83,8 +81,7 @@ final class SpliceClient: @unchecked Sendable {
             return
         }
 
-        expectedBuildIdentity = session.buildIdentity
-        expectedBuildUUIDs = session.buildUUIDs
+        applier.expect(buildIdentity: session.buildIdentity, buildUUIDs: session.buildUUIDs)
 
         let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
         lock.withLock { self.connection = connection }
@@ -186,95 +183,11 @@ final class SpliceClient: @unchecked Sendable {
                      requestId: envelope.requestId)
                 return
             }
-            let result = apply(request)
+            let result = applier.apply(request)
             send(type: "loadResult", payload: result, requestId: envelope.requestId)
         default:
             state.note("ignored \(envelope.type)")
         }
-    }
-
-    private func apply(_ request: LoadPatchRequest) -> LoadPatchResult {
-        // DESIGN.md section 6.3: a patch built against a different binary must
-        // not be applied. The daemon has always sent its build identity and
-        // nothing checked it, which also left `.rejected` -- the one answer
-        // meaning "declined without touching anything" -- unreachable, so the
-        // rule that some failures do not poison the session was untested
-        // against anything real.
-        if request.buildIdentity != expectedBuildIdentity {
-            state.note("refused g\(request.generation): built for a different binary")
-            return .rejected(reason: """
-                the patch was built for \(request.buildIdentity) and this process is \
-                \(expectedBuildIdentity); rebuild and relaunch
-                """)
-        }
-
-        // The check above compares two strings the daemon wrote. This one asks
-        // the process. Module, triple, SDK and compiler version are all equal
-        // for a running app and for a newer build of the same sources, which is
-        // exactly the pair that must not be confused -- the daemon links
-        // patches against what is on disk now, and this process is running what
-        // was on disk when it launched.
-        if !LoadedImages.running(oneOf: request.buildUUIDs) {
-            state.note("refused g\(request.generation): this process is a different build")
-            return .rejected(reason: """
-                this process is not running the binary the patch was linked against. \
-                It was built again after the app launched; relaunch it.
-                """)
-        }
-
-        switch Splice.load(generation: request.generation, path: request.path) {
-        case .loaded(let generation, let durationMs, let registered):
-            let names = request.declarations.joined(separator: ", ")
-            state.note("g\(generation): \(names.isEmpty ? "loaded" : names)")
-            return .loaded(generation: generation, durationMs: durationMs, registered: registered,
-                           refreshed: refreshUIKit())
-        case .failed(let stage, let message):
-            state.note("g\(request.generation) failed at \(stage): \(message)")
-            return .failed(stage: stage, message: message)
-        }
-    }
-
-    /// Makes the loaded generation visible, and says what that took.
-    ///
-    /// UIKit has to be told to call anything again; see UIKitRefresh. The wait
-    /// is bounded rather than a plain `DispatchQueue.main.sync` because an
-    /// application whose main thread is blocked would otherwise hold this
-    /// connection until the daemon's ten-second timeout and poison the session
-    /// -- over a reload that had already succeeded.
-    private func refreshUIKit() -> String? {
-        // The same condition UIKitRefresh is declared under, and it has to
-        // stay the same: `canImport(UIKit)` alone is true on watchOS, where
-        // that file does not exist, and the mismatch is a build failure rather
-        // than a missing feature.
-        #if canImport(UIKit) && !os(watchOS)
-        let options = state.refresh
-        guard !options.isEmpty else { return nil }
-
-        final class Holder: @unchecked Sendable {
-            private let lock = NSLock()
-            private var stored: String?
-            var value: String? {
-                get { lock.withLock { stored } }
-                set { lock.withLock { stored = newValue } }
-            }
-        }
-        let holder = Holder()
-        let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { holder.value = UIKitRefresh.perform(options) }
-            finished.signal()
-        }
-        if finished.wait(timeout: .now() + 2) == .timedOut {
-            // Not "not refreshed". The block stays queued and the screen does
-            // update once the main thread is free -- measured -- so saying it
-            // did not happen would be the reverse of the lie this tool is
-            // built to avoid. What is true is that nobody waited to see.
-            return "still running; the main thread did not answer within 2 s"
-        }
-        return holder.value
-        #else
-        return nil
-        #endif
     }
 
     private func send<P: Encodable>(type: String, payload: P, requestId: String) {
@@ -294,7 +207,7 @@ final class SpliceClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 5
+let ProtocolVersion = 6
 
 struct Envelope: Codable {
     var protocolVersion: Int

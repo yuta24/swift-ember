@@ -19,14 +19,24 @@ public struct BuildContext: Codable, Sendable {
     public var extraCompilerFlags: [String]
     public var sourceRoots: [String]
     /// Bundle identifier of the running application, used to find its data
-    /// container on the simulator.
+    /// container on the selected simulator or physical device.
     public var bundleIdentifier: String
+
+    /// A CoreDevice identifier selects the file-based physical-device
+    /// transport. Nil preserves the simulator socket transport.
+    public var deviceIdentifier: String?
+
+    /// Identity passed to codesign for patches loaded on a physical device.
+    /// The bridge verifies the resulting TeamIdentifier against the app before
+    /// it transfers the image.
+    public var codeSigningIdentity: String?
 
     public init(moduleName: String, swiftCompilerPath: String, swiftCompilerVersion: String,
                 targetTriple: String, sdkPath: String, sdkName: String, appBinaryPath: String,
                 moduleSearchPaths: [String], extraCompilerFlags: [String],
                 sourceRoots: [String], bundleIdentifier: String,
-                debugDylibPath: String? = nil, frameworkSearchPaths: [String] = []) {
+                debugDylibPath: String? = nil, frameworkSearchPaths: [String] = [],
+                deviceIdentifier: String? = nil, codeSigningIdentity: String? = nil) {
         self.debugDylibPath = debugDylibPath
         self.frameworkSearchPaths = frameworkSearchPaths
         self.moduleName = moduleName
@@ -40,6 +50,8 @@ public struct BuildContext: Codable, Sendable {
         self.extraCompilerFlags = extraCompilerFlags
         self.sourceRoots = sourceRoots
         self.bundleIdentifier = bundleIdentifier
+        self.deviceIdentifier = deviceIdentifier
+        self.codeSigningIdentity = codeSigningIdentity
     }
 
     /// What a patch must link against, when that is not the executable.
@@ -101,6 +113,8 @@ public struct BuildContext: Codable, Sendable {
         // Added later; absent in manifests written before it existed.
         frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
         debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
+        deviceIdentifier = try container.decodeIfPresent(String.self, forKey: .deviceIdentifier)
+        codeSigningIdentity = try container.decodeIfPresent(String.self, forKey: .codeSigningIdentity)
     }
 
     public static func load(from url: URL) throws -> BuildContext {

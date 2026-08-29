@@ -14,8 +14,9 @@ public enum SpliceProtocol {
     /// which until then was generated, written into the session file, and
     /// never looked at by either side. Version 5 added what the runtime did to
     /// make the generation visible, which for a UIKit application is the
-    /// difference between a loaded patch and a changed screen.
-    public static let version = 5
+    /// difference between a loaded patch and a changed screen. Version 6 added
+    /// expiring requests and process-bearing replies for physical devices.
+    public static let version = 6
     public static let defaultPort: UInt16 = 51_237
 }
 

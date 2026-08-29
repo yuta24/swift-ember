@@ -4,7 +4,7 @@
 > Audience: OSS contributors, maintainers, coding agents (including
 > Claude Code)\
 > Working name: `SwiftHotReload`\
-> Initial target: iOS Simulator / Debug builds, deployment target iOS 16+\
+> Initial target: iOS Simulator and development devices / Debug builds, deployment target iOS 16+\
 > Last updated: 2026-08-29
 
 ## 1. Summary
@@ -14,7 +14,7 @@ edit-build-run-debug loop for Swift iOS applications.
 
 The initial product goal is to allow a developer to modify eligible
 Swift function bodies, save the source file, and apply the new
-implementation to an already-running iOS Simulator process without
+implementation to an already-running iOS process without
 restarting the application or discarding application state.
 
 The project deliberately does **not** attempt to implement a Swift
@@ -48,7 +48,7 @@ running application.
 The desired experience is:
 
 ``` text
-Run app in iOS Simulator
+Run app in iOS Simulator or on a development device
         |
         v
 Navigate to desired state
@@ -76,7 +76,7 @@ scripting-language iteration than to a full Xcode rebuild.
 
 ### 4.1 MVP goals
 
--   Support iOS Simulator Debug builds with an iOS 16 or later deployment
+-   Support iOS Simulator and same-Team-signed physical-device Debug builds with an iOS 16 or later deployment
     target.
 -   Use the exact Swift/Xcode toolchain used to build the target.
 -   Detect Swift source changes.
@@ -147,7 +147,6 @@ The following are explicitly outside the MVP:
     concurrency.
 -   Supporting arbitrary ABI-incompatible source edits.
 -   Migrating existing value layouts after stored properties change.
--   iOS physical-device support.
 -   Guaranteeing compatibility with private/underscored Swift compiler
     features across toolchains.
 -   Replacing Xcode's build system.
@@ -532,7 +531,10 @@ Every pipeline stage SHOULD emit timing telemetry locally for profiling.
 
 ### OS
 
-MVP support is iOS Simulator runtimes supported by the selected Xcode.
+MVP support is iOS Simulator runtimes and paired physical iOS development
+devices supported by the selected Xcode. Physical delivery uses CoreDevice
+container transfer and requires a Development-signed patch with the same Team
+ID as the application.
 
 Core function replacement carries no special deployment-target floor beyond
 the package minimum. Neither does `SpliceSwiftUI`: it places its own `AnyView`
@@ -542,14 +544,16 @@ unannotated `List` case aborts where `DebugReplaceableView` is selected and
 survives where SwiftUI falls back to `AnyView` --- so both remain in the
 compatibility fixtures.
 
-The project MUST NOT initially promise physical-device support.
+Physical-device support MUST fail closed when the device is unavailable, the
+app is suspended, or the patch signature does not match the app's Team ID.
 
 ### Architectures
 
 Initial priority:
 
 1.  arm64 macOS host + arm64 iOS Simulator.
-2.  x86_64 Simulator only if contributor demand justifies it.
+2.  arm64 physical iOS development devices.
+3.  x86_64 Simulator only if contributor demand justifies it.
 
 ## 12. Security and safety
 
@@ -571,6 +575,10 @@ This is a local developer tool.
     correctness requirement before it is a security one. The token lives in
     the session file, inside the application's own container.
 -   Patch loading MUST be scoped to the current development session.
+-   A physical-device patch MUST be Development-signed and its Team ID
+    MUST match the running application's Team ID before transfer.
+-   Physical-device requests MUST be published only after the complete patch
+    image has been transferred, so the runtime cannot load a partial file.
 -   Unsupported changes MUST fail closed.
 
 ## 13. OSS requirements
@@ -594,7 +602,7 @@ This is a local developer tool.
 
 The project is successful at v0.1 when:
 
-1.  A sample iOS Simulator app can remain running.
+1.  A sample iOS Simulator or physical-device app can remain running.
 2.  An eligible Swift function/method implementation can be edited.
 3.  Saving causes an automated patch build.
 4.  The patch is loaded into the existing process.

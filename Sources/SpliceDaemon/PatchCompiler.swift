@@ -35,10 +35,9 @@ public struct PatchCompiler: Sendable {
         let imageURL = workDirectory.appendingPathComponent("\(name).dylib")
         try source.write(to: sourceURL, atomically: true, encoding: .utf8)
 
-        try run(frontendArguments(source: sourceURL, object: objectURL, name: name,
-                                  flags: flags ?? context.extraCompilerFlags),
-                stage: .compile, subject: sourceURL.lastPathComponent,
-                recovery: .editAndRetry, timeline: timeline)
+        try compile(frontendArguments(source: sourceURL, object: objectURL, name: name,
+                                      flags: flags ?? context.extraCompilerFlags),
+                    subject: sourceURL.lastPathComponent, timeline: timeline)
 
         try run(linkArguments(object: objectURL, image: imageURL, name: name),
                 stage: .link, subject: sourceURL.lastPathComponent,
@@ -61,6 +60,84 @@ public struct PatchCompiler: Sendable {
                               reason: trim(result.combinedOutput), recovery: recovery)
         }
         timeline.record(stage, since: start, success: true)
+    }
+
+    /// A local Swift package can expose a Swift module whose transitive graph
+    /// contains a Clang target. Xcode passes that target's generated module map
+    /// to the package compile, but `-showBuildSettings` for the application
+    /// does not report it. Resolve only the module the compiler asks for and
+    /// retry; adding every map in DerivedData can introduce duplicate modules.
+    private func compile(_ initialArguments: [String], subject: String,
+                         timeline: StageTimeline) throws {
+        let start = DispatchTime.now().uptimeNanoseconds
+        var arguments = initialArguments
+        var recovered: Set<String> = []
+
+        while true {
+            let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)
+            if result.exitCode == 0 {
+                timeline.record(.compile, since: start, success: true)
+                return
+            }
+
+            if let module = Self.missingRequiredModule(in: result.combinedOutput),
+               recovered.insert(module).inserted,
+               let map = moduleMap(named: module) {
+                arguments += ["-Xcc", "-fmodule-map-file=\(map.path)"]
+                continue
+            }
+
+            timeline.record(.compile, since: start, success: false)
+            if let explanation = Self.explain(result.combinedOutput) {
+                throw SpliceError(stage: .compile, subject: subject,
+                                  reason: explanation, recovery: .rebuild)
+            }
+            throw SpliceError(stage: .compile, subject: subject,
+                              reason: trim(result.combinedOutput), recovery: .editAndRetry)
+        }
+    }
+
+    static func missingRequiredModule(in output: String) -> String? {
+        let prefix = "missing required module '"
+        guard let start = output.range(of: prefix)?.upperBound,
+              let end = output[start...].firstIndex(of: "'") else { return nil }
+        return String(output[start..<end])
+    }
+
+    private func moduleMap(named module: String) -> URL? {
+        let marker = "/Build/"
+        guard let boundary = context.linkTarget.range(of: marker) else { return nil }
+        let derivedData = URL(fileURLWithPath: String(context.linkTarget[..<boundary.lowerBound]))
+        let roots = [
+            derivedData.appendingPathComponent("SourcePackages/checkouts", isDirectory: true),
+            derivedData.appendingPathComponent("Build/Intermediates.noindex/GeneratedModuleMaps-\(context.sdkName)",
+                                               isDirectory: true),
+            derivedData.appendingPathComponent("Build/Intermediates.noindex/GeneratedModuleMaps",
+                                               isDirectory: true),
+        ]
+
+        for root in roots {
+            guard let files = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+            for case let url as URL in files where url.pathExtension == "modulemap" {
+                if url.deletingPathExtension().lastPathComponent == module { return url }
+                guard let source = try? String(contentsOf: url, encoding: .utf8),
+                      Self.moduleMap(source, declares: module) else { continue }
+                return url
+            }
+        }
+        return nil
+    }
+
+    static func moduleMap(_ source: String, declares module: String) -> Bool {
+        source.split(separator: "\n").contains { line in
+            let words = line.split { $0.isWhitespace || $0 == "{" || $0 == "[" }
+            guard let marker = words.firstIndex(of: "module"), marker + 1 < words.count else {
+                return false
+            }
+            return words[marker + 1] == Substring(module)
+        }
     }
 
     private var common: [String] {

@@ -70,6 +70,20 @@ private func parse(_ arguments: String...) throws -> Options {
     #expect(options.sourceRoots == ["a/Sources", "b/Sources", "c"])
 }
 
+@Test func physicalDeviceOptionsParse() throws {
+    let options = try parse("watch", "--project", "App.xcodeproj", "--scheme", "App",
+                            "--device", "DEVICE-ID", "--signing-identity", "SIGNING-SHA")
+    #expect(options.device == "DEVICE-ID")
+    #expect(options.signingIdentity == "SIGNING-SHA")
+}
+
+@Test func aPhysicalDeviceSelectsAnXcodeDeviceDestination() {
+    let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App",
+                               deviceIdentifier: "DEVICE-ID")
+    #expect(project.destination == "id=DEVICE-ID")
+    #expect(project.deviceIdentifier == "DEVICE-ID")
+}
+
 @Test func aSchemeWithoutAContainerIsHarmless() throws {
     // Nothing to resolve, so the manifest path is used and --scheme is ignored.
     let options = try parse("watch", "--scheme", "App")
@@ -170,13 +184,86 @@ private func parse(_ arguments: String...) throws -> Options {
         targetTriple: "t", sdkPath: "/s", sdkName: "n", appBinaryPath: "/b",
         moduleSearchPaths: ["/m"], extraCompilerFlags: ["-D", "X"],
         sourceRoots: ["/r"], bundleIdentifier: "id",
-        debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"])
+        debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"],
+        deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING-SHA")
     let decoded = try JSONDecoder().decode(
         BuildContext.self, from: try JSONEncoder().encode(original))
     #expect(decoded.identity == original.identity)
     #expect(decoded.debugDylibPath == original.debugDylibPath)
     #expect(decoded.frameworkSearchPaths == original.frameworkSearchPaths)
     #expect(decoded.linkTarget == original.linkTarget)
+    #expect(decoded.deviceIdentifier == original.deviceIdentifier)
+    #expect(decoded.codeSigningIdentity == original.codeSigningIdentity)
+}
+
+@Test func signingIdentityPrefersTheExpandedIdentityAndRejectsPlaceholders() {
+    #expect(XcodeProject.signingIdentity(from: [
+        "EXPANDED_CODE_SIGN_IDENTITY": "expanded",
+        "CODE_SIGN_IDENTITY": "Apple Development",
+    ]) == "expanded")
+    #expect(XcodeProject.signingIdentity(from: ["CODE_SIGN_IDENTITY": "-"]) == nil)
+}
+
+@Test func physicalDeviceWatchRejectsASimulatorContextAndMissingSigning() {
+    var context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/swiftc", swiftCompilerVersion: "6",
+        targetTriple: "arm64-apple-ios16.0-simulator", sdkPath: "/sdk",
+        sdkName: "iphonesimulator", appBinaryPath: "/App", moduleSearchPaths: [],
+        extraCompilerFlags: [], sourceRoots: [], bundleIdentifier: "id",
+        deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING")
+    #expect(throws: SpliceError.self) { try Watch.validatePhysicalDevice(context) }
+
+    context.targetTriple = "arm64-apple-ios16.0"
+    context.sdkName = "iphoneos"
+    context.codeSigningIdentity = nil
+    #expect(throws: SpliceError.self) { try Watch.validatePhysicalDevice(context) }
+
+    context.codeSigningIdentity = "SIGNING"
+    #expect(throws: Never.self) { try Watch.validatePhysicalDevice(context) }
+}
+
+@Test func doctorChecksOnlyModulesReachableFromWatchedSources() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("splice-doctor-modules-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let package = root.appendingPathComponent("FeaturePackage")
+    let feature = package.appendingPathComponent("Sources/Feature")
+    let helper = package.appendingPathComponent("Sources/Helper")
+    try FileManager.default.createDirectory(at: feature, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: helper, withIntermediateDirectories: true)
+    try "// package\n".write(to: package.appendingPathComponent("Package.swift"),
+                              atomically: true, encoding: .utf8)
+    try "struct Screen {}\n".write(to: feature.appendingPathComponent("Screen.swift"),
+                                    atomically: true, encoding: .utf8)
+    try "struct HiddenHelper {}\n".write(to: helper.appendingPathComponent("Helper.swift"),
+                                          atomically: true, encoding: .utf8)
+
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/swiftc", swiftCompilerVersion: "6",
+        targetTriple: "arm64-apple-ios16.0-simulator", sdkPath: "/sdk",
+        sdkName: "iphonesimulator", appBinaryPath: "/App", moduleSearchPaths: [],
+        extraCompilerFlags: [], sourceRoots: [feature.path], bundleIdentifier: "id")
+
+    #expect(Doctor.watchedModules(context: context) == ["Feature"])
+}
+
+@Test func physicalLoadFailuresKeepTheirStructuredRecovery() {
+    let original = SpliceError(stage: .transfer, subject: "Patch.dylib",
+                               reason: "the signing team does not match",
+                               recovery: .configure)
+    let failure = PatchCoordinator.loadFailure(from: original, subject: "Screen.swift")
+
+    #expect(failure.stage == .transfer)
+    #expect(failure.subject == "Patch.dylib")
+    #expect(failure.reason == original.reason)
+    #expect(failure.recovery == .configure)
+    #expect(!PatchCoordinator.cannotDescribeProcess(after: original))
+
+    let unknownOutcome = SpliceError(stage: .load, subject: "Patch.dylib",
+                                     reason: "the device did not answer",
+                                     recovery: .restart)
+    #expect(PatchCoordinator.cannotDescribeProcess(after: unknownOutcome))
 }
 
 // MARK: - Diagnostics that are really build settings
@@ -196,6 +283,17 @@ private func parse(_ arguments: String...) throws -> Options {
 
 @Test func anOrdinaryCompileErrorIsLeftAlone() {
     #expect(PatchCompiler.explain("error: cannot find 'x' in scope") == nil)
+}
+
+@Test func aMissingClangModuleCanBeRecoveredPrecisely() {
+    let output = "<unknown>:0: error: missing required module 'GRDBSQLite'"
+    #expect(PatchCompiler.missingRequiredModule(in: output) == "GRDBSQLite")
+    #expect(PatchCompiler.missingRequiredModule(in: "no such module 'GRDBSQLite'") == nil)
+
+    #expect(PatchCompiler.moduleMap("module GRDBSQLite [system] {\n}",
+                                   declares: "GRDBSQLite"))
+    #expect(PatchCompiler.moduleMap("framework module GRDB {\n}", declares: "GRDB"))
+    #expect(!PatchCompiler.moduleMap("module GRDB {\n}", declares: "GRDBSQLite"))
 }
 
 /// Reading one pipe to EOF and then the other deadlocks as soon as the child

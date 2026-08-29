@@ -41,6 +41,10 @@ case .status:
     print("sdk                \(context.sdkName)")
     print("compiler           \(context.swiftCompilerVersion)")
     print("bundle id          \(context.bundleIdentifier)")
+    print("transport          \(context.deviceIdentifier.map { "physical device \($0)" } ?? "simulator")")
+    if let identity = context.codeSigningIdentity {
+        print("signing identity   \(identity)")
+    }
     print("app binary         \(context.appBinaryPath)")
     print("sources            \(context.sourceRoots.joined(separator: ", "))")
     print("defines            \(context.extraCompilerFlags.joined(separator: " "))")

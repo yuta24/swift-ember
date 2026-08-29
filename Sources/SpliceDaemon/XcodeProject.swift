@@ -33,14 +33,17 @@ public struct XcodeProject: Sendable {
     public let scheme: String
     public let configuration: String
     public let destination: String
+    public let deviceIdentifier: String?
 
     public init(container: Container, scheme: String,
                 configuration: String = "Debug",
-                destination: String = "generic/platform=iOS Simulator") {
+                destination: String = "generic/platform=iOS Simulator",
+                deviceIdentifier: String? = nil) {
         self.container = container
         self.scheme = scheme
         self.configuration = configuration
-        self.destination = destination
+        self.deviceIdentifier = deviceIdentifier
+        self.destination = deviceIdentifier.map { "id=\($0)" } ?? destination
     }
 
     /// Everything `doctor` needs to explain a misconfiguration, kept separate
@@ -163,9 +166,20 @@ public struct XcodeProject: Sendable {
             // Without these, copying an import of a framework the app finds by
             // -F turns every patch from that file into "no such module".
             frameworkSearchPaths: [builtProducts]
-                + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]))
+                + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
+            deviceIdentifier: deviceIdentifier,
+            codeSigningIdentity: Self.signingIdentity(from: settings))
 
         return Resolved(context: context, settings: settings)
+    }
+
+    static func signingIdentity(from settings: [String: String]) -> String? {
+        for key in ["EXPANDED_CODE_SIGN_IDENTITY", "CODE_SIGN_IDENTITY"] {
+            guard let value = settings[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty, value != "-" else { continue }
+            return value
+        }
+        return nil
     }
 
     /// Xcode reports search paths as one space-separated string, with any

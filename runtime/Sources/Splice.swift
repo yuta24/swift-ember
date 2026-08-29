@@ -62,7 +62,11 @@ public enum Splice {
         #if SPLICE_ENABLED
         state.onUpdate = onUpdate
         state.refresh = refresh
+        #if os(iOS) && !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
+        let client = SpliceDeviceClient(state: state)
+        #else
         let client = SpliceClient(state: state)
+        #endif
         state.retain(client)
         client.start()
         #endif

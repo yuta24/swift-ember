@@ -21,13 +21,29 @@ public enum Doctor {
         let version = shell(context.swiftCompilerPath, ["--version"]).split(separator: "\n").first.map(String.init) ?? ""
         check("Swift toolchain", version, passed: version.contains(context.swiftCompilerVersion) || !version.isEmpty)
 
-        let booted = shell("/usr/bin/xcrun", ["simctl", "list", "devices", "booted"])
-        let hasDevice = booted.contains("Booted")
-        check("Simulator", hasDevice ? "a device is booted" : "boot a simulator", passed: hasDevice)
+        if let device = context.deviceIdentifier {
+            let devices = shell("/usr/bin/xcrun", ["devicectl", "list", "devices"])
+            let line = devices.split(separator: "\n").first { $0.contains(device) }.map(String.init)
+            check("Physical device", line ?? "connect and unlock \(device)",
+                  passed: line?.contains("connected") == true && line?.contains("physical") == true)
+            check("Patch signing", context.codeSigningIdentity ?? "pass --signing-identity or configure Development signing",
+                  passed: context.codeSigningIdentity?.isEmpty == false)
+        } else {
+            let booted = shell("/usr/bin/xcrun", ["simctl", "list", "devices", "booted"])
+            let hasDevice = booted.contains("Booted")
+            check("Simulator", hasDevice ? "a device is booted" : "boot a simulator", passed: hasDevice)
+        }
 
         let binary = context.linkTarget
         let built = FileManager.default.fileExists(atPath: binary)
         check("App binary", built ? binary : "build the app first", passed: built)
+
+        let watched = watchedModules(context: context)
+        let watchesAppModule = watched.contains(context.moduleName)
+        check("Watched modules", watched.isEmpty
+              ? "no Swift sources found under the configured source roots"
+              : watched.joined(separator: ", "),
+              passed: !watched.isEmpty)
 
         // The two settings that decide whether hot reload can work at all.
         var keys = 0
@@ -56,14 +72,25 @@ public enum Doctor {
                 print("  integrations/xcode/Package.md")
             }
 
+            let absent = watched.filter { !inventory.isPatchable($0) }
+            check("Watched module keys", absent.isEmpty
+                  ? "every watched module exports replacement keys"
+                  : "missing from: \(absent.joined(separator: ", ")); configure those targets and rebuild",
+                  passed: absent.isEmpty)
+
             // Asked of the compiler rather than of the settings, and per module,
             // because a local package needs the flag in its own manifest. A
             // type-check of one import line answers it exactly; counting
             // private keys would not, since a module with no private
             // declarations exports none either way.
-            let missing = inventory.patchableModules.filter { !acceptsPrivateImport($0, context) }
+            // Only inspect modules reachable from the configured source roots.
+            // An application can contain unrelated package modules that are
+            // intentionally not configured for Splice; reporting those made a
+            // working package-only watch look broken.
+            let inspected = watched.filter(inventory.isPatchable)
+            let missing = inspected.filter { !acceptsPrivateImport($0, context) }
             check("Private imports", missing.isEmpty
-                  ? "every patchable module accepts @_private"
+                  ? "every watched patchable module accepts @_private"
                   : "missing from: \(missing.joined(separator: ", ")); add -Xfrontend -enable-private-imports and rebuild",
                   passed: missing.isEmpty)
             if !missing.isEmpty {
@@ -79,17 +106,27 @@ public enum Doctor {
         // built, which turns "the patch would not have loaded" into "this
         // configuration is not set up", named per setting.
         if let project {
-            check("Optimisation", project.optimisationDisabled
-                  ? "-Onone" : "set SWIFT_OPTIMIZATION_LEVEL = -Onone; replacement dispatch does not survive optimisation",
-                  passed: project.optimisationDisabled)
-            check("Testability", project.testabilityEnabled
-                  ? "SWIFT_ENABLE_TESTABILITY = YES"
-                  : "set SWIFT_ENABLE_TESTABILITY = YES, or the replacement keys stay hidden",
-                  passed: project.testabilityEnabled)
-            check("Implicit dynamic", project.implicitDynamicEnabled
-                  ? "-Xfrontend -enable-implicit-dynamic"
-                  : "add -Xfrontend -enable-implicit-dynamic to OTHER_SWIFT_FLAGS",
-                  passed: project.implicitDynamicEnabled)
+            if watchesAppModule {
+                check("Optimisation", project.optimisationDisabled
+                      ? "-Onone" : "set SWIFT_OPTIMIZATION_LEVEL = -Onone; replacement dispatch does not survive optimisation",
+                      passed: project.optimisationDisabled)
+                check("Testability", project.testabilityEnabled
+                      ? "SWIFT_ENABLE_TESTABILITY = YES"
+                      : "set SWIFT_ENABLE_TESTABILITY = YES, or the replacement keys stay hidden",
+                      passed: project.testabilityEnabled)
+                check("Implicit dynamic", project.implicitDynamicEnabled
+                      ? "-Xfrontend -enable-implicit-dynamic"
+                      : "add -Xfrontend -enable-implicit-dynamic to OTHER_SWIFT_FLAGS",
+                      passed: project.implicitDynamicEnabled)
+            } else {
+                // These values describe the selected application target. Xcode
+                // does not report the corresponding settings for local package
+                // targets, so treating the app's values as the package's gave
+                // false failures. The built module inventory and compiler
+                // probe above are the package-target evidence we can trust.
+                check("Package settings",
+                      "verified from the built watched modules", passed: true)
+            }
             // Not a pass/fail. When the runtime arrives as the SpliceRuntime
             // package product it is enabled by the package manifest, not by
             // the app's own conditions -- Xcode does not propagate an app
@@ -102,7 +139,7 @@ public enum Doctor {
                   + (project.runtimeEnabled
                      ? "SPLICE_ENABLED is defined for the app target"
                      : "SPLICE_ENABLED is not set; only needed if the app has its own #if"))
-            if !project.declaredConfigured {
+            if watchesAppModule && !project.declaredConfigured {
                 print("""
 
                 None of the above is set by this tool. The usual way to get all
@@ -115,6 +152,32 @@ public enum Doctor {
         print()
         print(ok ? "Ready." : "Not ready.")
         return ok
+    }
+
+    /// Modules reachable from the exact roots the user asked Splice to watch.
+    /// Kept separate from the binary inventory: the latter contains every
+    /// linked package, including modules no watched file can ever belong to.
+    static func watchedModules(context: BuildContext) -> [String] {
+        let resolver = ModuleResolver(appModule: context.moduleName)
+        var modules = Set<String>()
+
+        for path in context.sourceRoots {
+            let root = URL(fileURLWithPath: path).standardizedFileURL
+            if root.pathExtension == "swift" {
+                if FileManager.default.fileExists(atPath: root.path) {
+                    modules.insert(resolver.module(for: root))
+                }
+                continue
+            }
+
+            guard let walker = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+            for case let file as URL in walker where file.pathExtension == "swift" {
+                modules.insert(resolver.module(for: file))
+            }
+        }
+        return modules.sorted()
     }
 
     /// Whether `module` was built for private imports, asked by compiling the

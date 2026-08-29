@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml/badge.svg)](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml)
 
-Apply Swift implementation changes to a running iOS Simulator app without
+Apply Swift implementation changes to a running iOS Simulator or development-device app without
 restarting it or losing its state.
 
 Save a file, and the implementation you changed takes effect in the process
@@ -34,7 +34,7 @@ between: deciding whether a change is safe to apply, writing the replacement,
 and getting it into the process.
 
 Status: **M5 of 5**, and it works against a real `.xcodeproj`. Bodies reload
-end to end on a Simulator app --- overrides and `private` helpers among them ---
+end to end on Simulator and a physical iPhone --- overrides and `private` helpers among them ---
 and the classifier's refusals are pinned by tests. SwiftUI `body` reloads too
 when the View opts into a stable type-erasure boundary; an unannotated body is
 still refused for a measured reason --- see below.
@@ -104,6 +104,25 @@ Then check the setup and start watching:
 swift-splice doctor --project App.xcodeproj --scheme App
 swift-splice watch  --project App.xcodeproj --scheme App
 ```
+
+For a physical device, build and run the Debug app on that device once, then
+select its CoreDevice identifier:
+
+```
+xcrun devicectl list devices
+
+swift-splice doctor --project App.xcodeproj --scheme App \
+  --device <CoreDevice-ID>
+swift-splice watch --project App.xcodeproj --scheme App \
+  --device <CoreDevice-ID>
+```
+
+The patch is signed with the build's Development identity and its Team ID is
+checked against the app before transfer. If a project does not expose an
+expanded identity through its build settings, pass
+`--signing-identity <certificate-name-or-SHA>`. The phone must be paired,
+unlocked, in Developer Mode, and the app must remain foreground-runnable while
+a patch is applied; iOS may suspend the file client in the background.
 
 `doctor` names each missing setting rather than reporting a general failure,
 and it verifies the claim against the built binary instead of trusting the
@@ -190,7 +209,7 @@ runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
 fixtures/              43 cases pinning what Swift dynamic replacement does,
                        and 4 more under ui/ that need a rendering process
-Tests/                 216 tests: what the classifier decides, what the
+Tests/                 225 tests: what the classifier decides, what the
                        generated patch does in a process, what the daemon
                        does when the app goes quiet
 examples/CounterApp    a Simulator app built by script, flags in plain sight
@@ -205,7 +224,9 @@ PRD.md                 scope, tiers, milestones
 Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
 of iOS 16 or later. Verified on Swift 6.2.3 through 6.4 across six
 configurations, four locally and two on CI — every fixture and every test
-passes on all of them.
+passes on all of them. Physical-device delivery is verified on an arm64 iPhone
+running iOS 26.4 with a binary targeting iOS 16; an actual iOS 16 device has
+not yet been measured.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The
@@ -243,7 +264,9 @@ nothing.
 
 ## What it will not do
 
-Release builds, physical devices, and anything that changes a type's layout.
+Release builds, App Store/runtime code delivery, and anything that changes a
+type's layout. Physical devices are a Debug-development workflow and require
+same-Team Development signing; they are not a production patch mechanism.
 
 An unannotated SwiftUI `body` is a rebuild, and the reason took three attempts
 to get right. `View` carries a type eraser, so the patch is safe to load, and a
