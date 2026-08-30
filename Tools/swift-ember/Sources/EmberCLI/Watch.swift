@@ -4,10 +4,13 @@ import EmberDaemon
 import EmberGen
 
 public enum Watch {
-    public static func run(context: BuildContext) async throws {
+    public static func run(
+        context: BuildContext,
+        workDirectory: URL,
+        onReady: (() throws -> Void)? = nil
+    ) async throws {
         try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
-        let work = URL(fileURLWithPath: ".ember/patches")
 
         // `doctor` checks this and `watch` did not, so pointing it at a
         // product that had never been built started a normal-looking session
@@ -28,7 +31,8 @@ public enum Watch {
         }
 
         let server = try IPCServer()
-        let coordinator = PatchCoordinator(context: context, server: server, workDirectory: work)
+        defer { server.stop() }
+        let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
 
         server.onConnect = { hello in
             // Carries the pid: a reconnect from the same process is not a
@@ -69,6 +73,7 @@ public enum Watch {
         try await coordinator.announceSession()
 
         let watcher = FileWatcher(roots: roots)
+        defer { watcher.stop() }
         watcher.prime()
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
@@ -78,6 +83,8 @@ public enum Watch {
             print("listening on 127.0.0.1:\(port)")
         }
         print("")
+
+        try onReady?()
 
         // While nothing is connected, keep republishing where to dial. On a
         // physical device a slower status heartbeat notices a reinstall, which
@@ -131,9 +138,12 @@ public enum Watch {
         }
         defer { reannounce.cancel() }
 
+        var termination: TerminationSignals?
         let changes = AsyncStream<[URL]> { continuation in
             watcher.start { continuation.yield($0) }
+            termination = TerminationSignals { continuation.finish() }
         }
+        defer { termination?.cancel() }
 
         for await batch in changes {
             for url in batch {
@@ -242,7 +252,7 @@ public enum Watch {
         }
     }
 
-    static func validatePhysicalDevice(_ context: BuildContext) throws {
+    public static func validatePhysicalDevice(_ context: BuildContext) throws {
         guard context.deviceIdentifier != nil else { return }
         guard context.sdkName == "iphoneos", !context.targetTriple.contains("-simulator") else {
             throw EmberError(stage: .watch, subject: context.moduleName,

@@ -9,7 +9,7 @@ import EmberDaemon
 /// has to be justified. A value type has neither problem.
 public struct Options {
     public enum Command: String {
-        case doctor, watch, status
+        case doctor, watch, start, stop, status
     }
 
     public var command: Command
@@ -21,12 +21,15 @@ public struct Options {
     public var sourceRoots: [String] = []
     public var device: String?
     public var signingIdentity: String?
+    public var startupTimeout: TimeInterval = 60
 
     public static let usage = """
     swift-ember <command> [options]
 
       doctor    check the project, the toolchain, and the running app
       watch     watch sources and patch the running app on save
+      start     run watch in the background
+      stop      stop the background watcher
       status    show what the daemon would use, without starting it
 
     Pointing at an Xcode project:
@@ -37,6 +40,7 @@ public struct Options {
       --sources <dir>[,<dir>...]     default the project's SRCROOT
       --device <CoreDevice-ID>       target a connected physical iOS device
       --signing-identity <name|SHA>  override the patch signing identity
+      --startup-timeout <seconds>    wait for background startup (default 60)
 
     Pointing at a build that emits its own manifest:
 
@@ -48,8 +52,10 @@ public struct Options {
 
     public enum ParseError: Error, CustomStringConvertible {
         case help
+        case version
         case usage
         case missingValue(String)
+        case invalidValue(String, String)
         case unknown(String)
         case bothContainers
         case schemeRequired
@@ -57,7 +63,9 @@ public struct Options {
         public var description: String {
             switch self {
             case .help, .usage: Options.usage
+            case .version: "swift-ember \(EmberVersion.current)"
             case .missingValue(let flag): "\(flag) needs a value"
+            case .invalidValue(let flag, let value): "invalid value for \(flag): \(value)"
             case .unknown(let argument): "unknown argument: \(argument)\n\n\(Options.usage)"
             case .bothContainers: "pass --project or --workspace, not both"
             case .schemeRequired: "--scheme is required with --project or --workspace"
@@ -90,8 +98,16 @@ public struct Options {
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
             case "--device": options.device = try value(after: argument)
             case "--signing-identity": options.signingIdentity = try value(after: argument)
+            case "--startup-timeout":
+                let value = try value(after: argument)
+                guard let seconds = TimeInterval(value), seconds.isFinite, seconds > 0 else {
+                    throw ParseError.invalidValue(argument, value)
+                }
+                options.startupTimeout = seconds
             case "-h", "--help":
                 throw ParseError.help
+            case "-V", "--version":
+                throw ParseError.version
             default:
                 guard command == nil, let parsed = Command(rawValue: argument) else {
                     throw ParseError.unknown(argument)

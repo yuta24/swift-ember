@@ -164,6 +164,41 @@ swift-ember doctor --project App.xcodeproj --scheme App
 swift-ember watch  --project App.xcodeproj --scheme App
 ```
 
+`watch` stays in the foreground, which is convenient in a terminal. To let an
+Xcode action own the same watcher, run it in the background instead:
+
+```sh
+swift-ember start  --project App.xcodeproj --scheme App
+swift-ember status --project App.xcodeproj --scheme App
+swift-ember stop   --project App.xcodeproj --scheme App
+```
+
+`start` returns only after the watcher is ready. A second `start` is harmless,
+and `stop` is idempotent. Session records, logs, and isolated patch output live
+under `.ember/sessions`, `.ember/logs`, and `.ember/patches` beside the project
+or context file. `stop` verifies the PID, executable path, and process start
+time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
+process. Startup waits for up to 60 seconds by default; unusually large or slow
+projects can override that with `--startup-timeout <seconds>`.
+
+To tie the watcher to Xcode, add this to the scheme's **Build > Post-actions**,
+select the app target under **Provide build settings from**, and replace `App`
+with the scheme name:
+
+```sh
+if [ "$CONFIGURATION" = Debug ]; then
+  ember="$HOME/.local/bin/swift-ember"
+  "$ember" stop  --project "$PROJECT_FILE_PATH" --scheme App
+  "$ember" start --project "$PROJECT_FILE_PATH" --scheme App
+fi
+```
+
+Stopping first matters after a rebuild: the new watcher must read the newly
+linked binary. Add the matching `stop` command to **Run > Post-actions** if the
+watcher should exit when the app exits. For a workspace, use
+`--workspace "$WORKSPACE_PATH"` instead. Foreground `watch` remains the better
+choice when its live output should stay in a terminal.
+
 For a physical device, build and run the Debug app on that device once, then
 select its CoreDevice identifier:
 
@@ -263,7 +298,7 @@ Tools/swift-ember/    host-only package; owns the SwiftSyntax dependency
   Sources/EmberCore   shared types: build context, wire protocol, diagnostics
   Sources/EmberGen    SwiftSyntax: what changed, and what to generate for it
   Sources/EmberDaemon watching, compiling, talking to the app
-  Sources/EmberCLI    swift-ember doctor | watch | status
+  Sources/EmberCLI    swift-ember doctor | watch | start | stop | status
   Tests/               classifier, generated-patch, and daemon tests
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary

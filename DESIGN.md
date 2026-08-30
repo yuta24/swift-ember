@@ -2395,16 +2395,24 @@ toolchains:
 
 Do not claim a version is supported until CI/manual fixtures pass.
 
-## 21. Proposed CLI
+## 21. CLI
 
 Initial commands:
 
 ``` text
-swift-hot-reload doctor
-swift-hot-reload attach
-swift-hot-reload watch
-swift-hot-reload status
+swift-ember doctor
+swift-ember watch
+swift-ember start
+swift-ember stop
+swift-ember status
 ```
+
+`watch` is the foreground primitive. `start` launches that same command in a
+detached process for Xcode actions, and `stop` identifies it by project (or
+context), scheme, configuration, and device. Session state is project-local,
+and patch output is isolated per watch invocation. Lifecycle operations for the
+same session are serialized with a project-local lock. A recorded PID is acted
+on only when both its executable path and kernel process start time still match.
 
 `doctor` verifies:
 

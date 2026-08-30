@@ -28,6 +28,18 @@ BIN_DIR="$(swift build -c release --package-path "$TOOL_PACKAGE" --show-bin-path
 SOURCE_BINARY="$BIN_DIR/swift-ember"
 test -x "$SOURCE_BINARY" || { echo "release executable not found: $SOURCE_BINARY" >&2; exit 1; }
 
+# The ordinary CI packaging probe uses 0.0.0 because it is not a release. A
+# real tag must agree with the version compiled into the CLI; otherwise users
+# can install one release and have the binary identify itself as another.
+if [ "$VERSION" != "0.0.0" ]; then
+    ACTUAL_VERSION="$("$SOURCE_BINARY" --version)"
+    EXPECTED_VERSION="swift-ember $VERSION"
+    test "$ACTUAL_VERSION" = "$EXPECTED_VERSION" || {
+        echo "version mismatch: tag is $VERSION, binary says $ACTUAL_VERSION" >&2
+        exit 1
+    }
+fi
+
 # Sign one payload and copy that exact file into both archives. A Developer ID
 # signature can replace this step later; current releases deliberately use
 # ad-hoc signing and therefore need no repository secret.
