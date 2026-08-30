@@ -223,11 +223,12 @@ PRD.md                 scope, tiers, milestones
 ## Requirements
 
 Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
-of iOS 16 or later. Full-matrix compatibility evidence spans Swift 6.2.3
-through 6.4 across seven configurations, five locally and two on CI. The
-current 44-case matrix and 203-test suite pass in full on Swift 6.4; the newest
-async case also passes separately on local Swift 6.3.3. `DESIGN.md` section 20
-records exactly what was run on each configuration. Physical-device
+of iOS 16 or later. Compatibility evidence spans Swift 6.2.3
+through 6.4 across eight configurations, six locally and two on CI. The newest
+full run passes all 44 fixtures on the Simulator, 41 on the host with the three
+Simulator-only UIKit cases skipped, and all 227 tests on local Swift 6.3.3. A
+44-fixture, 203-test snapshot also passes in full on Swift 6.4. `DESIGN.md`
+section 20 records exactly what was run on each configuration. Physical-device
 delivery is verified on an arm64 iPhone running iOS 26.4 with a binary
 targeting iOS 16; an actual iOS 16 device has not yet been measured.
 
