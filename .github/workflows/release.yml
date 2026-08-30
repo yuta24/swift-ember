@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,19 +18,26 @@ jobs:
   release:
     name: Package release
     runs-on: macos-26
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Validate the release tag
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "release tags must have the form major.minor.patch" >&2
             exit 1
           fi
+          release_commit="$(git rev-list -n 1 "$RELEASE_TAG" 2>/dev/null)" || {
+            echo "release tag $RELEASE_TAG does not exist" >&2
+            exit 1
+          }
           git merge-base --is-ancestor \
-            "$GITHUB_SHA" "origin/${{ github.event.repository.default_branch }}" || {
+            "$release_commit" "origin/${{ github.event.repository.default_branch }}" || {
               echo "the release commit must be on the default branch" >&2
               exit 1
             }
@@ -39,7 +52,7 @@ jobs:
         run: swift test --package-path Tools/swift-ember
 
       - name: Package and verify the release assets
-        run: scripts/package-release.sh "$GITHUB_REF_NAME"
+        run: scripts/package-release.sh "$RELEASE_TAG"
 
       # A rerun may find the draft created by an earlier attempt. Replacing
       # assets on a draft is safe; replacing an already published release is
@@ -55,17 +68,18 @@ jobs:
             dist/swift-ember.artifactbundle.zip.sha256
           )
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$GITHUB_REF_NAME" \
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" \
               --json isDraft --jq .isDraft)"
             if [ "$is_draft" != true ]; then
-              echo "release $GITHUB_REF_NAME is already published" >&2
+              echo "release $RELEASE_TAG is already published" >&2
               exit 1
             fi
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --draft \
               --generate-notes \
-              --title "swift-ember $GITHUB_REF_NAME" \
+              --title "swift-ember $RELEASE_TAG" \
               --verify-tag
+          fi
