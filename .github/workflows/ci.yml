@@ -59,7 +59,12 @@ jobs:
       # One script, the same one a contributor runs before pushing. Steps that
       # live only in a workflow file cannot be reproduced and cannot be
       # debugged from a log.
-      - name: Run the suite
+      - name: Run the pull request suite
+        if: github.event_name == 'pull_request'
+        run: scripts/ci.sh --profile pull-request
+
+      - name: Run the full suite
+        if: github.event_name != 'pull_request'
         run: scripts/ci.sh
 
       # .ci-results is written by this run. fixtures/results-*.yaml is checked
@@ -104,5 +109,10 @@ jobs:
           key: oldest-${{ runner.os }}-${{ runner.arch }}-swift${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Tools/swift-ember/Package.swift', 'Tools/swift-ember/Package.resolved') }}
           restore-keys: oldest-${{ runner.os }}-${{ runner.arch }}-swift${{ env.SWIFT_VERSION }}-
 
+      - name: Run the pull request suite
+        if: github.event_name == 'pull_request'
+        run: scripts/ci.sh --profile pull-request-oldest
+
       - name: Run the stages that need no simulator
+        if: github.event_name != 'pull_request'
         run: scripts/ci.sh --skip-simulator

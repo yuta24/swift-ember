@@ -307,8 +307,10 @@ DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
 ## Checking your changes
 
 ```
-scripts/ci.sh                     everything, about ten minutes
+scripts/ci.sh                     everything, about fifteen minutes
 scripts/ci.sh --skip-simulator    the stages that need no simulator
+scripts/ci.sh --profile pull-request
+                                  the faster suite used on pull requests
 scripts/ci.sh --only tests        one stage; --list-stages to see them
 ```
 
