@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MODULE=CounterApp
-BUNDLE_ID=dev.swift-splice.CounterApp
+BUNDLE_ID=dev.swift-ember.CounterApp
 OUT="$ROOT/.build/debug"
 
 [ $# -gt 0 ] || { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }

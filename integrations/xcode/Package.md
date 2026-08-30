@@ -55,7 +55,7 @@ it in a local overlay rather than shipping it.
 ## Checking it worked
 
 ```
-swift-splice doctor --project App.xcodeproj --scheme App
+swift-ember doctor --project App.xcodeproj --scheme App
 ```
 
 ```

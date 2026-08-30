@@ -46,7 +46,7 @@ final class ReceiptController: UIViewController {
         label.text = total()
     }
 
-    /// Edit this body with `swift-splice watch` running.
+    /// Edit this body with `swift-ember watch` running.
     func total() -> String {
         let cents = cart.items.reduce(0) { $0 + $1.cents }
         return "UIKit total: \(cents) cents"

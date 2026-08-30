@@ -7,12 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B1000010 /* SpliceRuntime */ = {isa = PBXBuildFile; productRef = B1000009 /* SpliceRuntime */; };
+		B1000010 /* EmberRuntime */ = {isa = PBXBuildFile; productRef = B1000009 /* EmberRuntime */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		B1000001 /* UIKitApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = UIKitApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B1000020 /* Splice.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Splice.xcconfig; path = ../../integrations/xcode/Splice.xcconfig; sourceTree = "<group>"; };
+		B1000020 /* Ember.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Ember.xcconfig; path = ../../integrations/xcode/Ember.xcconfig; sourceTree = "<group>"; };
 		B1000021 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -25,7 +25,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B1000010 /* SpliceRuntime */,
+				B1000010 /* EmberRuntime */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -35,7 +35,7 @@
 		B1000004 = {
 			isa = PBXGroup;
 			children = (
-				B1000020 /* Splice.xcconfig */,
+				B1000020 /* Ember.xcconfig */,
 				B1000021 /* Info.plist */,
 				B1000002 /* Sources */,
 				B1000005 /* Products */,
@@ -70,7 +70,7 @@
 			);
 			name = UIKitApp;
 			packageProductDependencies = (
-				B1000009 /* SpliceRuntime */,
+				B1000009 /* EmberRuntime */,
 			);
 			productName = UIKitApp;
 			productReference = B1000001 /* UIKitApp.app */;
@@ -167,7 +167,7 @@
 		};
 		B1000015 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = B1000020 /* Splice.xcconfig */;
+			baseConfigurationReference = B1000020 /* Ember.xcconfig */;
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
@@ -175,7 +175,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "dev.swift-splice.UIKitApp";
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.swift-ember.UIKitApp";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -191,7 +191,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "dev.swift-splice.UIKitApp";
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.swift-ember.UIKitApp";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -229,9 +229,9 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		B1000009 /* SpliceRuntime */ = {
+		B1000009 /* EmberRuntime */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = SpliceRuntime;
+			productName = EmberRuntime;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

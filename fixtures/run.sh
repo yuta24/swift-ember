@@ -155,7 +155,7 @@ for dir in "$ROOT"/Cases/*/; do
     # nothing else in Cases/ mentions the flag.
     extra=()
     if [ -n "$EXTRA_SOURCES" ]; then
-        extra=(-D SPLICE_ENABLED)
+        extra=(-D EMBER_ENABLED)
         for source in $EXTRA_SOURCES; do extra+=("$ROOT/../$source"); done
     fi
 

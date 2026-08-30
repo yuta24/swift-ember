@@ -22,7 +22,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/.build}"
 MODULE=Fixture
-BUNDLE_ID=dev.swift-splice.UIFixture
+BUNDLE_ID=dev.swift-ember.UIFixture
 
 # The crash these pin needs the iOS 26 eraser. Below that `some View` erases to
 # AnyView, which tolerates a type change, so a run at an older target is a
@@ -55,28 +55,28 @@ mkdir -p "$BUILD"
 # objects into each tiny fixture application. Keeping the module boundary here
 # catches an SPI or exported-import mistake that compiling the files beside a
 # case in one module would hide.
-adapter="$BUILD/SpliceSwiftUI"
+adapter="$BUILD/EmberSwiftUI"
 mkdir -p "$adapter"
 runtime_sources=("$ROOT"/../../runtime/Sources/*.swift)
 swiftui_sources=("$ROOT"/../../runtime/SwiftUI/*.swift)
 
 if ! xcrun swiftc -parse-as-library -whole-module-optimization \
-        -target "$TRIPLE" -sdk "$SDK" -Onone -D SPLICE_ENABLED \
-        -module-name SpliceRuntime \
-        -emit-module -emit-module-path "$adapter/SpliceRuntime.swiftmodule" \
-        -emit-object -o "$adapter/SpliceRuntime.o" \
+        -target "$TRIPLE" -sdk "$SDK" -Onone -D EMBER_ENABLED \
+        -module-name EmberRuntime \
+        -emit-module -emit-module-path "$adapter/EmberRuntime.swiftmodule" \
+        -emit-object -o "$adapter/EmberRuntime.o" \
         "${runtime_sources[@]}" > "$adapter/runtime-build.log" 2>&1; then
-    echo "SpliceRuntime build failed; see $adapter/runtime-build.log" >&2
+    echo "EmberRuntime build failed; see $adapter/runtime-build.log" >&2
     exit 1
 fi
 
 if ! xcrun swiftc -parse-as-library -whole-module-optimization \
-        -target "$TRIPLE" -sdk "$SDK" -Onone -D SPLICE_ENABLED \
-        -module-name SpliceSwiftUI -I "$adapter" \
-        -emit-module -emit-module-path "$adapter/SpliceSwiftUI.swiftmodule" \
-        -emit-object -o "$adapter/SpliceSwiftUI.o" \
+        -target "$TRIPLE" -sdk "$SDK" -Onone -D EMBER_ENABLED \
+        -module-name EmberSwiftUI -I "$adapter" \
+        -emit-module -emit-module-path "$adapter/EmberSwiftUI.swiftmodule" \
+        -emit-object -o "$adapter/EmberSwiftUI.o" \
         "${swiftui_sources[@]}" > "$adapter/swiftui-build.log" 2>&1; then
-    echo "SpliceSwiftUI build failed; see $adapter/swiftui-build.log" >&2
+    echo "EmberSwiftUI build failed; see $adapter/swiftui-build.log" >&2
     exit 1
 fi
 
@@ -113,13 +113,13 @@ for dir in "$ROOT"/Cases/*/; do
             -target "$TRIPLE" -sdk "$SDK" \
             -Xclang-linker -isysroot -Xclang-linker "$SDK" \
             -Onone -enable-testing \
-            -D SPLICE_ENABLED \
+            -D EMBER_ENABLED \
             -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports \
             -module-name "$MODULE" \
             -I "$adapter" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \
             -emit-executable -o "$app/$MODULE" \
-            "$adapter/SpliceRuntime.o" "$adapter/SpliceSwiftUI.o" \
+            "$adapter/EmberRuntime.o" "$adapter/EmberSwiftUI.o" \
             "$ROOT/Harness/Loader.swift" \
             "$ROOT/../../runtime/Sources/RegisteredReplacements.swift" \
             "$dir/App.swift" > "$out/app-build.log" 2>&1; then

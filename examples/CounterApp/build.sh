@@ -13,7 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MODULE=CounterApp
-BUNDLE_ID=dev.swift-splice.CounterApp
+BUNDLE_ID=dev.swift-ember.CounterApp
 
 CONFIG=debug
 for arg in "$@"; do
@@ -40,9 +40,9 @@ if [ "$CONFIG" = debug ]; then
     # optional: without it the dynamic replacement keys stay hidden and a patch
     # cannot bind to them. See DESIGN.md section 5.4.
     # Conditional compilation flags have to reach the patch compile too. A
-    # patched body containing `#if SPLICE_ENABLED` would otherwise take the
+    # patched body containing `#if EMBER_ENABLED` would otherwise take the
     # other branch, because the daemon compiles the patch without them.
-    defines=(-D SPLICE_ENABLED)
+    defines=(-D EMBER_ENABLED)
     flags=(-Onone
            -enable-testing
            -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports
@@ -71,7 +71,7 @@ if [ "$CONFIG" = debug ]; then
     # actually load. Recovering this from an Xcode build instead is DESIGN.md
     # section 6.2's problem; emitting it from the build that produced the
     # binary is the version that cannot drift.
-    CONTEXT="$ROOT/splice-context.json"
+    CONTEXT="$ROOT/ember-context.json"
     cat > "$CONTEXT" <<JSON
 {
   "moduleName": "$MODULE",
@@ -96,11 +96,11 @@ if [ "$CONFIG" = release ]; then
         echo "FAIL: release build exported $keys replacement keys" >&2
         exit 1
     fi
-    # SpliceClient only exists inside #if SPLICE_ENABLED, so its absence is the
+    # EmberClient only exists inside #if EMBER_ENABLED, so its absence is the
     # precise statement that nothing which dials or loads was compiled. The
     # public entry point may survive as an inert stub; that is by design, so
     # that call sites need no #if of their own.
-    if xcrun nm "$APP/$MODULE" | grep -q 'SpliceClient'; then
+    if xcrun nm "$APP/$MODULE" | grep -q 'EmberClient'; then
         echo "FAIL: release build contains the reload client" >&2
         exit 1
     fi

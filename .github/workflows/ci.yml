@@ -49,8 +49,8 @@ jobs:
         with:
           path: |
             .build
-            Tools/swift-splice/.build
-          key: ${{ matrix.runner }}-swift${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Tools/swift-splice/Package.swift', 'Tools/swift-splice/Package.resolved') }}
+            Tools/swift-ember/.build
+          key: ${{ matrix.runner }}-swift${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Tools/swift-ember/Package.swift', 'Tools/swift-ember/Package.resolved') }}
           restore-keys: ${{ matrix.runner }}-swift${{ env.SWIFT_VERSION }}-
 
       # One script, the same one a contributor runs before pushing. Steps that

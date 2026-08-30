@@ -1,0 +1,47 @@
+// swift-ember: hot reload settings for one Debug configuration.
+//
+// Include this from the .xcconfig your Debug configuration already uses, or
+// set it as the configuration's base configuration file in Xcode:
+//
+//     #include "path/to/Ember.xcconfig"
+//
+// Do not include it from a Release configuration. Everything here exists to
+// make the running binary patchable, which is the opposite of what a shipping
+// build wants. Ember.release.xcconfig next to this file asserts that.
+
+// Replacement dispatch only survives without optimisation. DESIGN.md 12.3.
+SWIFT_OPTIMIZATION_LEVEL = -Onone
+
+// Not optional, and the setting most easily missed. Dynamic replacement binds
+// through a key symbol, and Swift emits internal declarations with hidden
+// visibility; without testability those keys never reach the dynamic symbol
+// table and a patch cannot bind to them at all. DESIGN.md 5.4.
+SWIFT_ENABLE_TESTABILITY = YES
+
+// Two hidden frontend options, so both need -Xfrontend; the bare spellings are
+// rejected by the driver. Neither is a stable interface, which is why
+// everything that depends on them lives behind an adapter. DESIGN.md 3 and 5.1.
+//
+// -enable-implicit-dynamic makes declarations replaceable.
+//
+// -enable-private-imports extends that to `private` and `fileprivate` ones and
+// lets a patch name them through @_private(sourceFile:). Without it a patch
+// cannot touch anything private -- which in real code is most method bodies,
+// since most of them read private state. Measured in DESIGN.md 7.3b: 8 of 46
+// ordinary body edits reach the process without it, 31 of 46 with.
+OTHER_SWIFT_FLAGS = $(inherited) -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports
+
+// Only for the app target's own code. If you link the EmberRuntime package
+// product, its dialling and loading code is enabled by the package manifest
+// for Debug and this setting has nothing to do with it -- Xcode does not
+// propagate an app target's compilation conditions into package targets. Keep
+// it if your own sources guard anything on EMBER_ENABLED, or if you compile
+// the runtime sources directly rather than linking the product.
+//
+// The daemon does forward it to the patch compile, so a `#if EMBER_ENABLED`
+// inside a patched body takes the same branch it did in the app.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) EMBER_ENABLED
+
+// Read back by `swift-ember doctor` to tell "this project was configured" from
+// "these settings happen to be on".
+EMBER_CONFIGURED = YES

@@ -65,8 +65,8 @@ that has been wrong most often.
   reason the classifier refuses it anyway is that nothing syntactic separates
   it from the first case.
 - **`body-shape-change-enabled-in-list`** — the first case with the production
-  `SpliceSwiftUI` opt-in. `@ObserveSplice` makes the row evaluate after the
-  real loader publishes a generation, and the outermost `.enableSplice()`
+  `EmberSwiftUI` opt-in. `@ObserveEmber` makes the row evaluate after the
+  real loader publishes a generation, and the outermost `.emberable()`
   keeps the stored child at `AnyView`. The process stays alive, the new
   `VStack` renders, the row's `@State` UUID survives, and the loaded image
   reports the expected two replacement records.

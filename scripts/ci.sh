@@ -14,7 +14,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TOOL_PACKAGE="$ROOT/Tools/swift-splice"
+TOOL_PACKAGE="$ROOT/Tools/swift-ember"
 cd "$ROOT"
 
 # Stages that need a booted simulator are listed separately rather than
@@ -90,7 +90,7 @@ check_toolchain() {
 
 # --- host ------------------------------------------------------------------
 
-# Both configurations, and the debug one is not redundant. SPLICE_ENABLED is
+# Both configurations, and the debug one is not redundant. EMBER_ENABLED is
 # defined only for debug, so a release build compiles the runtime's dialling
 # and loading code to nothing -- which is how a type-checker crash in that file
 # went unnoticed on three shipping toolchains.
@@ -145,25 +145,25 @@ check_runtime_across_toolchains() {
         : > "$work/log"
 
         DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
-             -D SPLICE_ENABLED -emit-module \
-             -emit-module-path "$hostdir/SpliceRuntime.swiftmodule" \
-             -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+             -D EMBER_ENABLED -emit-module \
+             -emit-module-path "$hostdir/EmberRuntime.swiftmodule" \
+             -module-name EmberRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
         DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
-             -D SPLICE_ENABLED -emit-module -I "$hostdir" \
-             -emit-module-path "$hostdir/SpliceSwiftUI.swiftmodule" \
-             -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
+             -D EMBER_ENABLED -emit-module -I "$hostdir" \
+             -emit-module-path "$hostdir/EmberSwiftUI.swiftmodule" \
+             -module-name EmberSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
 
         if [ -n "$sdk" ]; then
             DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
-                 -D SPLICE_ENABLED -emit-module \
+                 -D EMBER_ENABLED -emit-module \
                  -target "$arch-apple-ios$ios_deployment-simulator" -sdk "$sdk" \
-                 -emit-module-path "$iosdir/SpliceRuntime.swiftmodule" \
-                 -module-name SpliceRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
+                 -emit-module-path "$iosdir/EmberRuntime.swiftmodule" \
+                 -module-name EmberRuntime runtime/Sources/*.swift >> "$work/log" 2>&1 || ok=0
             DEVELOPER_DIR="$dir" xcrun swiftc -swift-version 6 -parse-as-library \
-                 -D SPLICE_ENABLED -emit-module -I "$iosdir" \
+                 -D EMBER_ENABLED -emit-module -I "$iosdir" \
                  -target "$arch-apple-ios$ios_deployment-simulator" -sdk "$sdk" \
-                 -emit-module-path "$iosdir/SpliceSwiftUI.swiftmodule" \
-                 -module-name SpliceSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
+                 -emit-module-path "$iosdir/EmberSwiftUI.swiftmodule" \
+                 -module-name EmberSwiftUI runtime/SwiftUI/*.swift >> "$work/log" 2>&1 || ok=0
         else
             echo "no iphonesimulator SDK" >> "$work/log"
             ok=0
@@ -265,11 +265,11 @@ build_examples() {
 # doctor reads the built binary back, so this proves the settings in
 # integrations/xcode produce something actually patchable.
 run_doctor() {
-    local splice ok=0 project
-    splice="$(swift build --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-splice"
+    local ember ok=0 project
+    ember="$(swift build --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-ember"
     for project in XcodeApp UIKitApp; do
         echo "  $project"
-        "$splice" doctor --project "examples/$project/$project.xcodeproj" \
+        "$ember" doctor --project "examples/$project/$project.xcodeproj" \
             --scheme "$project" --sources "examples/$project/Sources" || ok=1
     done
     return "$ok"
@@ -277,7 +277,7 @@ run_doctor() {
 
 # --- run -------------------------------------------------------------------
 
-RESULTS_DIR="${SPLICE_RESULTS_DIR:-$ROOT/.ci-results}"
+RESULTS_DIR="${EMBER_RESULTS_DIR:-$ROOT/.ci-results}"
 mkdir -p "$RESULTS_DIR"
 
 step toolchain check_toolchain

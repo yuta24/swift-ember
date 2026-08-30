@@ -1,9 +1,13 @@
 .build/
+.ember/
+# Kept so local artifacts created before the swift-ember rename do not become
+# untracked files. New sessions use .ember/.
 .splice/
 .ci-results/
 fixtures/.build/
 fixtures/ui/.build/
 examples/*/.build/
+examples/*/ember-context.json
 examples/*/splice-context.json
 examples/**/xcuserdata/
 examples/**/*.xcworkspace/xcshareddata/swiftpm/

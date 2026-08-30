@@ -19,7 +19,7 @@ set -uo pipefail
 # against. Not 6.2: Xcode 26.0 and 26.1 ship 6.2.x and have never been measured,
 # and a floor that admits them would let CI report a pass for something the
 # documentation does not claim.
-MINIMUM=${SPLICE_MINIMUM_SWIFT:-6.2.3}
+MINIMUM=${EMBER_MINIMUM_SWIFT:-6.2.3}
 
 swift_version_of() {
     local developer_dir="$1"

@@ -15,9 +15,9 @@ xcodebuild -project examples/UIKitApp/UIKitApp.xcodeproj -scheme UIKitApp \
            -configuration Debug \
            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 
-swift-splice doctor --project examples/UIKitApp/UIKitApp.xcodeproj \
+swift-ember doctor --project examples/UIKitApp/UIKitApp.xcodeproj \
                     --scheme UIKitApp --sources examples/UIKitApp/Sources
-swift-splice watch  --project examples/UIKitApp/UIKitApp.xcodeproj \
+swift-ember watch  --project examples/UIKitApp/UIKitApp.xcodeproj \
                     --scheme UIKitApp --sources examples/UIKitApp/Sources
 ```
 

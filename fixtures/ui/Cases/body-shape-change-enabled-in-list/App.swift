@@ -1,20 +1,20 @@
 // The proposed SwiftUI opt-in, exercised at the exact boundary where an
 // un-erased body aborts: a row of a List on iOS 26 or later.
 //
-// `@ObserveSplice` invalidates Row itself after dlopen, so SwiftUI calls the
-// replaced body. `enableSplice()` makes the child stored by
+// `@ObserveEmber` invalidates Row itself after dlopen, so SwiftUI calls the
+// replaced body. `emberable()` makes the child stored by
 // DebugReplaceableView an AnyView in both generations. The UUID belongs to
 // Row's @State and proves that making the new tree visible did not replace the
 // Row value's SwiftUI state.
 
 import SwiftUI
-import SpliceSwiftUI
+import EmberSwiftUI
 import UIKit
 
-private func loadSplicePatches() async {
+private func loadEmberPatches() async {
     while !Task.isCancelled {
         try? await Task.sleep(for: .milliseconds(300))
-        let loaded = Splice.loadPendingPatches()
+        let loaded = Ember.loadPendingPatches()
         guard !loaded.isEmpty else { continue }
 
         let inbox = UIHarness.documents.appendingPathComponent("Patches", isDirectory: true)
@@ -39,12 +39,12 @@ struct RenderProbe: UIViewRepresentable {
 struct Row: View {
     var tick: Int
     @State var stateID = UUID().uuidString
-    @ObserveSplice private var splice
+    @ObserveEmber private var ember
 
     var body: some View {
         Text("old \(tick)")
             .background(RenderProbe(value: "old|\(stateID)"))
-            .enableSplice()
+            .emberable()
     }
 }
 
@@ -58,7 +58,7 @@ struct Host: View {
         }
         .task {
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await loadSplicePatches() }
+                group.addTask { await loadEmberPatches() }
                 group.addTask { @MainActor in
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .milliseconds(500))

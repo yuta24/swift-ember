@@ -1,4 +1,4 @@
-#if SPLICE_ENABLED
+#if EMBER_ENABLED
 
 import Foundation
 
@@ -6,12 +6,12 @@ import Foundation
 /// Keeping validation and refresh here prevents the two transports from
 /// developing different definitions of a successful reload.
 final class RuntimePatchApplier: @unchecked Sendable {
-    private let state: Splice.StateBox
+    private let state: Ember.StateBox
     private let lock = NSLock()
     private var expectedBuildIdentity = ""
     private var expectedBuildUUIDs: [String] = []
 
-    init(state: Splice.StateBox) { self.state = state }
+    init(state: Ember.StateBox) { self.state = state }
 
     func expect(buildIdentity: String, buildUUIDs: [String]) {
         lock.withLock {
@@ -38,7 +38,7 @@ final class RuntimePatchApplier: @unchecked Sendable {
                 """)
         }
 
-        switch Splice.load(generation: request.generation, path: request.path) {
+        switch Ember.load(generation: request.generation, path: request.path) {
         case .loaded(let generation, let durationMs, let registered):
             let names = request.declarations.joined(separator: ", ")
             state.note("g\(generation): \(names.isEmpty ? "loaded" : names)")

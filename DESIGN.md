@@ -165,7 +165,7 @@ swift-hot-reload/
 
 The repository structure is conceptual; implementation language
 boundaries may change. The tree above uses the working product name; the
-actual repository is `swift-splice`.
+actual repository is `swift-ember`.
 
 ### 4.2 Host daemon
 
@@ -250,22 +250,22 @@ Evaluate in this order:
     compatibility becomes unacceptable.
 4.  Compiler plugin/fork only as a last resort.
 
-Option 1 was enough. `integrations/xcode/Splice.xcconfig` carries the
+Option 1 was enough. `integrations/xcode/Ember.xcconfig` carries the
 four settings; a project bases its Debug configuration on it and changes
 nothing else. `doctor` reads each setting back separately, so a
 half-configured project is told which half.
 
 The runtime arrives as a package product rather than as source to copy,
-and is Debug-only by construction: the target defines `SPLICE_ENABLED`
+and is Debug-only by construction: the target defines `EMBER_ENABLED`
 only `.when(configuration: .debug)`, so a Release build links an inert
 entry point and nothing that dials or loads. That is what lets a call
-site say `Splice.start()` with no `#if` around it, which matters because
+site say `Ember.start()` with no `#if` around it, which matters because
 a conditional at every call site is a thing projects get wrong.
 
 The repository contains two package manifests with deliberately different
-consumers. The root package exposes only `SpliceRuntime` and `SpliceSwiftUI`
+consumers. The root package exposes only `EmberRuntime` and `EmberSwiftUI`
 and has no external dependencies. The host daemon lives in
-`Tools/swift-splice`; only that package resolves SwiftSyntax. This keeps the
+`Tools/swift-ember`; only that package resolves SwiftSyntax. This keeps the
 parser out of an application's dependency graph without coupling the daemon
 to a toolchain-private SwiftSyntax build.
 
@@ -598,7 +598,7 @@ so it displaces nothing and changes no layout.
 -   a body using `#function`, `#file`, `#fileID`, `#filePath`, `#line`,
     `#column`, or `#dsohandle`. These expand against the declaration the
     patch emits, not the one in the source: measured, `#function` in a
-    replaced body reported `splice_g1_label____()`. Nothing warns, and the
+    replaced body reported `ember_g1_label____()`. Nothing warns, and the
     wrong value lands in the code that exists to say where you are. Only the
     literal written in the body is detected; one arriving through a callee's
     default argument, as in `func log(_ m: String, function: String =
@@ -1148,7 +1148,7 @@ corrupts a process. A review found this check missing entirely --- the
 signature text `var body: some View` is identical before and after, so
 neither the signature comparison nor the residue noticed --- which meant
 the case the design calls its most dangerous was undefended in the
-implementation. `Tools/swift-splice/Tests/SpliceGenTests/SoundnessTests.swift` pins it.
+implementation. `Tools/swift-ember/Tests/EmberGenTests/SoundnessTests.swift` pins it.
 ### 12.8 What implicit dynamic does not cover
 
 `-enable-implicit-dynamic` is not exhaustive. Measured coverage
@@ -1415,7 +1415,7 @@ scenarios. Three facts constrain its use:
 
 Any SwiftUI support that calls this private invalidation route directly would
 therefore carry a hard deployment-target floor that core function replacement
-does not. `SpliceSwiftUI` does not use the route: its explicit `AnyView`
+does not. `EmberSwiftUI` does not use the route: its explicit `AnyView`
 boundary works below and above that floor.
 
 `SWIFT_ENABLE_OPAQUE_TYPE_ERASURE` maps to
@@ -1429,26 +1429,26 @@ The shippable route uses two source-level opt-ins and no SwiftUI internals:
 
 ``` swift
 struct ReceiptView: View {
-    @ObserveSplice private var splice
+    @ObserveEmber private var ember
 
     var body: some View {
         ReceiptContents()
-            .enableSplice()
+            .emberable()
     }
 }
 ```
 
-In Debug, `.enableSplice()` returns `AnyView`. Because it is the outermost
+In Debug, `.emberable()` returns `AnyView`. Because it is the outermost
 expression from the initial build onward, the generic child stored by
 `DebugReplaceableView` is `AnyView` in every generation even when the tree
 inside it changes. In Release it is an inlined identity returning `Self`.
 
-`@ObserveSplice` is a `DynamicProperty` containing an `@ObservedObject`. The
+`@ObserveEmber` is a `DynamicProperty` containing an `@ObservedObject`. The
 core runtime publishes a generation only after `dlopen` succeeds; the separate
-`SpliceSwiftUI` target maps that framework-neutral SPI event onto the main
+`EmberSwiftUI` target maps that framework-neutral SPI event onto the main
 actor and increments the object. SwiftUI therefore invalidates the enclosing
 View and calls the replaced getter. Keeping the adapter in a separate target
-means a UIKit-only application links `SpliceRuntime` without importing
+means a UIKit-only application links `EmberRuntime` without importing
 SwiftUI or Combine.
 
 Measured in `fixtures/ui/Cases/body-shape-change-enabled-in-list`, on the same
@@ -1466,19 +1466,21 @@ Two replacement records are expected: one for the getter and one for its
 opaque-result descriptor. The classifier records both, so REGISTER can verify
 the image instead of treating every SwiftUI reload as an unexplained overcount.
 
-The method spelling is not trusted as a type proof. Generated source assigns
-the edited body's outer call to a module-qualified `SwiftUI.AnyView` temporary.
-That result context makes the compiler select the erasing overload instead of
-a same-spelled overload returning `Self`. For the running generation, the
-daemon reserves `enableSplice` across the watched source files in the same
-module, because overload lookup performed in the patch module cannot reproduce
-the original app module's choice for an imported extension.
+The method spelling is not trusted as a type proof. Generated source first
+assigns the edited body's outer call to an untyped temporary, then assigns that
+inferred value to a module-qualified `SwiftUI.AnyView` temporary. The first
+statement reproduces ordinary overload selection without an `AnyView` result
+context; the second rejects a same-spelled imported overload returning `Self`
+before the patch can load. For the running generation, the daemon also reserves
+`emberable` across the watched source files in the same module, because overload
+lookup performed in the patch module cannot see declarations that belonged to
+the original app module.
 
 The syntax rule is deliberately narrow. The enclosing nominal type must have
-`@ObserveSplice` in the same file, that file must import `SpliceSwiftUI`
+`@ObserveEmber` in the same file, that file must import `EmberSwiftUI`
 unconditionally as a top-level whole-module import, the declaration must be
 `body: some View`, and the implicit
-getter's outermost expression must be `.enableSplice()` in both the built and
+getter's outermost expression must be `.emberable()` in both the built and
 edited source. The import prevents an unrelated same-spelled API from widening
 the opaque-result exception. Adding either opt-in changes layout or type
 semantics and therefore requires one rebuild before a reload session. Applying
@@ -1487,7 +1489,7 @@ only a conditional, declaration-level, or re-exported import, qualifying the
 observer through another module, or placing the observer in another file is
 refused. These are false negatives, not invitations to guess.
 
-The rendering fixture drives the same `Splice.load(generation:path:)` function
+The rendering fixture drives the same `Ember.load(generation:path:)` function
 as the daemon; `loadPendingPatches()` only supplies its inbox and synthetic
 generation number. This keeps the standalone fixture independent of IPC while
 preventing the notification paths from drifting. The opt-in case is also run
@@ -1532,7 +1534,7 @@ again reaches the replacement. Nothing about a loaded image makes it
 call anything again, which is the whole of the problem and the whole of
 the fix. `runtime/Sources/UIKitRefresh.swift` sends the reasons: it
 invalidates layout, constraints, and drawing across every window, and
-reloads every table and collection view. `Splice.RefreshOptions` is
+reloads every table and collection view. `Ember.RefreshOptions` is
 what an application can turn off.
 
 Three declaration shapes, each with a fixture:
@@ -1937,7 +1939,7 @@ scope     uint32 flags
           descriptors...
 ```
 
-`Tools/swift-splice/Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins that a patch
+`Tools/swift-ember/Tests/EmberEndToEndTests/ReplacementSectionTests.swift` pins that a patch
 emitting one replacement declares one and a patch emitting three declares
 three, so a toolchain that moves this fails there rather than in a session.
 
@@ -1966,7 +1968,7 @@ is what stopped it. What the checks cannot catch is a layout that is different
 but *valid*, where the Swift runtime is content and these offsets read the
 wrong field --- which is why the count is treated as evidence, the "higher than
 expected" case is not fatal, and
-`Tools/swift-splice/Tests/SpliceEndToEndTests/ReplacementSectionTests.swift` pins the layout so a
+`Tools/swift-ember/Tests/EmberEndToEndTests/ReplacementSectionTests.swift` pins the layout so a
 change fails there first.
 
 ## 18. Observability
@@ -2000,7 +2002,7 @@ justified. It has now been collected; section 18.1 has it.
 
 ### 18.1 Measured
 
-`Tools/swift-splice/Sources/SpliceBench` generates a synthetic application of a given size,
+`Tools/swift-ember/Sources/EmberBench` generates a synthetic application of a given size,
 builds it, and drives the real classifier, generator, and compiler
 through an edit. Median of five patches after a discarded warmup,
 milliseconds, from an optimised build of the daemon:
@@ -2152,7 +2154,7 @@ is connected", permanently, because the runtime only says hello once.
 Connections are tagged with a generation now, and a teardown that is not
 the current one does nothing.
 
-`SpliceDaemonTests` drives the server against a fake runtime that speaks
+`EmberDaemonTests` drives the server against a fake runtime that speaks
 the wire format directly, which also makes it a second reader of the
 protocol, so a drift between the two sides shows up there.
 
@@ -2207,7 +2209,7 @@ covered today are listed in `fixtures/README.md`.
 -   inheritance changed.
 
 All must fail closed. Implemented as
-`Tools/swift-splice/Tests/SpliceGenTests/RebuildRequiredTests.swift`, one test per entry
+`Tools/swift-ember/Tests/EmberGenTests/RebuildRequiredTests.swift`, one test per entry
 above so the list cannot quietly narrow.
 
 Two of these are order-sensitive rather than text-sensitive, and both
@@ -2222,7 +2224,7 @@ as no change.
 
 The gap between "the classifier said yes" and "the patch works" needs
 its own suite, because a verdict nobody executes is a guess. For each
-declaration kind the classifier accepts, `SpliceEndToEndTests` takes a
+declaration kind the classifier accepts, `EmberEndToEndTests` takes a
 real edit through the real classifier and generator, compiles the
 result, loads it into a live process, and checks the output.
 
@@ -2267,7 +2269,7 @@ toolchains:
 ```
 
 Six local Xcode versions measured, four of them shipping releases. Every entry
-below is `fixtures/run.sh` and `swift test --package-path Tools/swift-splice`
+below is `fixtures/run.sh` and `swift test --package-path Tools/swift-ember`
 actually run, not inferred:
 
 ``` text
@@ -2329,7 +2331,7 @@ DEVELOPER_DIR=/Applications/Xcode-26.5.0.app/Contents/Developer \
 ```
 
 One toolchain-specific workaround exists, in
-`runtime/Sources/SpliceClient.swift`. Written with an implicit `self`,
+`runtime/Sources/EmberClient.swift`. Written with an implicit `self`,
 
 ``` swift
 lock.withLock { connection }?.cancel()
@@ -2473,7 +2475,7 @@ but it does not yet satisfy section 6.2.
 
 Watcher + generator + compiler + IPC.
 
-Done. `swift-splice watch` runs the loop against
+Done. `swift-ember watch` runs the loop against
 `examples/CounterApp`. Two decisions from the build-out are worth
 recording:
 

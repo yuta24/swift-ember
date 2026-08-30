@@ -1,5 +1,5 @@
 import UIKit
-import SpliceRuntime
+import EmberRuntime
 
 /// The list, out of a storyboard and inside a navigation controller.
 ///

@@ -1,5 +1,5 @@
 import SwiftUI
-import SpliceSwiftUI
+import EmberSwiftUI
 import Feature
 
 @main
@@ -15,7 +15,7 @@ struct XcodeApp: App {
 
 struct ContentView: View {
     @ObservedObject var cart: Cart
-    @ObserveSplice private var splice
+    @ObserveEmber private var ember
 
     var body: some View {
         NavigationStack {
@@ -54,12 +54,12 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("swift-splice")
-            // No #if here. Splice.start() exists in every configuration and
-            // does nothing unless the runtime was compiled with SPLICE_ENABLED,
+            .navigationTitle("swift-ember")
+            // No #if here. Ember.start() exists in every configuration and
+            // does nothing unless the runtime was compiled with EMBER_ENABLED,
             // which the package only defines for Debug.
             .onAppear {
-                Splice.start { status in
+                Ember.start { status in
                     Task { @MainActor in
                         cart.apply(status)
                     }
@@ -68,7 +68,7 @@ struct ContentView: View {
             // The explicit boundary keeps the concrete body type at AnyView
             // in Debug. Together with the observer above, this makes edits to
             // this body safe and visible without replacing the View's state.
-            .enableSplice()
+            .emberable()
         }
     }
 }

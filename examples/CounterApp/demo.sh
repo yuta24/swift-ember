@@ -11,8 +11,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
-TOOL_PACKAGE="$REPO/Tools/swift-splice"
-BUNDLE_ID=dev.swift-splice.CounterApp
+TOOL_PACKAGE="$REPO/Tools/swift-ember"
+BUNDLE_ID=dev.swift-ember.CounterApp
 SHOTS="${SHOTS_DIR:-$ROOT/.build/demo}"
 SUBJECT="$ROOT/Sources/Cart.swift"
 LOG="$ROOT/.build/watch.log"
@@ -36,14 +36,14 @@ trap cleanup EXIT
 # into a 591 ms one. The first build of this takes a couple of minutes.
 echo "==> building the daemon (release)"
 swift build -c release --package-path "$TOOL_PACKAGE" > /dev/null
-SPLICE="$(swift build -c release --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-splice"
+EMBER="$(swift build -c release --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-ember"
 
 echo "==> building and launching the app"
 "$ROOT/build.sh" > /dev/null
 sleep 3
 
 echo "==> starting the daemon"
-"$SPLICE" watch --context "$ROOT/splice-context.json" > "$LOG" 2>&1 &
+"$EMBER" watch --context "$ROOT/ember-context.json" > "$LOG" 2>&1 &
 DAEMON=$!
 
 # The app dials the daemon, so give it a moment to notice the session file.

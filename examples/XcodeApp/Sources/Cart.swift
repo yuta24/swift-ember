@@ -1,5 +1,5 @@
 import Foundation
-import SpliceRuntime
+import EmberRuntime
 
 /// The subject of the hot reload, same shape as examples/CounterApp.
 ///
@@ -33,7 +33,7 @@ final class Cart: ObservableObject {
 
     /// Mirrors the runtime's status into the view. The runtime knows nothing
     /// about SwiftUI, so the adapting happens here rather than there.
-    func apply(_ status: Splice.Status) {
+    func apply(_ status: Ember.Status) {
         connected = status.connected
         reloadLog = status.lines
     }

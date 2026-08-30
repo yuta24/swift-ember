@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>CounterApp</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.swift-splice.CounterApp</string>
+	<string>dev.swift-ember.CounterApp</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

@@ -23,7 +23,7 @@ final class DetailViewController: UIViewController {
         refresh()
     }
 
-    /// Edit this with `swift-splice watch` running.
+    /// Edit this with `swift-ember watch` running.
     func refresh() {
         headline.text = catalog.headline(for: catalog.items[index])
         footnote.text = "session \(catalog.session)"

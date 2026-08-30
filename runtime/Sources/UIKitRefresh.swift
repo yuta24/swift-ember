@@ -4,7 +4,7 @@
 // and only in Debug, since Release compiles this out entirely. SwiftPM's
 // `platforms:` does not prevent it: that is a deployment-target floor, not an
 // allow-list, so a watchOS target may link this runtime.
-#if SPLICE_ENABLED && canImport(UIKit) && !os(watchOS)
+#if EMBER_ENABLED && canImport(UIKit) && !os(watchOS)
 
 import UIKit
 
@@ -24,13 +24,13 @@ import UIKit
 /// measure both of the tiers below on an instance that is already on screen.
 ///
 /// What is not here is a tier that re-runs `viewDidLoad`; see
-/// `Splice.RefreshOptions` for what was measured and why it was dropped.
+/// `Ember.RefreshOptions` for what was measured and why it was dropped.
 @MainActor
 enum UIKitRefresh {
     /// Returns what it touched, phrased for a developer reading one line of
     /// CLI output. Nil when there was nothing to refresh, which is not a
     /// failure: a process with no window yet is a normal thing to patch.
-    static func perform(_ options: Splice.RefreshOptions) -> String? {
+    static func perform(_ options: Ember.RefreshOptions) -> String? {
         guard let application else { return nil }
         let windows = application.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -83,7 +83,7 @@ enum UIKitRefresh {
     /// Measured: `'shared' is unavailable in application extensions for iOS`.
     ///
     /// Reaching it by selector would be a bad habit in shipping code. It is
-    /// not shipping code: the whole file is behind `SPLICE_ENABLED`, which the
+    /// not shipping code: the whole file is behind `EMBER_ENABLED`, which the
     /// package defines for Debug only, so no Release binary contains this.
     ///
     /// In an extension the refresh reports that it touched nothing, which is

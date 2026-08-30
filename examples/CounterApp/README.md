@@ -1,6 +1,6 @@
 # CounterApp
 
-A SwiftUI iOS Simulator app wired to swift-splice end to end. Save a method
+A SwiftUI iOS Simulator app wired to swift-ember end to end. Save a method
 body in `Sources/Cart.swift` and the running app changes.
 
 | before | after |
@@ -31,7 +31,7 @@ To drive it by hand instead, which is the point of the thing:
 
 ```
 ./build.sh
-swift-splice watch --context splice-context.json
+swift-ember watch --context ember-context.json
 ```
 
 Then edit a method body in `Sources/Cart.swift` and save.
@@ -61,14 +61,14 @@ buried in a `.pbxproj`. Real projects will get these through xcconfig, which is
 -Onone                                 keep replacement dispatch intact
 -Xfrontend -enable-implicit-dynamic    make declarations replaceable
 -enable-testing                        export the replacement keys
--D SPLICE_ENABLED                      compile in the runtime
+-D EMBER_ENABLED                      compile in the runtime
 ```
 
 `-enable-testing` is the one that is easy to miss. Without it the replacement
 keys exist but stay hidden, and a patch cannot bind to them at all. See
 `DESIGN.md` section 5.4.
 
-### splice-context.json
+### ember-context.json
 
 `build.sh` writes the compiler invocation the daemon needs in order to build a
 patch the running binary can load: target, SDK, module search paths, and the

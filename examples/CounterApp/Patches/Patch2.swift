@@ -6,7 +6,7 @@
 
 extension Cart {
     @_dynamicReplacement(for: discountLabel())
-    func splice_g2_discountLabel() -> String {
+    func ember_g2_discountLabel() -> String {
         subtotalCents >= 1000 ? "10% off orders over $10" : "spend $10 to unlock"
     }
 }

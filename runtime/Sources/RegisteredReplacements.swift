@@ -1,4 +1,4 @@
-#if SPLICE_ENABLED
+#if EMBER_ENABLED
 
 import Foundation
 import MachO

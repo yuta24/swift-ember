@@ -52,7 +52,7 @@ struct ContentView: View {
                 }
 
                 // Both rows come from patchable methods on Cart. Edit their
-                // bodies in Sources/Cart.swift while `swift-splice watch` is
+                // bodies in Sources/Cart.swift while `swift-ember watch` is
                 // running and these change without the app restarting.
                 Section("Patched output") {
                     LabeledContent("Subtotal", value: cart.subtotalLabel())
@@ -65,10 +65,10 @@ struct ContentView: View {
                     }
                 }
 
-                #if SPLICE_ENABLED
+                #if EMBER_ENABLED
                 Section("Hot reload") {
                     LabeledContent("Daemon", value: cart.connected ? "connected" : "not connected")
-                    Button("Load pending patches") { Splice.loadPendingPatches() }
+                    Button("Load pending patches") { Ember.loadPendingPatches() }
                     ForEach(Array(cart.reloadLog.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.caption).monospaced()
                     }
@@ -79,10 +79,10 @@ struct ContentView: View {
                 }
                 #endif
             }
-            .navigationTitle("swift-splice")
-            #if SPLICE_ENABLED
+            .navigationTitle("swift-ember")
+            #if EMBER_ENABLED
             .onAppear {
-                Splice.start { status in
+                Ember.start { status in
                     Task { @MainActor in cart.apply(status) }
                 }
             }

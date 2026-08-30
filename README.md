@@ -1,4 +1,4 @@
-# swift-splice
+# swift-ember
 
 [![CI](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml/badge.svg)](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml)
 
@@ -10,11 +10,11 @@ that is already running, with its heap, its navigation, and its login session
 intact.
 
 ```
-$ swift-splice watch --project App.xcodeproj --scheme App
+$ swift-ember watch --project App.xcodeproj --scheme App
 watching examples/CounterApp/Sources
 listening on 127.0.0.1:51237
 
-connected  pid 8621, dev.swift-splice.CounterApp
+connected  pid 8621, dev.swift-ember.CounterApp
 
 hot reloaded 1 declaration in 511 ms  (g1)
   Cart.subtotalLabel()
@@ -45,7 +45,7 @@ project is. On a module of ten thousand declarations a full build takes 50
 seconds and a patch still takes 352 ms.
 
 Build the daemon with
-`swift build -c release --package-path Tools/swift-splice`. Classification is
+`swift build -c release --package-path Tools/swift-ember`. Classification is
 SwiftSyntax parsing, and unoptimised it costs fourteen times as much — enough
 to be most of the loop on a large file. The host tool is a separate package so
 applications that add the root package resolve no SwiftSyntax dependency.
@@ -67,23 +67,23 @@ Two steps, both in Xcode — plus one line per local package, since Xcode does
 not pass the app's compiler flags into package targets. See
 `integrations/xcode/Package.md`.
 
-Base your Debug configuration on `integrations/xcode/Splice.xcconfig`, then add
-this package. A UIKit app links `SpliceRuntime`; a SwiftUI app links
-`SpliceSwiftUI`, which brings and re-exports the runtime. Call `Splice.start()`
+Base your Debug configuration on `integrations/xcode/Ember.xcconfig`, then add
+this package. A UIKit app links `EmberRuntime`; a SwiftUI app links
+`EmberSwiftUI`, which brings and re-exports the runtime. Call `Ember.start()`
 once at launch; it needs no `#if` around it, because both products compile
 their active code only for Debug.
 
 A SwiftUI View whose `body` should reload adds two explicit boundaries:
 
 ``` swift
-import SpliceSwiftUI
+import EmberSwiftUI
 
 struct ReceiptView: View {
-    @ObserveSplice private var splice
+    @ObserveEmber private var ember
 
     var body: some View {
         ReceiptContents()
-            .enableSplice()
+            .emberable()
     }
 }
 ```
@@ -91,20 +91,20 @@ struct ReceiptView: View {
 The observer makes SwiftUI evaluate the replaced body after a patch, and the
 outermost modifier pins the value SwiftUI stores to `AnyView`. Adding the two
 lines changes the View's layout, so do it before launching the session and
-rebuild once. The source file must import `SpliceSwiftUI` directly so the
+rebuild once. The source file must import `EmberSwiftUI` directly so the
 conservative classifier can prove that both names are this package's API. Both
 opt-ins are no-ops in Release.
 
-`Splice.start()` also decides what a UIKit app does when a patch lands. By
+`Ember.start()` also decides what a UIKit app does when a patch lands. By
 default it invalidates layout and reloads lists, which is what makes the edit
-visible; `Splice.start(refresh: .none)` turns that off if the app would rather
+visible; `Ember.start(refresh: .none)` turns that off if the app would rather
 do it itself.
 
 Then check the setup and start watching:
 
 ```
-swift-splice doctor --project App.xcodeproj --scheme App
-swift-splice watch  --project App.xcodeproj --scheme App
+swift-ember doctor --project App.xcodeproj --scheme App
+swift-ember watch  --project App.xcodeproj --scheme App
 ```
 
 For a physical device, build and run the Debug app on that device once, then
@@ -113,9 +113,9 @@ select its CoreDevice identifier:
 ```
 xcrun devicectl list devices
 
-swift-splice doctor --project App.xcodeproj --scheme App \
+swift-ember doctor --project App.xcodeproj --scheme App \
   --device <CoreDevice-ID>
-swift-splice watch --project App.xcodeproj --scheme App \
+swift-ember watch --project App.xcodeproj --scheme App \
   --device <CoreDevice-ID>
 ```
 
@@ -178,8 +178,8 @@ they reach. Concretely:
   Most method bodies in most types touch private state;
 - **declarations you just added**. A new helper is carried in the patch rather
   than replacing anything, since nothing already running could be calling it;
-- **opted-in SwiftUI `body`**. A View with `@ObserveSplice` in the same file and
-  `.enableSplice()` as the body's outermost expression may change its whole
+- **opted-in SwiftUI `body`**. A View with `@ObserveEmber` in the same file and
+  `.emberable()` as the body's outermost expression may change its whole
   tree. In the measured `List` case, `Text` became a `VStack`, the screen
   updated, the process stayed alive, and the View's existing `@State` kept the
   same identity;
@@ -187,7 +187,7 @@ they reach. Concretely:
   `@objc` action, a data source method --- anything UIKit calls again reaches
   the replacement, on the controller that is already on screen. The runtime
   invalidates layout and reloads lists after a patch lands, so the edit shows
-  up without a tap; `Splice.RefreshOptions` is how an app turns that off.
+  up without a tap; `Ember.RefreshOptions` is how an app turns that off.
 
   `viewDidLoad` is the exception, and `watch` says so rather than letting you
   wonder: it has already run, so the new body reaches the next controller of
@@ -202,11 +202,11 @@ section 7.3b is where those two numbers come from.
 ## Layout
 
 ```
-Tools/swift-splice/    host-only package; owns the SwiftSyntax dependency
-  Sources/SpliceCore   shared types: build context, wire protocol, diagnostics
-  Sources/SpliceGen    SwiftSyntax: what changed, and what to generate for it
-  Sources/SpliceDaemon watching, compiling, talking to the app
-  Sources/SpliceCLI    swift-splice doctor | watch | status
+Tools/swift-ember/    host-only package; owns the SwiftSyntax dependency
+  Sources/EmberCore   shared types: build context, wire protocol, diagnostics
+  Sources/EmberGen    SwiftSyntax: what changed, and what to generate for it
+  Sources/EmberDaemon watching, compiling, talking to the app
+  Sources/EmberCLI    swift-ember doctor | watch | status
   Tests/               classifier, generated-patch, and daemon tests
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary
@@ -278,7 +278,7 @@ replaced body does run when SwiftUI evaluates that view --- it renders. What it
 also does, when the body's concrete type changes and the view is a row of a
 `List`, is abort the process: the eraser stores its child in a generic box that
 the graph downcasts to the type it saw first. Adding `.padding()` is enough.
-`.enableSplice()` moves the changing tree behind an `AnyView` that is present
+`.emberable()` moves the changing tree behind an `AnyView` that is present
 from the first build; it is an explicit opt-in, not a reason to weaken the
 default refusal. `DESIGN.md` section 13.1 has the original measurements and
 section 13.4 has the opt-in result.

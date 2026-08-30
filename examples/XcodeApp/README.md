@@ -1,6 +1,6 @@
 # XcodeApp
 
-A real `.xcodeproj`, wired to swift-splice the way a project would be. Where
+A real `.xcodeproj`, wired to swift-ember the way a project would be. Where
 `CounterApp` assembles its bundle from a shell script so the flags are visible,
 this one goes through Xcode and its build settings, which is the case that has
 to work for anyone else to use this.
@@ -14,9 +14,9 @@ xcodebuild -project examples/XcodeApp/XcodeApp.xcodeproj -scheme XcodeApp \
            -configuration Debug \
            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 
-swift-splice doctor --project examples/XcodeApp/XcodeApp.xcodeproj \
+swift-ember doctor --project examples/XcodeApp/XcodeApp.xcodeproj \
                     --scheme XcodeApp --sources examples/XcodeApp/Sources
-swift-splice watch  --project examples/XcodeApp/XcodeApp.xcodeproj \
+swift-ember watch  --project examples/XcodeApp/XcodeApp.xcodeproj \
                     --scheme XcodeApp --sources examples/XcodeApp/Sources
 ```
 
@@ -29,7 +29,7 @@ reload stands and `watch` says the method has already run. Running from Xcode it
 only needs the project, the scheme, and a running process.
 
 `ContentView.body` is opted into SwiftUI replacement too. Its source imports
-`SpliceSwiftUI`, declares `@ObserveSplice`, and applies `.enableSplice()` to
+`EmberSwiftUI`, declares `@ObserveEmber`, and applies `.emberable()` to
 the outermost body expression. You can therefore change the body tree itself;
 the loaded generation invalidates the existing View and the explicit
 `AnyView` boundary keeps a concrete-type change safe.
@@ -38,28 +38,28 @@ the loaded generation invalidates the existing View and the explicit
 
 Two steps.
 
-**Base the Debug configuration on `integrations/xcode/Splice.xcconfig`.** It
+**Base the Debug configuration on `integrations/xcode/Ember.xcconfig`.** It
 sets the four things that make a binary patchable, and `doctor` names each one
 separately when it is missing, so a half-configured project gets told which
 half.
 
-**Add the package and link `SpliceSwiftUI`.** It re-exports `SpliceRuntime`, so
+**Add the package and link `EmberSwiftUI`.** It re-exports `EmberRuntime`, so
 one product supplies both the loader and the SwiftUI opt-in API. A UIKit-only
-app can link `SpliceRuntime` directly. The active code is compiled only when
-`SPLICE_ENABLED` is defined, which the package does for Debug and only Debug.
+app can link `EmberRuntime` directly. The active code is compiled only when
+`EMBER_ENABLED` is defined, which the package does for Debug and only Debug.
 A Release build carries inert entry points, so call sites need no `#if`:
 
 ```swift
 import SwiftUI
-import SpliceSwiftUI
+import EmberSwiftUI
 
 struct Screen: View {
-    @ObserveSplice private var splice
+    @ObserveEmber private var ember
 
     var body: some View {
         Content()
-            .onAppear { Splice.start { status in ... } }
-            .enableSplice()
+            .onAppear { Ember.start { status in ... } }
+            .emberable()
     }
 }
 ```

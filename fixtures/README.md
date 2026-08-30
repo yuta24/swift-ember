@@ -52,7 +52,7 @@ so the value predates the patch.
 | key | default | meaning |
 | --- | --- | --- |
 | `PLATFORMS` | `macos simulator` | where the case can build; elsewhere it is skipped and named |
-| `EXTRA_SOURCES` | | repository-relative sources compiled into the application, with `SPLICE_ENABLED` defined |
+| `EXTRA_SOURCES` | | repository-relative sources compiled into the application, with `EMBER_ENABLED` defined |
 | `HARNESS_SOURCE` | `Harness/Harness.swift` | fixture-relative driver source; override when the event under test must span patch loading |
 | `SUPPORTED` | `yes` | whether the change is meant to be hot reloadable |
 | `KIND` | `replace` | `replace`, `reject-compile`, `crash`, or `unsafe` |

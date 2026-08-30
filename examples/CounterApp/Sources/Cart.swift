@@ -33,10 +33,10 @@ final class Cart: ObservableObject {
         reloadLog.append(line)
     }
 
-    #if SPLICE_ENABLED
+    #if EMBER_ENABLED
     /// Mirrors the runtime's status into the view. The runtime knows nothing
     /// about SwiftUI, so the adapting happens here rather than there.
-    func apply(_ status: Splice.Status) {
+    func apply(_ status: Ember.Status) {
         connected = status.connected
         reloadLog = status.lines
     }

@@ -6,7 +6,7 @@
 
 extension Cart {
     @_dynamicReplacement(for: subtotalLabel())
-    func splice_g1_subtotalLabel() -> String {
+    func ember_g1_subtotalLabel() -> String {
         let dollars = Double(subtotalCents) / 100
         return String(format: "$%.2f across %d item(s)", dollars, items.count)
     }

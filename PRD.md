@@ -250,9 +250,9 @@ and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
     them replacement keys like any other declaration; the patch names them
     through `@_private(sourceFile:)`. Without the setting they are refused at
     COMPILE with the setting spelled out,
--   a SwiftUI `body` change when the file imports `SpliceSwiftUI` directly, the
-    enclosing View declares an instance `@ObserveSplice` stored property in
-    that file, and the body's outermost expression is `.enableSplice()` before
+-   a SwiftUI `body` change when the file imports `EmberSwiftUI` directly, the
+    enclosing View declares an instance `@ObserveEmber` stored property in
+    that file, and the body's outermost expression is `.emberable()` before
     and after the edit. The observer causes SwiftUI to evaluate the replacement
     after load; the modifier fixes the stored child at `AnyView`. A `Text` to
     `VStack` change in a `List` renders without an abort and preserves the
@@ -323,7 +323,7 @@ compiler/toolchain rather than shipping a separately versioned Swift
 compiler.
 
 For an Xcode project this is satisfied by
-`swift-splice --project X.xcodeproj --scheme Y`, which reads the
+`swift-ember --project X.xcodeproj --scheme Y`, which reads the
 resolved build settings from `xcodebuild` rather than asking the project
 to maintain a manifest. See `DESIGN.md` section 6.2 for why the settings
 rather than the literal compile invocation.
@@ -538,7 +538,7 @@ container transfer and requires a Development-signed patch with the same Team
 ID as the application.
 
 Core function replacement carries no special deployment-target floor beyond
-the package minimum. Neither does `SpliceSwiftUI`: it places its own `AnyView`
+the package minimum. Neither does `EmberSwiftUI`: it places its own `AnyView`
 boundary outside the changing tree rather than depending on
 `DebugReplaceableView`. The original failure still differs by target --- the
 unannotated `List` case aborts where `DebugReplaceableView` is selected and
@@ -688,7 +688,7 @@ section 12 isolation requirement made executable.
 ### M2 --- Automated local loop
 
 Complete. Saving a method body in `examples/CounterApp/Sources/Cart.swift`
-while `swift-splice watch` is running changes the running app.
+while `swift-ember watch` is running changes the running app.
 
 -   [x] File watcher.
 -   [x] Build-command capture, as a manifest the application's build emits.
@@ -733,9 +733,9 @@ The suites divide by what they are accountable for:
 
 ``` text
 fixtures/run.sh          what the Swift toolchain does      24 cases
-SpliceGenTests           what the classifier decides        49 tests
-SpliceEndToEndTests      what the generated patch does      16 tests
-SpliceDaemonTests        what the daemon does under load     8 tests
+EmberGenTests           what the classifier decides        49 tests
+EmberEndToEndTests      what the generated patch does      16 tests
+EmberDaemonTests        what the daemon does under load     8 tests
 ```
 
 The end-to-end suite is the one M3 was really missing. It takes a real
@@ -760,7 +760,7 @@ an explicit boundary then made the useful subset safe.
 -   [x] Investigate `DebugReplaceableView` and current Xcode behaviour.
 -   [x] Determine opaque-result-type constraints.
 -   [x] Demonstrate a state-preserving SwiftUI edit. With
-    `@ObserveSplice` and an outermost `.enableSplice()`, a `Text` row became a
+    `@ObserveEmber` and an outermost `.emberable()`, a `Text` row became a
     two-child `VStack` in a live `List`; the new tree rendered, the heartbeat
     continued, and the View's `@State` UUID was unchanged.
 
@@ -783,17 +783,19 @@ later, for a view that is a row of a `List`. Adding `.padding()` is
 enough to trigger it.
 
 The opt-in does not attempt to infer that the concrete type stayed equal.
-`.enableSplice()` returns `AnyView` in Debug from the first build onward, so
+`.emberable()` returns `AnyView` in Debug from the first build onward, so
 the `DebugReplaceableView` storage sees the same child type in every
-generation. `@ObserveSplice` subscribes the enclosing View to the runtime's
+generation. `@ObserveEmber` subscribes the enclosing View to the runtime's
 generation event, which makes the replaced getter run even when application
 state would not otherwise invalidate it. The source must import
-`SpliceSwiftUI` unconditionally at top level. Generated patch source assigns
-the edited outer call to `SwiftUI.AnyView`, whose result context selects the
-erasing overload over a same-spelled overload returning `Self`. The daemon
-reserves `enableSplice` across watched files in the same module to protect the
-running generation, whose original overload resolution cannot be reproduced
-in the patch module. In Release the modifier returns
+`EmberSwiftUI` unconditionally at top level. Generated patch source first
+infers the edited outer call without an expected result type, then assigns the
+inferred value to `SwiftUI.AnyView`. A same-spelled imported overload returning
+`Self` is therefore selected as it was in the app and rejected before load,
+rather than being hidden by contextual overload selection. The daemon reserves
+`emberable` across watched files in the same module to protect the running
+generation, because those declarations are not visible from the patch module.
+In Release the modifier returns
 `Self` and the observer has no storage.
 
 `DESIGN.md` section 13.1 has the measurements and both earlier answers.
