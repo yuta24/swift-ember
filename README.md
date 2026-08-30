@@ -51,7 +51,29 @@ configuring the project.
 
 ### Host CLI
 
-Build the `0.1.0` host CLI from source and put it on your `PATH`:
+Download the `0.1.0` binary and install it in `$HOME/.local/bin`:
+
+```sh
+version=0.1.0
+curl -fL \
+  "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip" \
+  -o swift-ember.zip
+curl -fL \
+  "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip.sha256" \
+  -o swift-ember.zip.sha256
+shasum -a 256 --check swift-ember.zip.sha256
+unzip swift-ember.zip
+./swift-ember/install.sh "$HOME/.local"
+```
+
+Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
+check the installation with `swift-ember --help`.
+
+Each release also includes `swift-ember.artifactbundle.zip` for SwiftPM binary
+targets and build-tool plugins. Normal command-line installation should use
+`swift-ember.zip` above.
+
+To build the host CLI from source instead:
 
 ```sh
 git clone --branch 0.1.0 --depth 1 https://github.com/yuta24/swift-ember.git
@@ -62,9 +84,6 @@ install -m 755 \
   "$(swift build -c release --package-path Tools/swift-ember --show-bin-path)/swift-ember" \
   "$HOME/.local/bin/swift-ember"
 ```
-
-Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
-check the installation with `swift-ember --help`.
 
 Use a release build of the host tool. Classification is SwiftSyntax parsing,
 and unoptimised it costs fourteen times as much — enough to be most of the loop

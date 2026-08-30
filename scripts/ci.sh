@@ -20,7 +20,7 @@ cd "$ROOT"
 # Stages that need a booted simulator are listed separately rather than
 # inferred, so that skipping "the simulator" does not quietly skip a build that
 # never needed one.
-ALWAYS_STAGES="toolchain script-tests build tests fixtures runtime-toolchains xcode-build"
+ALWAYS_STAGES="toolchain script-tests build release-assets tests fixtures runtime-toolchains xcode-build"
 SIMULATOR_STAGES="simulator fixtures-simulator examples ui-fixtures doctor"
 ALL_STAGES="$ALWAYS_STAGES $SIMULATOR_STAGES"
 
@@ -114,6 +114,15 @@ build_package() {
 }
 
 run_tests() { swift test --package-path "$TOOL_PACKAGE"; }
+
+check_release_assets() {
+    local output result
+    output="$(mktemp -d)" || return 1
+    "$ROOT/scripts/package-release.sh" 0.0.0 "$output"
+    result=$?
+    rm -rf "$output"
+    return "$result"
+}
 
 run_fixtures() { ./fixtures/run.sh; }
 
@@ -283,6 +292,7 @@ mkdir -p "$RESULTS_DIR"
 step toolchain check_toolchain
 step script-tests bash "$ROOT/scripts/tests.sh"
 step build build_package
+step release-assets check_release_assets
 step tests run_tests
 step fixtures ./fixtures/run.sh --results "$RESULTS_DIR/macos.yaml"
 step runtime-toolchains check_runtime_across_toolchains

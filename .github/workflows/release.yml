@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package release
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate the release tag
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tags must have the form major.minor.patch" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor \
+            "$GITHUB_SHA" "origin/${{ github.event.repository.default_branch }}" || {
+              echo "the release commit must be on the default branch" >&2
+              exit 1
+            }
+
+      - name: Select the Xcode toolchain
+        run: |
+          scripts/select-xcode.sh --list
+          developer_dir="$(scripts/select-xcode.sh)"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+
+      - name: Test the host tool
+        run: swift test --package-path Tools/swift-ember
+
+      - name: Package and verify the release assets
+        run: scripts/package-release.sh "$GITHUB_REF_NAME"
+
+      # A rerun may find the draft created by an earlier attempt. Replacing
+      # assets on a draft is safe; replacing an already published release is
+      # not, so that case deliberately fails.
+      - name: Create the draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(
+            dist/swift-ember.zip
+            dist/swift-ember.zip.sha256
+            dist/swift-ember.artifactbundle.zip
+            dist/swift-ember.artifactbundle.zip.sha256
+          )
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" \
+              --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != true ]; then
+              echo "release $GITHUB_REF_NAME is already published" >&2
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --draft \
+              --generate-notes \
+              --title "swift-ember $GITHUB_REF_NAME" \
+              --verify-tag
