@@ -4,6 +4,7 @@
 #
 #   scripts/ci.sh                     everything
 #   scripts/ci.sh --skip-simulator    only the stages that need no simulator
+#   scripts/ci.sh --profile pull-request  the faster pull request suite
 #   scripts/ci.sh --only <stage>      one stage; --list-stages to see them
 #
 # Keeping this out of the workflow file is deliberate. PRD.md section 13 asks
@@ -26,13 +27,17 @@ ALL_STAGES="$ALWAYS_STAGES $SIMULATOR_STAGES"
 
 SKIP_SIMULATOR=0
 ONLY=""
+PROFILE=""
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-simulator) SKIP_SIMULATOR=1; shift ;;
         --list-stages) printf '%s\n' $ALL_STAGES; exit 0 ;;
+        --profile)
+            if [ $# -lt 2 ]; then echo "--profile needs a profile name" >&2; exit 64; fi
+            PROFILE="$2"; shift 2 ;;
         --only)
             # Explicit, because `set -u` would otherwise kill the script with
             # "$2: unbound variable" and exit 127 instead of saying anything.
@@ -42,6 +47,11 @@ while [ $# -gt 0 ]; do
         *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
 done
+
+if [ -n "$ONLY" ] && [ -n "$PROFILE" ]; then
+    echo "--only and --profile cannot be used together" >&2
+    exit 64
+fi
 
 # A name that matches no stage used to skip everything and report success,
 # which is the failure this whole script exists to make impossible elsewhere.
@@ -53,6 +63,22 @@ if [ -n "$ONLY" ]; then
            exit 64 ;;
     esac
 fi
+
+case "$PROFILE" in
+    "") RUN_STAGES="$ALL_STAGES" ;;
+    pull-request)
+        RUN_STAGES="toolchain script-tests build release-assets tests fixtures"
+        ;;
+    pull-request-oldest)
+        RUN_STAGES="toolchain build tests"
+        ;;
+    *)
+        echo "unknown profile: $PROFILE" >&2
+        echo "profiles: pull-request pull-request-oldest" >&2
+        exit 64
+        ;;
+esac
+if [ -n "$ONLY" ]; then RUN_STAGES="$ONLY"; fi
 
 # Pick the toolchain here rather than in the workflow, so that a local run and
 # a CI run are the same run. An explicit DEVELOPER_DIR still wins.
@@ -66,7 +92,10 @@ failures=""
 
 step() {
     local name="$1"; shift
-    if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then return 0; fi
+    case " $RUN_STAGES " in
+        *" $name "*) ;;
+        *) return 0 ;;
+    esac
     printf '\n\033[1m==> %s\033[0m\n' "$name"
     ran=$((ran + 1))
     if "$@"; then

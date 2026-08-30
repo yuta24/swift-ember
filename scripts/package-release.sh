@@ -2,8 +2,8 @@
 #
 # Build the host CLI and package the two assets attached to a GitHub Release:
 #
-#   scripts/package-release.sh 0.1.0
-#   scripts/package-release.sh 0.1.0 /path/to/output
+#   scripts/package-release.sh 0.1.1
+#   scripts/package-release.sh 0.1.1 /path/to/output
 #
 # swift-ember.zip is for direct installation. The artifact bundle contains the
 # same executable in the structured form consumed by SwiftPM binary targets.
@@ -29,8 +29,8 @@ SOURCE_BINARY="$BIN_DIR/swift-ember"
 test -x "$SOURCE_BINARY" || { echo "release executable not found: $SOURCE_BINARY" >&2; exit 1; }
 
 # Sign one payload and copy that exact file into both archives. A Developer ID
-# signature can replace this step later; 0.1.0 deliberately uses ad-hoc signing
-# and therefore needs no repository secret.
+# signature can replace this step later; current releases deliberately use
+# ad-hoc signing and therefore need no repository secret.
 PAYLOAD_BINARY="$WORK_DIR/swift-ember"
 cp "$SOURCE_BINARY" "$PAYLOAD_BINARY"
 chmod 755 "$PAYLOAD_BINARY"
