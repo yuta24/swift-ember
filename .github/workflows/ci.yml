@@ -23,7 +23,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-26]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Images rotate what they ship. Choosing here, against the floor recorded
       # beside the measurements that justify it, keeps a red build meaningful:
@@ -45,7 +45,7 @@ jobs:
       # toolchain are not reusable by another, and a cache that ignores that
       # produces failures nobody can reproduce.
       - name: Cache the package build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .build
@@ -64,7 +64,7 @@ jobs:
       # a runner had produced them.
       - name: Upload the measured matrix
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fixtures-${{ matrix.runner }}
           path: .ci-results/*.yaml
@@ -81,7 +81,7 @@ jobs:
     name: oldest available toolchain
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Select the oldest toolchain at or above the floor
         run: |
           scripts/select-xcode.sh --list
