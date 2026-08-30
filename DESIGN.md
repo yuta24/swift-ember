@@ -2275,7 +2275,7 @@ actually run, not inferred:
 local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
-local, Xcode 26.6    6.3.3   macosx26.0    41/44  44/44 (iOS 26.5)   227/227
+local, Xcode 26.6    6.3.3   macosx26.0    41/44  44/44 (iOS 26.5)   226/226
 local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   203/203
 local, Xcode 27.0b6  6.4     macosx26.0    41/44  44/44 (iOS 27.0)   203/203
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
@@ -2287,7 +2287,7 @@ the test suite with it. A current host result reads 41 of 44 rather than a
 failure: the three UIKit cases are Simulator-only and are skipped by name,
 which `fixtures/run.sh` counts separately. Xcode 26.6 and 27.0 Beta 6 have
 both been run against the current 44-case matrix. The Xcode 26.6 row is the
-newest full run and includes the current 227-test suite; the other rows report
+newest full run and includes the current 226-test suite; the other rows report
 the matrix and suite exactly as they stood when each was measured.
 
 Of the cases added after the 26-case rows, thirteen were also run separately
