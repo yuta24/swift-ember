@@ -23,24 +23,26 @@ that `DESIGN.md` section 20 asks for, generated from actual runs rather than
 maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
-Both checked-in result files come from Xcode 27.0 Beta 4; the Simulator run
-used an iPhone 17 Pro on iOS 27.0. All 43 cases pass on the Simulator; the three UIKit cases have nothing to
-say on the host and are skipped there, leaving 40.
+Both checked-in result files come from Xcode 27.0 Beta 6; the Simulator run
+used an iPhone 17 Pro on iOS 27.0. All 44 cases pass on the Simulator; the
+three UIKit cases have nothing to say on the host and are skipped there,
+leaving 41.
 
 ## Case layout
 
 ```
 Cases/<id>/
-├── App.swift       defines `probe() async throws -> [String]`
+├── App.swift       defines `probe()`, or the entry points a custom harness uses
 ├── Patch.swift     the replacement (or Patch1.swift, Patch2.swift, ...)
 ├── expected.txt    exact stdout, one line per generation
 └── case.conf       optional overrides
 ```
 
-`Harness/Harness.swift` supplies `@main`. It prints `probe()` output once as
-`g0`, loads each patch in turn, and reprints as `g1`, `g2`, and so on. Output
-is unbuffered so a case that crashes still leaves its earlier generations on
-stdout.
+`Harness/Harness.swift` is the default `@main`. It prints `probe()` output once
+as `g0`, loads each patch in turn, and reprints as `g1`, `g2`, and so on.
+Output is unbuffered so a case that crashes still leaves its earlier
+generations on stdout. A case can select a purpose-built driver with
+`HARNESS_SOURCE` when its event must span the patch load itself.
 
 Cases that need to observe state preservation keep their subject in a global,
 so the value predates the patch.
@@ -51,6 +53,7 @@ so the value predates the patch.
 | --- | --- | --- |
 | `PLATFORMS` | `macos simulator` | where the case can build; elsewhere it is skipped and named |
 | `EXTRA_SOURCES` | | repository-relative sources compiled into the application, with `SPLICE_ENABLED` defined |
+| `HARNESS_SOURCE` | `Harness/Harness.swift` | fixture-relative driver source; override when the event under test must span patch loading |
 | `SUPPORTED` | `yes` | whether the change is meant to be hot reloadable |
 | `KIND` | `replace` | `replace`, `reject-compile`, `crash`, or `unsafe` |
 | `PATCHES` | `Patch.swift` | patch sources, loaded in order |
@@ -60,6 +63,12 @@ so the value predates the patch.
 | `EXPECT_COMPILE_ERROR` | | substring the patch build must emit, for `reject-compile` |
 | `EXPECT_SIGNAL` | | signal number, for `crash` |
 | `NOTE` | | recorded in `results.yaml` |
+
+`async-already-suspended` uses the custom harness to start an async call, wait
+until it has stored a continuation, and only then load the replacement. The
+resumed frame finishes the old implementation, while a call started after the
+load enters the replacement. This pins the rule that patching changes future
+dispatch, not machine code already represented by a suspended stack frame.
 
 ## What the UIKit cases establish
 
@@ -128,9 +137,10 @@ similar programs it has produced the new value, garbage characters, and
 `SIGSEGV`. The determining factor observed so far is whether the opaque type's
 metadata was already resolved before the patch loaded.
 
-It also diverges by target. This case returns the new value on the macOS host
-and crashes on the iOS Simulator, from identical source built by the same
-toolchain. Compare the `observed:` field in the two result files.
+It has also diverged by target and toolchain revision. Under Xcode 27.0 Beta 4
+it returned the new value on the macOS host and crashed on the iOS Simulator;
+under Beta 6 it crashes on both. Compare the generated `observed:` field with
+the compatibility history in `DESIGN.md` section 20.
 
 Because the outcome is undefined, that case records what happened instead of
 asserting a specific result. Pinning an expectation to undefined behavior would

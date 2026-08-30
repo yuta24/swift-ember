@@ -650,7 +650,7 @@ patchable, since the block is residue, and a removed declaration is a rebuild.
 `-Xfrontend -enable-private-imports` on the module's build, and
 `@_private(sourceFile:)` on the patch's import.
 
-Measured on Xcode 26.2 through 27.0 Beta 4, on the macOS host and on an iOS
+Measured on Xcode 26.2 through 27.0 Beta 6, on the macOS host and on an iOS
 Simulator, and pinned by seven fixtures:
 
 ``` text
@@ -1064,7 +1064,8 @@ p.f()
 
 ### 12.6 async/await and actors
 
-Treat as experimental until tested.
+These shapes require direct fixtures because suspension splits one invocation
+across two points in time.
 
 Fixtures must cover:
 
@@ -1075,17 +1076,18 @@ Fixtures must cover:
 -   task already suspended when patch loads,
 -   invocation started after patch loads.
 
-Expected initial semantic rule:
+Verified semantic rule:
 
 > Existing stack frames continue executing old machine code; future
 > calls may use the replacement.
 
-This must be verified.
-
 Measured (Appendix A): `async`, `throws`, `async throws`, `actor`
 instance methods and `@MainActor` methods all replace successfully with
-state preserved, for invocations started after the patch loads. The
-already-suspended-task case is still owed.
+state preserved, for invocations started after the patch loads. A call already
+suspended at an `await` finishes its old frame after the patch loads, while a
+later invocation enters the replacement. The suspended case passes on the
+macOS host under Swift 6.2.3, 6.3.2, 6.3.3, and 6.4, and on an iOS 27.0
+Simulator under Swift 6.4.
 
 ### 12.7 Opaque result types are memory-unsafe to change
 
@@ -2260,11 +2262,11 @@ toolchains:
       implicit_dynamic: true
       dynamic_replacement: true
       struct_method: tested
-      async_method: experimental
+      async_method: tested
       swiftui: experimental
 ```
 
-Four toolchains measured, three of them shipping releases. Every entry
+Five toolchains measured, four of them shipping releases. Every entry
 below is `fixtures/run.sh` and `swift test --package-path Tools/swift-splice`
 actually run, not inferred:
 
@@ -2274,15 +2276,17 @@ local, Xcode 26.2    6.2.3   macosx26.0    26/26  26/26 (iOS 26.2)   109/109
 local, Xcode 26.3    6.2.4   macosx26.0    26/26  not run            109/109
 local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   203/203
+local, Xcode 27.0b6  6.4     macosx26.0    41/44  44/44 (iOS 27.0)   203/203
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
 
-The counts differ by row because the matrix grew, from 26 cases to 43, and
-the test suite with it. The host column reads 40 of 43 rather than a
+The counts differ by row because the matrix grew, from 26 cases to 44, and
+the test suite with it. The current host column reads 41 of 44 rather than a
 failure: the three UIKit cases are Simulator-only and are skipped by
-name, which `fixtures/run.sh` counts separately. Only the Xcode 27.0b4 row has been re-run against the
-current matrix; the others report what they were actually measured against.
+name, which `fixtures/run.sh` counts separately. Only the Xcode 27.0b6 row has
+been re-run against the current matrix; the others report what they were
+actually measured against.
 Of the seventeen cases added since those rows, thirteen were run separately
 on the host under Xcode 26.2, 26.3 and 26.5 and pass on all three ---
 including the seven that depend on `-enable-private-imports`, which
@@ -2290,25 +2294,29 @@ matters most, since that is a second undocumented frontend option. The
 other four --- the three UIKit cases and `registered-replacements` --- have
 been run only on Xcode 27.0b4. Nothing suggests the older rows would differ,
 but a row is not re-measured until it is re-run.
+The forty-fourth case, covering an already-suspended async call, was run
+separately on the host under Xcode 26.2, 26.5, 26.6, and 27.0b6; it passes on
+all four.
 
 The last two rows come from `.ci-results/*.yaml` uploaded by the run,
-not from anything committed here, and they cover two things no machine
-here can: Swift 6.3.3, which is not installed locally, and a macOS 15
-deployment target, which is where `some View` erases to `AnyView`
-instead of `DebugReplaceableView`. That difference is what the first CI
-run caught.
+not from anything committed here. They independently cover Swift 6.3.3 and,
+on a runner this machine cannot reproduce, a macOS 15 deployment target where
+`some View` erases to `AnyView` instead of `DebugReplaceableView`. That
+difference is what the first CI run caught. Xcode 26.6 / Swift 6.3.3 is now
+installed locally too, but only the new suspended-async case has been run on
+it; that targeted result is not presented as another full-matrix row.
 
-Nothing measured differs between them. The SwiftUI erasure to
-`DebugReplaceableView` is present on all four, and a full reload of the
-sample app works on Xcode 26.5 at 434 ms.
+No supported result has differed where the same case was measured on more than
+one configuration. The SwiftUI erasure to `DebugReplaceableView` is present on
+all measured local toolchains, and a full reload of the sample app works on
+Xcode 26.5 at 434 ms.
 
-The unsafe cases are the exception, and they differ by *target* rather
-than by toolchain: `opaque-inside-a-type` produces SIGSEGV everywhere,
-while `opaque-result-type-changed` produces SIGSEGV on the Simulator and
-`exit 0; g0: old g1: 42` on the host. Both files record what they
-observed; an earlier sentence here claimed SIGSEGV for all of them,
-which the results files have never agreed with. Undefined is undefined,
-which is the conclusion those cases exist to support.
+The unsafe cases are the exception. `opaque-inside-a-type` produces SIGSEGV
+everywhere. `opaque-result-type-changed` produced
+`exit 0; g0: old g1: 42` on the Xcode 27.0 Beta 4 host, but SIGSEGV on that
+Simulator and on both targets under Beta 6. The checked-in result files record
+the latest observation. Undefined is undefined, across targets and now across
+toolchain revisions too, which is the conclusion those cases exist to support.
 
 Reproduce a row with:
 
@@ -2722,14 +2730,14 @@ baseline. Do not generalize these results across Xcode versions.
 ### A.1 Environment
 
 ``` text
-Xcode       27.0 Beta 4
-swiftc      Apple Swift version 6.4 (swiftlang-6.4.0.27.1 clang-2100.3.27.1)
+Xcode       27.0 Beta 6
+swiftc      Apple Swift version 6.4 (swiftlang-6.4.0.33.1 clang-2100.3.33.1)
 host        arm64-apple-macosx26.0
 simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
 ```
 
-The matrix was run on both targets. All 43 cases pass on the Simulator;
-40 pass on the host, the other three being UIKit cases that are skipped
+The matrix was run on both targets. All 44 cases pass on the Simulator;
+41 pass on the host, the other three being UIKit cases that are skipped
 there by name. Every result below holds for both except where noted.
 
 Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
@@ -2775,6 +2783,7 @@ protocol witness, direct call                 replaced
 protocol witness, existential call            replaced
 protocol extension default                    replaced
 async function                                replaced
+async call suspended before patch             old frame finishes; later call replaced
 throws function                               replaced
 async throws function                         replaced
 actor instance method                         replaced, state preserved

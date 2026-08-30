@@ -13,7 +13,6 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-HARNESS="$ROOT/Harness/Harness.swift"
 BUILD="${BUILD_DIR:-$ROOT/.build}"
 MODULE=Fixture
 
@@ -67,6 +66,7 @@ for dir in "$ROOT"/Cases/*/; do
         id="$(basename "$dir")"
         PLATFORMS="macos simulator"
         EXTRA_SOURCES=""
+        HARNESS_SOURCE="Harness/Harness.swift"
         # shellcheck disable=SC1090
         . "$dir/case.conf"
         [ -n "$PLATFORMS" ] || { echo "$id: PLATFORMS is empty" >&2; exit 64; }
@@ -82,6 +82,10 @@ for dir in "$ROOT"/Cases/*/; do
                 exit 64
             }
         done
+        [ -f "$ROOT/$HARNESS_SOURCE" ] || {
+            echo "$id: HARNESS_SOURCE names a file that does not exist: $HARNESS_SOURCE" >&2
+            exit 64
+        }
     ) || exit 64
 done
 
@@ -105,6 +109,9 @@ for dir in "$ROOT"/Cases/*/; do
     # the repository root. One case uses it to run the runtime's own reader
     # against a real loaded image rather than against a description of one.
     EXTRA_SOURCES=""
+    # Most cases use the generation-at-a-time driver. A concurrency fixture
+    # can replace it when the event under test has to straddle patch loading.
+    HARNESS_SOURCE="Harness/Harness.swift"
     APP_TESTABILITY=yes
     APP_PRIVATE_IMPORTS=yes
     STATE_PRESERVED=no
@@ -161,7 +168,7 @@ for dir in "$ROOT"/Cases/*/; do
             -module-name "$MODULE" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \
             -emit-executable -o "$out/app" \
-            "$HARNESS" "$dir/App.swift" > "$out/app-build.log" 2>&1; then
+            "$ROOT/$HARNESS_SOURCE" "$dir/App.swift" > "$out/app-build.log" 2>&1; then
         verdict=FAIL; detail="application build failed; see $out/app-build.log"
     fi
 
@@ -223,6 +230,10 @@ for dir in "$ROOT"/Cases/*/; do
             fi
         elif [ $status -ne 0 ]; then
             verdict=FAIL; detail="exited with status $status"
+            if [ $status -eq 70 ]; then
+                timeout_detail="$(grep -m1 '^fixture-timeout:' "$out/actual.txt")"
+                [ -n "$timeout_detail" ] && detail="$detail; $timeout_detail"
+            fi
         elif diff -q "$dir/expected.txt" "$out/actual.txt" > /dev/null; then
             verdict=PASS
         else

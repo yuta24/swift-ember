@@ -221,7 +221,7 @@ Every detected edit MUST be classified before application.
 
 ### Tier A: Hot patch
 
-Verified against Xcode 27.0 Beta 4 / Swift 6.4 on both the macOS host
+Verified against Xcode 27.0 Beta 6 / Swift 6.4 on both the macOS host
 and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
 
 -   function body change,
@@ -520,9 +520,10 @@ Every pipeline stage SHOULD emit timing telemetry locally for profiling.
 
 -   A patch MUST be produced using the same selected Xcode/Swift
     toolchain as the original build.
--   Verified on Xcode 26.2 through 27.0 Beta 4. Nothing measured differs
-    between them; see `DESIGN.md` section 20 for the matrix and for the
-    one toolchain-specific workaround the exercise turned up.
+-   Evidence spans Xcode 26.2 through 27.0 Beta 6. No supported case has
+    differed in the configurations where it was measured; see `DESIGN.md`
+    section 20 for the exact matrix and for the toolchain-specific behavior
+    the exercise turned up.
 -   Cross-toolchain patching is unsupported.
 -   Underscored compiler/runtime behavior is treated as
     version-sensitive.
@@ -654,7 +655,11 @@ this product targets.
 The matrix is checked in as `fixtures/`, runnable with
 `fixtures/run.sh [--platform simulator]`.
 
-Remaining: cover the already-suspended-task case for `async`.
+The already-suspended-task case is covered too. A call suspended at an
+`await` before the patch finishes the old implementation after it resumes;
+a call started after the patch enters the replacement. This is measured on
+the macOS host and iOS Simulator, and across Swift 6.2.3 through 6.4 on the
+host.
 
 ### M1 --- Manual patch PoC
 

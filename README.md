@@ -211,7 +211,7 @@ Tools/swift-splice/    host-only package; owns the SwiftSyntax dependency
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              43 cases pinning what Swift dynamic replacement does,
+fixtures/              44 cases pinning what Swift dynamic replacement does,
                        and 4 more under ui/ that need a rendering process
 examples/CounterApp    a Simulator app built by script, flags in plain sight
 examples/XcodeApp      the same thing as a real .xcodeproj, in SwiftUI
@@ -223,11 +223,13 @@ PRD.md                 scope, tiers, milestones
 ## Requirements
 
 Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
-of iOS 16 or later. Verified on Swift 6.2.3 through 6.4 across six
-configurations, four locally and two on CI — every fixture and every test
-passes on all of them. Physical-device delivery is verified on an arm64 iPhone
-running iOS 26.4 with a binary targeting iOS 16; an actual iOS 16 device has
-not yet been measured.
+of iOS 16 or later. Full-matrix compatibility evidence spans Swift 6.2.3
+through 6.4 across seven configurations, five locally and two on CI. The
+current 44-case matrix and 203-test suite pass in full on Swift 6.4; the newest
+async case also passes separately on local Swift 6.3.3. `DESIGN.md` section 20
+records exactly what was run on each configuration. Physical-device
+delivery is verified on an arm64 iPhone running iOS 26.4 with a binary
+targeting iOS 16; an actual iOS 16 device has not yet been measured.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The
