@@ -47,6 +47,7 @@ public struct Options {
     """
 
     public enum ParseError: Error, CustomStringConvertible {
+        case help
         case usage
         case missingValue(String)
         case unknown(String)
@@ -55,7 +56,7 @@ public struct Options {
 
         public var description: String {
             switch self {
-            case .usage: Options.usage
+            case .help, .usage: Options.usage
             case .missingValue(let flag): "\(flag) needs a value"
             case .unknown(let argument): "unknown argument: \(argument)\n\n\(Options.usage)"
             case .bothContainers: "pass --project or --workspace, not both"
@@ -90,7 +91,7 @@ public struct Options {
             case "--device": options.device = try value(after: argument)
             case "--signing-identity": options.signingIdentity = try value(after: argument)
             case "-h", "--help":
-                throw ParseError.usage
+                throw ParseError.help
             default:
                 guard command == nil, let parsed = Command(rawValue: argument) else {
                     throw ParseError.unknown(argument)

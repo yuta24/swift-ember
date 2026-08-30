@@ -44,11 +44,68 @@ A reload takes about 350 ms and, unlike a build, does not care how big your
 project is. On a module of ten thousand declarations a full build takes 50
 seconds and a patch still takes 352 ms.
 
-Build the daemon with
-`swift build -c release --package-path Tools/swift-ember`. Classification is
-SwiftSyntax parsing, and unoptimised it costs fourteen times as much — enough
-to be most of the loop on a large file. The host tool is a separate package so
-applications that add the root package resolve no SwiftSyntax dependency.
+## Installation
+
+The host CLI and the in-app runtime use the same release. Install both before
+configuring the project.
+
+### Host CLI
+
+Download the `0.1.0` binary and install it in `$HOME/.local/bin`:
+
+```sh
+version=0.1.0
+curl -fL \
+  "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip" \
+  -o swift-ember.zip
+curl -fL \
+  "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip.sha256" \
+  -o swift-ember.zip.sha256
+shasum -a 256 --check swift-ember.zip.sha256
+unzip swift-ember.zip
+./swift-ember/install.sh "$HOME/.local"
+```
+
+Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
+check the installation with `swift-ember --help`.
+
+Each release also includes `swift-ember.artifactbundle.zip` for SwiftPM binary
+targets and build-tool plugins. Normal command-line installation should use
+`swift-ember.zip` above.
+
+To build the host CLI from source instead:
+
+```sh
+git clone --branch 0.1.0 --depth 1 https://github.com/yuta24/swift-ember.git
+cd swift-ember
+swift build -c release --package-path Tools/swift-ember
+mkdir -p "$HOME/.local/bin"
+install -m 755 \
+  "$(swift build -c release --package-path Tools/swift-ember --show-bin-path)/swift-ember" \
+  "$HOME/.local/bin/swift-ember"
+```
+
+Use a release build of the host tool. Classification is SwiftSyntax parsing,
+and unoptimised it costs fourteen times as much — enough to be most of the loop
+on a large file. The host tool is a separate package so applications that add
+the root package resolve no SwiftSyntax dependency.
+
+### In-app runtime
+
+In Xcode, choose **File > Add Package Dependencies**, enter
+`https://github.com/yuta24/swift-ember.git`, and select **Up to Next Minor
+Version** starting at `0.1.0`. Add `EmberRuntime` to a UIKit target, or
+`EmberSwiftUI` to a SwiftUI target; `EmberSwiftUI` brings and re-exports the
+runtime.
+
+In another Swift package, declare the same dependency as:
+
+```swift
+.package(
+    url: "https://github.com/yuta24/swift-ember.git",
+    .upToNextMinor(from: "0.1.0")
+)
+```
 
 ## Try it
 
@@ -61,17 +118,17 @@ examples/CounterApp/demo.sh
 It builds the app, starts the daemon, edits a method body, and screenshots
 before and after. `examples/CounterApp/README.md` walks through what happened.
 
-## Adding it to your project
+## Configuring your project
 
 Two steps, both in Xcode — plus one line per local package, since Xcode does
 not pass the app's compiler flags into package targets. See
 `integrations/xcode/Package.md`.
 
-Base your Debug configuration on `integrations/xcode/Ember.xcconfig`, then add
-this package. A UIKit app links `EmberRuntime`; a SwiftUI app links
-`EmberSwiftUI`, which brings and re-exports the runtime. Call `Ember.start()`
-once at launch; it needs no `#if` around it, because both products compile
-their active code only for Debug.
+Copy `integrations/xcode/Ember.xcconfig` from the checked-out release into your
+project, then base your Debug configuration on it (or include it from the
+Debug `.xcconfig` you already use). Call `Ember.start()` once at launch; it
+needs no `#if` around it, because both products compile their active code only
+for Debug.
 
 A SwiftUI View whose `body` should reload adds two explicit boundaries:
 

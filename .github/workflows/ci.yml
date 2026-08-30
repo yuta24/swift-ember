@@ -86,6 +86,20 @@ jobs:
         run: |
           scripts/select-xcode.sh --list
           oldest="$(scripts/select-xcode.sh --oldest)"
+          version="$(DEVELOPER_DIR=$oldest xcrun swiftc --version 2>/dev/null \
+            | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          test -n "$version" || { echo "could not read a Swift version"; exit 1; }
           echo "DEVELOPER_DIR=$oldest" >> "$GITHUB_ENV"
+          echo "SWIFT_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Cache the package build
+        uses: actions/cache@v6
+        with:
+          path: |
+            .build
+            Tools/swift-ember/.build
+          key: oldest-${{ runner.os }}-${{ runner.arch }}-swift${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Tools/swift-ember/Package.swift', 'Tools/swift-ember/Package.resolved') }}
+          restore-keys: oldest-${{ runner.os }}-${{ runner.arch }}-swift${{ env.SWIFT_VERSION }}-
+
       - name: Run the stages that need no simulator
         run: scripts/ci.sh --skip-simulator

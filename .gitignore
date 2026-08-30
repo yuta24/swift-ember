@@ -4,6 +4,7 @@
 # untracked files. New sessions use .ember/.
 .splice/
 .ci-results/
+dist/
 fixtures/.build/
 fixtures/ui/.build/
 examples/*/.build/

@@ -19,6 +19,7 @@ let options: Options
 do {
     options = try Options.parse(Array(CommandLine.arguments.dropFirst()))
 } catch let error as Options.ParseError {
+    if case .help = error { print(Options.usage); exit(0) }
     if case .usage = error { print(Options.usage); exit(64) }
     abort(error.description, code: 64)
 }
