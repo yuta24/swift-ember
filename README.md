@@ -1,6 +1,6 @@
 # swift-ember
 
-[![CI](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml/badge.svg)](https://github.com/yuta24/swift-splice/actions/workflows/ci.yml)
+[![CI](https://github.com/yuta24/swift-ember/actions/workflows/ci.yml/badge.svg)](https://github.com/yuta24/swift-ember/actions/workflows/ci.yml)
 
 Apply Swift implementation changes to a running iOS Simulator or development-device app without
 restarting it or losing its state.
