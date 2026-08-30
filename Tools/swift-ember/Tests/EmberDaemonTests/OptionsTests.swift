@@ -49,6 +49,19 @@ private func parse(_ arguments: String...) throws -> Options {
     #expect(throws: Options.ParseError.self) { _ = try parse("--project", "App.xcodeproj") }
 }
 
+@Test func helpIsNotAnInvalidInvocation() {
+    for flag in ["-h", "--help"] {
+        do {
+            _ = try parse(flag)
+            Issue.record("\(flag) should stop parsing")
+        } catch Options.ParseError.help {
+            // The executable prints usage and exits successfully for this case.
+        } catch {
+            Issue.record("unexpected error for \(flag): \(error)")
+        }
+    }
+}
+
 @Test func aProjectWithoutASchemeIsRejected() {
     // xcodebuild would fail later and less clearly.
     #expect(throws: Options.ParseError.self) { _ = try parse("watch", "--project", "App.xcodeproj") }
