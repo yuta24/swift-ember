@@ -1,5 +1,4 @@
 import Darwin
-import Dispatch
 import Foundation
 import Testing
 @testable import EmberCLI
@@ -49,31 +48,24 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     let (options, root) = temporaryOptions()
     defer { try? FileManager.default.removeItem(at: root) }
     let session = Lifecycle.session(for: options)
-    let firstEntered = DispatchSemaphore(value: 0)
-    let releaseFirst = DispatchSemaphore(value: 0)
-    let firstFinished = DispatchSemaphore(value: 0)
-    let secondEntered = DispatchSemaphore(value: 0)
-    let secondFinished = DispatchSemaphore(value: 0)
-
-    DispatchQueue.global().async {
-        try! Lifecycle.withSessionLock(session) {
-            _ = firstEntered.signal()
-            releaseFirst.wait()
-        }
-        _ = firstFinished.signal()
+    try FileManager.default.createDirectory(
+        at: session.lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let contender = session.lockURL.path.withCString {
+        open($0, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
     }
-    try #require(firstEntered.wait(timeout: .now() + 2) == .success)
+    try #require(contender >= 0)
+    defer { close(contender) }
 
-    DispatchQueue.global().async {
-        try! Lifecycle.withSessionLock(session) { _ = secondEntered.signal() }
-        _ = secondFinished.signal()
+    try Lifecycle.withSessionLock(session) {
+        errno = 0
+        let result = flock(contender, LOCK_EX | LOCK_NB)
+        let lockError = errno
+        #expect(result == -1)
+        #expect(lockError == EWOULDBLOCK)
     }
-    #expect(secondEntered.wait(timeout: .now() + 0.1) == .timedOut)
 
-    _ = releaseFirst.signal()
-    try #require(firstFinished.wait(timeout: .now() + 2) == .success)
-    try #require(secondEntered.wait(timeout: .now() + 2) == .success)
-    try #require(secondFinished.wait(timeout: .now() + 2) == .success)
+    try #require(flock(contender, LOCK_EX | LOCK_NB) == 0)
+    #expect(flock(contender, LOCK_UN) == 0)
 }
 
 @Test func aReadyRecordFindsOnlyItsOwningProcess() throws {
