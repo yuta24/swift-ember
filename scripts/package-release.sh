@@ -2,8 +2,8 @@
 #
 # Build the host CLI and package the two assets attached to a GitHub Release:
 #
-#   scripts/package-release.sh 0.1.1
-#   scripts/package-release.sh 0.1.1 /path/to/output
+#   scripts/package-release.sh 0.2.0
+#   scripts/package-release.sh 0.2.0 /path/to/output
 #
 # swift-ember.zip is for direct installation. The artifact bundle contains the
 # same executable in the structured form consumed by SwiftPM binary targets.
