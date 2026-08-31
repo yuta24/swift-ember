@@ -95,6 +95,17 @@ public enum Lifecycle {
         }
     }
 
+    /// Replaces a watcher after Xcode links a new binary. Resolving the new
+    /// context happens before this call, then stop/start share one lock so a
+    /// concurrent Scheme action cannot slip another owner between them.
+    public static func restart(options: Options, context: BuildContext) throws {
+        let session = session(for: options)
+        try withSessionLock(session) {
+            try stopLocked(session: session)
+            try startLocked(options: options, context: context, session: session)
+        }
+    }
+
     private static func startLocked(options: Options, context: BuildContext, session: Session) throws {
         if let record = try readRecord(at: session.recordURL) {
             if processMatches(record) {
@@ -118,7 +129,7 @@ public enum Lifecycle {
         let log = try FileHandle(forWritingTo: session.logURL)
         defer { try? log.close() }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = backgroundEnvironment(from: ProcessInfo.processInfo.environment)
         environment[recordEnvironment] = session.recordURL.path
         environment[patchDirectoryEnvironment] = session.patchURL.path
         let pid = try spawnDetached(
@@ -151,6 +162,17 @@ public enum Lifecycle {
         waitForChildExit(pid, timeout: 5)
         removeSessionFiles(session)
         throw LifecycleError.startup("timed out while initializing", session.logURL)
+    }
+
+    /// A daemon outlives the Xcode action that launched it. Keep only the
+    /// process environment needed to locate tools, temporary storage, and the
+    /// selected Xcode; debugger and build-script variables must not leak into
+    /// that long-running process.
+    static func backgroundEnvironment(from parent: [String: String]) -> [String: String] {
+        let allowed = ["HOME", "PATH", "TMPDIR", "DEVELOPER_DIR", "LANG", "LC_ALL", "LC_CTYPE"]
+        return Dictionary(uniqueKeysWithValues: allowed.compactMap { key in
+            parent[key].map { (key, $0) }
+        })
     }
 
     /// Idempotent so an Xcode post-action can run even if the build action did

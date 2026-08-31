@@ -159,18 +159,45 @@ do it itself.
 
 Then check the setup and start watching:
 
+Create `.swift-ember.json` beside the project or workspace. Paths in this file
+are relative to the configuration file, so the same file works for every
+checkout:
+
+```json
+{
+  "workspace": "App.xcworkspace",
+  "scheme": "App",
+  "sources": [
+    "Sources",
+    "Packages/Feature/Sources"
+  ]
+}
 ```
-swift-ember doctor --project App.xcodeproj --scheme App
-swift-ember watch  --project App.xcodeproj --scheme App
+
+`project` may be used instead of `workspace`. `configuration` defaults to
+`Debug`, `sources` defaults to the app target's `SRCROOT`, and the nearest
+`.swift-ember.json` is found by walking upward from the current directory (or
+Xcode's `SRCROOT`). Command-line options override the file. Unknown keys are
+rejected so a misspelled `sources` cannot silently narrow what is watched.
+
+A complete explicit target (`--project`/`--workspace` together with `--scheme`,
+or `--context`) bypasses automatic discovery. Pass `--config <path>` to use a
+specific file anyway, or `--no-config` to disable discovery explicitly. A
+manifest passed with `--context` and an Xcode project/workspace are separate
+target modes and cannot be combined.
+
+```
+swift-ember doctor
+swift-ember watch
 ```
 
 `watch` stays in the foreground, which is convenient in a terminal. To let an
 Xcode action own the same watcher, run it in the background instead:
 
 ```sh
-swift-ember start  --project App.xcodeproj --scheme App
-swift-ember status --project App.xcodeproj --scheme App
-swift-ember stop   --project App.xcodeproj --scheme App
+swift-ember start
+swift-ember status
+swift-ember stop
 ```
 
 `start` returns only after the watcher is ready. A second `start` is harmless,
@@ -181,23 +208,38 @@ time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
 process. Startup waits for up to 60 seconds by default; unusually large or slow
 projects can override that with `--startup-timeout <seconds>`.
 
-To tie the watcher to Xcode, add this to the scheme's **Build > Post-actions**,
-select the app target under **Provide build settings from**, and replace `App`
-with the scheme name:
+To tie the watcher to Xcode, add this one line to the scheme's **Build >
+Post-actions** and select the app target under **Provide build settings from**:
 
 ```sh
-if [ "$CONFIGURATION" = Debug ]; then
-  ember="$HOME/.local/bin/swift-ember"
-  "$ember" stop  --project "$PROJECT_FILE_PATH" --scheme App
-  "$ember" start --project "$PROJECT_FILE_PATH" --scheme App
-fi
+"$HOME/.local/bin/swift-ember" xcode start
 ```
 
-Stopping first matters after a rebuild: the new watcher must read the newly
-linked binary. Add the matching `stop` command to **Run > Post-actions** if the
-watcher should exit when the app exits. For a workspace, use
-`--workspace "$WORKSPACE_PATH"` instead. Foreground `watch` remains the better
-choice when its live output should stay in a terminal.
+Add the matching line to **Run > Post-actions** so the watcher exits with the
+app:
+
+```sh
+"$HOME/.local/bin/swift-ember" xcode stop
+```
+
+`xcode start` skips configurations other than the one in the configuration
+file, replaces the old watcher after a rebuild, and returns only when the new
+watcher is ready. It also selects the active physical device when Xcode is
+building for one; Simulator needs no identifier. The background process keeps
+the selected `DEVELOPER_DIR` but does not inherit transient build-script or
+debugger variables. Its detailed output remains in `.ember/logs`.
+
+The executable may live inside the repository instead; use its absolute path
+derived from `SRCROOT`, for example
+`"$SRCROOT/../tools/swift-ember" xcode start`. If no configuration file is
+used, Xcode supplies the project or workspace path, but `--scheme` and any
+extra `--sources` still need to be passed. Foreground `watch` remains the
+better choice when its live output should stay in a terminal. The original
+fully explicit form remains supported:
+
+```sh
+swift-ember watch --project App.xcodeproj --scheme App --sources Sources
+```
 
 For a physical device, build and run the Debug app on that device once, then
 select its CoreDevice identifier:

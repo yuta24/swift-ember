@@ -9,10 +9,17 @@ import EmberDaemon
 /// has to be justified. A value type has neither problem.
 public struct Options {
     public enum Command: String {
-        case doctor, watch, start, stop, status
+        case doctor, watch, start, stop, status, xcode
+    }
+
+    public enum XcodeAction: String {
+        case start, stop
     }
 
     public var command: Command
+    public var xcodeAction: XcodeAction?
+    public var configPath: String?
+    public var ignoresProjectConfiguration = false
     public var contextPath = "ember-context.json"
     public var project: String?
     public var workspace: String?
@@ -31,9 +38,17 @@ public struct Options {
       start     run watch in the background
       stop      stop the background watcher
       status    show what the daemon would use, without starting it
+      xcode     own the watcher from Xcode Scheme actions
+
+    Xcode Scheme actions:
+
+      xcode start                     restart after a successful Debug build
+      xcode stop                      stop when the app exits
 
     Pointing at an Xcode project:
 
+      --config <path.json>            defaults to the nearest .swift-ember.json
+      --no-config                     do not discover a project configuration
       --project <path.xcodeproj>     or --workspace <path.xcworkspace>
       --scheme <name>                required with either
       --configuration <name>         default Debug
@@ -59,6 +74,11 @@ public struct Options {
         case unknown(String)
         case bothContainers
         case schemeRequired
+        case xcodeActionRequired
+        case xcodeProjectRequired
+        case configuration(String)
+        case bothTargetModes
+        case conflictingConfigurationFlags
 
         public var description: String {
             switch self {
@@ -69,13 +89,38 @@ public struct Options {
             case .unknown(let argument): "unknown argument: \(argument)\n\n\(Options.usage)"
             case .bothContainers: "pass --project or --workspace, not both"
             case .schemeRequired: "--scheme is required with --project or --workspace"
+            case .xcodeActionRequired: "xcode needs an action: start or stop"
+            case .xcodeProjectRequired:
+                "xcode needs a project or workspace, either in .swift-ember.json or Xcode's environment"
+            case .configuration(let reason): reason
+            case .bothTargetModes:
+                "pass --context or --project/--workspace, not both"
+            case .conflictingConfigurationFlags:
+                "pass --config or --no-config, not both"
             }
         }
     }
 
-    public static func parse(_ arguments: [String]) throws -> Options {
+    struct ExplicitOptions {
+        var context = false
+        var container = false
+        var scheme = false
+        var configuration = false
+        var sources = false
+        var device = false
+        var startupTimeout = false
+    }
+
+    public static func parse(
+        _ arguments: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        currentDirectory: URL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    ) throws -> Options {
         var command: Command?
         var options = Options(command: .status)
+        var explicit = ExplicitOptions()
+        var explicitConfigurationFile = false
         var index = 0
 
         func value(after flag: String) throws -> String {
@@ -87,16 +132,33 @@ public struct Options {
         while index < arguments.count {
             let argument = arguments[index]
             switch argument {
-            case "--context": options.contextPath = try value(after: argument)
-            case "--project": options.project = try value(after: argument)
-            case "--workspace": options.workspace = try value(after: argument)
-            case "--scheme": options.scheme = try value(after: argument)
-            case "--configuration": options.configuration = try value(after: argument)
+            case "--config":
+                options.configPath = try value(after: argument)
+                explicitConfigurationFile = true
+            case "--no-config": options.ignoresProjectConfiguration = true
+            case "--context":
+                options.contextPath = try value(after: argument)
+                explicit.context = true
+            case "--project":
+                options.project = try value(after: argument)
+                explicit.container = true
+            case "--workspace":
+                options.workspace = try value(after: argument)
+                explicit.container = true
+            case "--scheme":
+                options.scheme = try value(after: argument)
+                explicit.scheme = true
+            case "--configuration":
+                options.configuration = try value(after: argument)
+                explicit.configuration = true
             case "--sources":
                 options.sourceRoots = try value(after: argument)
                     .split(separator: ",")
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
-            case "--device": options.device = try value(after: argument)
+                explicit.sources = true
+            case "--device":
+                options.device = try value(after: argument)
+                explicit.device = true
             case "--signing-identity": options.signingIdentity = try value(after: argument)
             case "--startup-timeout":
                 let value = try value(after: argument)
@@ -104,6 +166,7 @@ public struct Options {
                     throw ParseError.invalidValue(argument, value)
                 }
                 options.startupTimeout = seconds
+                explicit.startupTimeout = true
             case "-h", "--help":
                 throw ParseError.help
             case "-V", "--version":
@@ -113,6 +176,14 @@ public struct Options {
                     throw ParseError.unknown(argument)
                 }
                 command = parsed
+                if parsed == .xcode {
+                    index += 1
+                    guard index < arguments.count,
+                          let action = XcodeAction(rawValue: arguments[index]) else {
+                        throw ParseError.xcodeActionRequired
+                    }
+                    options.xcodeAction = action
+                }
             }
             index += 1
         }
@@ -120,11 +191,71 @@ public struct Options {
         guard let command else { throw ParseError.usage }
         options.command = command
 
+        if explicit.context && explicit.container { throw ParseError.bothTargetModes }
+        if explicitConfigurationFile && options.ignoresProjectConfiguration {
+            throw ParseError.conflictingConfigurationFlags
+        }
+
+        // A complete command-line target is self-contained and must remain a
+        // recovery path when a nearby configuration is malformed. An explicit
+        // --config is still read because the caller asked for that file.
+        let hasCompleteExplicitTarget = explicit.context
+            || (explicit.container && explicit.scheme)
+
+        do {
+            if !options.ignoresProjectConfiguration,
+               (explicitConfigurationFile || !hasCompleteExplicitTarget),
+               let (configuration, url) = try ProjectConfiguration.discover(
+                explicitPath: options.configPath,
+                environment: environment,
+                currentDirectory: currentDirectory) {
+                options.configPath = url.path
+                configuration.applying(to: &options, from: url, explicit: explicit)
+            }
+        } catch {
+            throw ParseError.configuration("\(error)")
+        }
+
+        if command == .xcode {
+            if !explicit.container, options.project == nil, options.workspace == nil {
+                if let workspace = environment["WORKSPACE_PATH"], !workspace.isEmpty {
+                    options.workspace = workspace
+                } else if let project = environment["PROJECT_FILE_PATH"], !project.isEmpty {
+                    options.project = project
+                }
+            }
+            if !explicit.device, options.device == nil,
+               environment["PLATFORM_NAME"] == "iphoneos",
+               let rawIdentifier = environment["TARGET_DEVICE_IDENTIFIER"] {
+                let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalised = identifier.lowercased()
+                // Physical CoreDevice UDIDs are not necessarily RFC UUIDs;
+                // current devices commonly use `00008120-<hex>`. Reject only
+                // Xcode's generic destinations, which identify themselves as
+                // placeholders rather than imposing a format on real devices.
+                if !identifier.isEmpty,
+                   !normalised.contains("placeholder"),
+                   !normalised.hasPrefix("generic/") {
+                    options.device = identifier
+                }
+            }
+        }
+
         if options.project != nil && options.workspace != nil { throw ParseError.bothContainers }
         if (options.project != nil || options.workspace != nil) && options.scheme == nil {
             throw ParseError.schemeRequired
         }
+        if command == .xcode && options.project == nil && options.workspace == nil {
+            throw ParseError.xcodeProjectRequired
+        }
         return options
+    }
+
+    public func appliesToXcodeConfiguration(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard let current = environment["CONFIGURATION"], !current.isEmpty else { return true }
+        return current == configuration
     }
 
     /// Resolves the Xcode project, if one was named.
