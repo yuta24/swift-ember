@@ -369,17 +369,33 @@ public struct XcodeProject: Sendable {
     }
 
     private func which(_ tool: String) throws -> String {
-        let result = try Subprocess.run("/usr/bin/xcrun", arguments: ["--find", tool])
-        let path = result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.exitCode == 0, !path.isEmpty else {
+        let result = try Subprocess.runSeparated("/usr/bin/xcrun", arguments: ["--find", tool])
+        return try Self.toolPath(tool, from: result)
+    }
+
+    /// `xcrun` can print warnings inherited from Xcode's build environment to
+    /// stderr even when lookup succeeds. Keeping those warnings out of the
+    /// pathname matters: `Process.executableURL` otherwise receives the warning
+    /// followed by the real path and reports that `swiftc` does not exist.
+    static func toolPath(_ tool: String, from result: Subprocess.SeparatedResult) throws -> String {
+        let path = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.exitCode == 0,
+              !path.isEmpty,
+              path.first == "/",
+              !path.contains("\n"),
+              FileManager.default.isExecutableFile(atPath: path) else {
+            let detail = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
             throw EmberError(stage: .watch, subject: tool,
-                              reason: "xcrun could not find \(tool)", recovery: .rebuild)
+                              reason: "xcrun could not find an executable \(tool)"
+                                + (detail.isEmpty ? "" : ":\n\(detail)"),
+                              recovery: .rebuild)
         }
         return path
     }
 
     private func compilerVersion() throws -> String {
-        let result = try Subprocess.run("/usr/bin/xcrun", arguments: ["swiftc", "--version"])
-        return result.combinedOutput.split(separator: "\n").first.map(String.init) ?? "unknown"
+        let result = try Subprocess.runSeparated("/usr/bin/xcrun", arguments: ["swiftc", "--version"])
+        guard result.exitCode == 0 else { return "unknown" }
+        return result.standardOutput.split(separator: "\n").first.map(String.init) ?? "unknown"
     }
 }

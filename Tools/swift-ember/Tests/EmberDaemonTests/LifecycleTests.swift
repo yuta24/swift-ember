@@ -17,6 +17,27 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     try JSONSerialization.data(withJSONObject: record).write(to: url, options: .atomic)
 }
 
+@Test func backgroundWatcherKeepsOnlyStableToolEnvironment() {
+    let environment = Lifecycle.backgroundEnvironment(from: [
+        "HOME": "/Users/me",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "/tmp/session",
+        "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+        "LANG": "en_US.UTF-8",
+        "CONFIGURATION": "Debug",
+        "SRCROOT": "/project",
+        "DYLD_INSERT_LIBRARIES": "/tmp/debugger.dylib",
+    ])
+
+    #expect(environment == [
+        "HOME": "/Users/me",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "/tmp/session",
+        "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+        "LANG": "en_US.UTF-8",
+    ])
+}
+
 @Test func sessionIdentityIsStableAndDistinguishesConfigurationAndDevice() {
     var first = Options(command: .start, project: "App.xcodeproj", scheme: "App")
     let same = Options(command: .stop, project: "./App.xcodeproj", scheme: "App")

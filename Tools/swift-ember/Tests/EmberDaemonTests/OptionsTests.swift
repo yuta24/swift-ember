@@ -12,12 +12,222 @@ private func parse(_ arguments: String...) throws -> Options {
     try Options.parse(arguments)
 }
 
+private func withConfiguration(
+    _ contents: String,
+    in nestedDirectory: Bool = false,
+    operation: (URL, URL) throws -> Void
+) throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("swift-ember-options-\(UUID().uuidString)", isDirectory: true)
+    let current = nestedDirectory ? root.appendingPathComponent("Develop", isDirectory: true) : root
+    try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data(contents.utf8).write(to: root.appendingPathComponent(".swift-ember.json"))
+    try operation(root, current)
+}
+
 @Test func aBareCommandParses() throws {
     #expect(try parse("watch").command == .watch)
     #expect(try parse("start").command == .start)
     #expect(try parse("stop").command == .stop)
     #expect(try parse("doctor").command == .doctor)
     #expect(try parse("status").command == .status)
+}
+
+@Test func xcodeNeedsAStartOrStopAction() throws {
+    #expect(throws: Options.ParseError.self) { _ = try parse("xcode") }
+    #expect(throws: Options.ParseError.self) { _ = try parse("xcode", "watch") }
+}
+
+@Test func xcodeActionsReadTheNearestProjectConfiguration() throws {
+    try withConfiguration(#"""
+        {
+          "workspace": "Bookshelf.xcworkspace",
+          "scheme": "Client Develop",
+          "sources": ["Presentation/Sources", "Client/Sources"]
+        }
+        """#, in: true) { root, current in
+        let options = try Options.parse(
+            ["xcode", "start"], environment: ["SRCROOT": current.path], currentDirectory: current)
+        #expect(options.command == .xcode)
+        #expect(options.xcodeAction == .start)
+        #expect(options.workspace == root.appendingPathComponent("Bookshelf.xcworkspace").path)
+        #expect(options.scheme == "Client Develop")
+        #expect(options.sourceRoots == [
+            root.appendingPathComponent("Presentation/Sources").path,
+            root.appendingPathComponent("Client/Sources").path,
+        ])
+        #expect(options.configPath == root.appendingPathComponent(".swift-ember.json").path)
+    }
+}
+
+@Test func explicitArgumentsOverrideProjectConfigurationDefaults() throws {
+    try withConfiguration(#"""
+        {
+          "workspace": "Configured.xcworkspace",
+          "scheme": "Configured",
+          "configuration": "Debug",
+          "sources": ["ConfiguredSources"]
+        }
+        """#) { _, current in
+        let options = try Options.parse([
+            "watch", "--config", current.appendingPathComponent(".swift-ember.json").path,
+            "--project", "Explicit.xcodeproj", "--scheme", "Explicit",
+            "--configuration", "Profile", "--sources", "A,B",
+        ], environment: [:], currentDirectory: current)
+        #expect(options.project == "Explicit.xcodeproj")
+        #expect(options.workspace == nil)
+        #expect(options.scheme == "Explicit")
+        #expect(options.configuration == "Profile")
+        #expect(options.sourceRoots == ["A", "B"])
+    }
+}
+
+@Test func explicitContextBypassesAnAutomaticallyDiscoveredXcodeConfiguration() throws {
+    try withConfiguration(#"{"workspace":"Configured.xcworkspace","scheme":"Configured"}"#) {
+        _, current in
+        let options = try Options.parse(
+            ["status", "--context", "custom-context.json"],
+            environment: [:], currentDirectory: current)
+        #expect(options.contextPath == "custom-context.json")
+        #expect(options.project == nil)
+        #expect(options.workspace == nil)
+        #expect(options.scheme == nil)
+        #expect(options.configPath == nil)
+    }
+}
+
+@Test func explicitContextAndXcodeContainerAreMutuallyExclusive() {
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse(
+            "status", "--context", "context.json",
+            "--project", "App.xcodeproj", "--scheme", "App")
+    }
+}
+
+@Test func anExplicitContainerDoesNotBorrowAnotherContainersScheme() throws {
+    try withConfiguration(#"{"workspace":"Configured.xcworkspace","scheme":"Configured"}"#) {
+        _, current in
+        #expect(throws: Options.ParseError.self) {
+            _ = try Options.parse(
+                ["status", "--project", "Explicit.xcodeproj"],
+                environment: [:], currentDirectory: current)
+        }
+    }
+}
+
+@Test func aCompleteExplicitTargetBypassesMalformedAutomaticConfiguration() throws {
+    try withConfiguration("not json") { _, current in
+        let options = try Options.parse([
+            "stop", "--workspace", "Explicit.xcworkspace", "--scheme", "Explicit",
+        ], environment: [:], currentDirectory: current)
+        #expect(options.workspace == "Explicit.xcworkspace")
+        #expect(options.scheme == "Explicit")
+        #expect(options.configPath == nil)
+    }
+}
+
+@Test func noConfigProvidesAnExplicitConfigurationEscapeHatch() throws {
+    try withConfiguration("not json") { _, current in
+        let options = try Options.parse(
+            ["status", "--no-config", "--context", "context.json"],
+            environment: [:], currentDirectory: current)
+        #expect(options.ignoresProjectConfiguration)
+        #expect(options.contextPath == "context.json")
+    }
+}
+
+@Test func configAndNoConfigAreMutuallyExclusive() {
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("status", "--config", "config.json", "--no-config")
+    }
+}
+
+@Test func xcodeCanUseItsContainerEnvironmentWithoutAConfigurationFile() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("swift-ember-no-config-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let workspace = root.appendingPathComponent("App.xcworkspace").path
+    let options = try Options.parse(
+        ["xcode", "stop", "--scheme", "App"],
+        environment: ["WORKSPACE_PATH": workspace], currentDirectory: root)
+    #expect(options.workspace == workspace)
+    #expect(options.xcodeAction == .stop)
+}
+
+@Test func xcodeInfersOnlyAPhysicalCoreDeviceIdentifier() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("swift-ember-device-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("App.xcodeproj").path
+    // A physical CoreDevice UDID is not an RFC UUID. Requiring UUID syntax
+    // silently selected the Simulator transport for real iPhones.
+    let identifier = "00008120-001E1C66369B401E"
+
+    let physical = try Options.parse(
+        ["xcode", "start", "--scheme", "App"], environment: [
+            "PROJECT_FILE_PATH": project,
+            "PLATFORM_NAME": "iphoneos",
+            "TARGET_DEVICE_IDENTIFIER": identifier,
+        ], currentDirectory: root)
+    #expect(physical.device == identifier)
+
+    let simulator = try Options.parse(
+        ["xcode", "start", "--scheme", "App"], environment: [
+            "PROJECT_FILE_PATH": project,
+            "PLATFORM_NAME": "iphonesimulator",
+            "TARGET_DEVICE_IDENTIFIER": identifier,
+        ], currentDirectory: root)
+    #expect(simulator.device == nil)
+
+    let placeholder = try Options.parse(
+        ["xcode", "start", "--scheme", "App"], environment: [
+            "PROJECT_FILE_PATH": project,
+            "PLATFORM_NAME": "iphoneos",
+            "TARGET_DEVICE_IDENTIFIER": "dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder",
+        ], currentDirectory: root)
+    #expect(placeholder.device == nil)
+
+    let generic = try Options.parse(
+        ["xcode", "start", "--scheme", "App"], environment: [
+            "PROJECT_FILE_PATH": project,
+            "PLATFORM_NAME": "iphoneos",
+            "TARGET_DEVICE_IDENTIFIER": "generic/platform=iOS",
+        ], currentDirectory: root)
+    #expect(generic.device == nil)
+}
+
+@Test func xcodeActionsApplyOnlyToTheirConfiguredBuild() throws {
+    let options = Options(command: .xcode, xcodeAction: .start, configuration: "Debug")
+    #expect(options.appliesToXcodeConfiguration(environment: [:]))
+    #expect(options.appliesToXcodeConfiguration(environment: ["CONFIGURATION": "Debug"]))
+    #expect(!options.appliesToXcodeConfiguration(environment: ["CONFIGURATION": "Release"]))
+}
+
+@Test func malformedProjectConfigurationIsReportedByTheParser() throws {
+    try withConfiguration(#"{"project":"App.xcodeproj","workspace":"App.xcworkspace","scheme":"App"}"#) {
+        _, current in
+        #expect(throws: Options.ParseError.self) {
+            _ = try Options.parse(["watch"], environment: [:], currentDirectory: current)
+        }
+    }
+}
+
+@Test func unknownProjectConfigurationKeysAreRejected() throws {
+    try withConfiguration(#"{"workspace":"App.xcworkspace","scheme":"App","sourceRoots":["Sources"]}"#) {
+        _, current in
+        do {
+            _ = try Options.parse(["watch"], environment: [:], currentDirectory: current)
+            Issue.record("the unknown sourceRoots key should be rejected")
+        } catch Options.ParseError.configuration(let reason) {
+            #expect(reason.contains("unknown keys: sourceRoots"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
 }
 
 @Test func flagsMayComeBeforeOrAfterTheCommand() throws {
@@ -124,6 +334,15 @@ private func parse(_ arguments: String...) throws -> Options {
                                deviceIdentifier: "DEVICE-ID")
     #expect(project.destination == "id=DEVICE-ID")
     #expect(project.deviceIdentifier == "DEVICE-ID")
+}
+
+@Test func xcrunWarningsDoNotBecomePartOfTheToolPath() throws {
+    let result = Subprocess.SeparatedResult(
+        exitCode: 0,
+        standardOutput: "/bin/sh\n",
+        standardError: "Warning: unknown environment variable SWIFT_DEBUG_INFORMATION_FORMAT\n")
+
+    #expect(try XcodeProject.toolPath("swiftc", from: result) == "/bin/sh")
 }
 
 @Test func aSchemeWithoutAContainerIsHarmless() throws {

@@ -26,7 +26,13 @@ do {
 }
 
 do {
-    if options.command == .stop {
+    if options.command == .xcode && options.xcodeAction == .start
+        && !options.appliesToXcodeConfiguration() {
+        print("swift-ember: skipping \(ProcessInfo.processInfo.environment["CONFIGURATION"] ?? "this") configuration")
+        exit(0)
+    }
+    if options.command == .stop
+        || (options.command == .xcode && options.xcodeAction == .stop) {
         try Lifecycle.stop(options: options)
         exit(0)
     }
@@ -73,6 +79,14 @@ case .start:
     do {
         try Watch.validatePhysicalDevice(context)
         try Lifecycle.start(options: options, context: context)
+    } catch {
+        abort("\(error)")
+    }
+
+case .xcode:
+    do {
+        try Watch.validatePhysicalDevice(context)
+        try Lifecycle.restart(options: options, context: context)
     } catch {
         abort("\(error)")
     }
