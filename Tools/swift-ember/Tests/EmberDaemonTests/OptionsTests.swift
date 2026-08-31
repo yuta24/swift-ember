@@ -14,6 +14,8 @@ private func parse(_ arguments: String...) throws -> Options {
 
 @Test func aBareCommandParses() throws {
     #expect(try parse("watch").command == .watch)
+    #expect(try parse("start").command == .start)
+    #expect(try parse("stop").command == .stop)
     #expect(try parse("doctor").command == .doctor)
     #expect(try parse("status").command == .status)
 }
@@ -62,6 +64,19 @@ private func parse(_ arguments: String...) throws -> Options {
     }
 }
 
+@Test func versionIsNotAnInvalidInvocation() {
+    for flag in ["-V", "--version"] {
+        do {
+            _ = try parse(flag)
+            Issue.record("\(flag) should stop parsing")
+        } catch Options.ParseError.version {
+            // The executable prints the version and exits successfully.
+        } catch {
+            Issue.record("unexpected error for \(flag): \(error)")
+        }
+    }
+}
+
 @Test func aProjectWithoutASchemeIsRejected() {
     // xcodebuild would fail later and less clearly.
     #expect(throws: Options.ParseError.self) { _ = try parse("watch", "--project", "App.xcodeproj") }
@@ -88,6 +103,20 @@ private func parse(_ arguments: String...) throws -> Options {
                             "--device", "DEVICE-ID", "--signing-identity", "SIGNING-SHA")
     #expect(options.device == "DEVICE-ID")
     #expect(options.signingIdentity == "SIGNING-SHA")
+}
+
+@Test func startupTimeoutMustBePositive() throws {
+    #expect(try parse("start", "--startup-timeout", "90").startupTimeout == 90)
+    #expect(try parse("start").startupTimeout == 60)
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("start", "--startup-timeout", "0")
+    }
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("start", "--startup-timeout", "later")
+    }
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("start", "--startup-timeout", "inf")
+    }
 }
 
 @Test func aPhysicalDeviceSelectsAnXcodeDeviceDestination() {

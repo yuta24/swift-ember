@@ -20,8 +20,18 @@ do {
     options = try Options.parse(Array(CommandLine.arguments.dropFirst()))
 } catch let error as Options.ParseError {
     if case .help = error { print(Options.usage); exit(0) }
+    if case .version = error { print(error.description); exit(0) }
     if case .usage = error { print(Options.usage); exit(64) }
     abort(error.description, code: 64)
+}
+
+do {
+    if options.command == .stop {
+        try Lifecycle.stop(options: options)
+        exit(0)
+    }
+} catch {
+    abort("\(error)")
 }
 
 let resolvedProject: XcodeProject.Resolved?
@@ -37,6 +47,11 @@ do {
 
 switch options.command {
 case .status:
+    if let pid = Lifecycle.runningPID(options: options) {
+        print("daemon             running (pid \(pid))")
+    } else {
+        print("daemon             not running")
+    }
     print("module             \(context.moduleName)")
     print("target             \(context.targetTriple)")
     print("sdk                \(context.sdkName)")
@@ -54,6 +69,19 @@ case .status:
 case .doctor:
     exit(Doctor.run(context: context, project: resolvedProject) ? 0 : 1)
 
+case .start:
+    do {
+        try Watch.validatePhysicalDevice(context)
+        try Lifecycle.start(options: options, context: context)
+    } catch {
+        abort("\(error)")
+    }
+
+case .stop:
+    // Handled before resolving the project, so stopping does not depend on a
+    // successful build or on xcodebuild still being available.
+    fatalError("unreachable")
+
 case .watch:
     // Caught the same way the resolve above is. Left uncaught, anything `watch`
     // throws on the way up -- no built binary, a container it cannot reach, a
@@ -61,7 +89,11 @@ case .watch:
     // "Fatal error: Error raised at top level" with the actual message buried
     // inside it.
     do {
-        try await Watch.run(context: context)
+        defer { Lifecycle.removeOwnedRecord() }
+        try await Watch.run(
+            context: context,
+            workDirectory: Lifecycle.patchDirectory(for: options),
+            onReady: { try Lifecycle.markReady() })
     } catch let error as EmberError {
         abort(error.description)
     } catch {
