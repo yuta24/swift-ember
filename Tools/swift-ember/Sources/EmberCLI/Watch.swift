@@ -141,15 +141,22 @@ public enum Watch {
         defer { reannounce.cancel() }
 
         var termination: TerminationSignals?
-        let changes = AsyncStream<[URL]> { continuation in
+        let changes = AsyncStream<[FileWatcher.Change]> { continuation in
             watcher.start { continuation.yield($0) }
             termination = TerminationSignals { continuation.finish() }
         }
         defer { termination?.cancel() }
 
+        var removalGuard = RemovalGuard()
         for await batch in changes {
-            for url in batch {
-                switch await coordinator.handle(change: url) {
+            if let error = removalGuard.check(batch) {
+                print("")
+                print(error.description)
+                print("")
+                continue
+            }
+            for change in batch {
+                switch await coordinator.handle(change: change.url) {
                 case .ignored:
                     continue
                 case .rejected(let error):
@@ -252,6 +259,45 @@ public enum Watch {
                 }
             }
         }
+    }
+
+    /// A rename is observed as one removal and one addition. Refuse the whole
+    /// poll rather than letting the new path through as an added declaration:
+    /// the running binary still contains the old file, and applying only the
+    /// added half would report a partial refactor as a reload. Once tripped,
+    /// this remains closed until a rebuild starts a new watcher: every batch
+    /// skipped while it is closed has already advanced the file watcher's
+    /// stamps and cannot be replayed safely from here.
+    struct RemovalGuard {
+        private var removed: Set<URL> = []
+
+        mutating func check(_ changes: [FileWatcher.Change]) -> EmberError? {
+            removed.formUnion(changes.lazy.filter { $0.kind == .removed }.map(\.url))
+            return Watch.removalError(for: removed, changeCount: changes.count)
+        }
+    }
+
+    static func removalError(for missing: Set<URL>, changeCount: Int) -> EmberError? {
+        guard !missing.isEmpty else { return nil }
+
+        let removed = missing.sorted { $0.path < $1.path }
+        let subject = removed.count == 1
+            ? removed[0].lastPathComponent
+            : "\(removed.count) source files"
+        let paths = removed.map { "  \($0.path)" }.joined(separator: "\n")
+        let scope = changeCount == 1 ? "this change" : "this batch"
+        return EmberError(
+            stage: .classify,
+            subject: subject,
+            reason: """
+                a watched source file was removed or renamed:
+
+                \(paths)
+
+                The running binary still contains declarations from the built file, so \(scope) cannot be applied safely.
+                Rebuild, then restart the watcher. The `xcode start` Build post-action restarts it automatically.
+                """,
+            recovery: .rebuild)
     }
 
     public static func validatePhysicalDevice(_ context: BuildContext) throws {

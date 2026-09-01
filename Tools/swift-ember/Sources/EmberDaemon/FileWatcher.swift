@@ -1,6 +1,6 @@
 import Foundation
 
-/// Watches Swift sources for saves.
+/// Watches Swift sources for additions, saves, and removals.
 ///
 /// This polls modification times rather than using FSEvents or a kqueue on
 /// each file. Editors save atomically, by writing a temporary file and renaming
@@ -10,6 +10,22 @@ import Foundation
 /// interval it also lands inside the sub-100-ms-ish detection budget in PRD.md
 /// section 10 often enough for M2.
 public final class FileWatcher: @unchecked Sendable {
+    public struct Change: Equatable, Sendable {
+        public enum Kind: Equatable, Sendable {
+            case added
+            case modified
+            case removed
+        }
+
+        public let url: URL
+        public let kind: Kind
+
+        public init(url: URL, kind: Kind) {
+            self.url = url
+            self.kind = kind
+        }
+    }
+
     private let roots: [URL]
     private let interval: Duration
     private let lock = NSLock()
@@ -28,7 +44,7 @@ public final class FileWatcher: @unchecked Sendable {
         lock.withLock { stamps = current }
     }
 
-    public func start(onChange: @escaping @Sendable ([URL]) -> Void) {
+    public func start(onChange: @escaping @Sendable ([Change]) -> Void) {
         task = Task.detached { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -41,14 +57,20 @@ public final class FileWatcher: @unchecked Sendable {
 
     public func stop() { task?.cancel() }
 
-    private func poll() -> [URL] {
+    func poll() -> [Change] {
         let current = scan()
         return lock.withLock {
-            let changed = current.compactMap { url, date -> URL? in
-                stamps[url] == date ? nil : url
+            var changed = current.compactMap { url, date -> Change? in
+                guard let previous = stamps[url] else {
+                    return Change(url: url, kind: .added)
+                }
+                return previous == date ? nil : Change(url: url, kind: .modified)
+            }
+            for url in stamps.keys where current[url] == nil {
+                changed.append(Change(url: url, kind: .removed))
             }
             stamps = current
-            return changed.sorted { $0.path < $1.path }
+            return changed.sorted { $0.url.path < $1.url.path }
         }
     }
 
