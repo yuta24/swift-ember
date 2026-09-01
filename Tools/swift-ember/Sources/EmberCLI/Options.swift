@@ -27,6 +27,9 @@ public struct Options {
     public var configuration = "Debug"
     public var sourceRoots: [String] = []
     public var device: String?
+    /// Populated from Xcode's environment for Scheme actions. This is kept
+    /// separate from `device`, whose presence selects the physical transport.
+    public var simulator: String?
     public var signingIdentity: String?
     public var startupTimeout: TimeInterval = 60
 
@@ -54,6 +57,7 @@ public struct Options {
       --configuration <name>         default Debug
       --sources <dir>[,<dir>...]     default the project's SRCROOT
       --device <CoreDevice-ID>       target a connected physical iOS device
+      --simulator <Simulator-UDID>   target a specific iOS Simulator
       --signing-identity <name|SHA>  override the patch signing identity
       --startup-timeout <seconds>    wait for background startup (default 60)
 
@@ -78,6 +82,7 @@ public struct Options {
         case xcodeProjectRequired
         case configuration(String)
         case bothTargetModes
+        case conflictingDestinations
         case conflictingConfigurationFlags
 
         public var description: String {
@@ -95,6 +100,8 @@ public struct Options {
             case .configuration(let reason): reason
             case .bothTargetModes:
                 "pass --context or --project/--workspace, not both"
+            case .conflictingDestinations:
+                "pass --device or --simulator, not both"
             case .conflictingConfigurationFlags:
                 "pass --config or --no-config, not both"
             }
@@ -108,6 +115,7 @@ public struct Options {
         var configuration = false
         var sources = false
         var device = false
+        var simulator = false
         var startupTimeout = false
     }
 
@@ -159,6 +167,9 @@ public struct Options {
             case "--device":
                 options.device = try value(after: argument)
                 explicit.device = true
+            case "--simulator":
+                options.simulator = try value(after: argument)
+                explicit.simulator = true
             case "--signing-identity": options.signingIdentity = try value(after: argument)
             case "--startup-timeout":
                 let value = try value(after: argument)
@@ -224,23 +235,32 @@ public struct Options {
                     options.project = project
                 }
             }
-            if !explicit.device, options.device == nil,
-               environment["PLATFORM_NAME"] == "iphoneos",
+            if !explicit.device, !explicit.simulator,
+               options.device == nil, options.simulator == nil,
+               let platform = environment["PLATFORM_NAME"],
                let rawIdentifier = environment["TARGET_DEVICE_IDENTIFIER"] {
                 let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
                 let normalised = identifier.lowercased()
                 // Physical CoreDevice UDIDs are not necessarily RFC UUIDs;
-                // current devices commonly use `00008120-<hex>`. Reject only
-                // Xcode's generic destinations, which identify themselves as
-                // placeholders rather than imposing a format on real devices.
+                // current devices commonly use `00008120-<hex>`. Simulator
+                // identifiers are UUIDs today, but both are opaque here. Reject
+                // only Xcode's generic destinations rather than imposing a
+                // format on either kind of real destination.
                 if !identifier.isEmpty,
                    !normalised.contains("placeholder"),
                    !normalised.hasPrefix("generic/") {
-                    options.device = identifier
+                    if platform == "iphoneos" {
+                        options.device = identifier
+                    } else if platform == "iphonesimulator" {
+                        options.simulator = identifier
+                    }
                 }
             }
         }
 
+        if options.device != nil && options.simulator != nil {
+            throw ParseError.conflictingDestinations
+        }
         if options.project != nil && options.workspace != nil { throw ParseError.bothContainers }
         if (options.project != nil || options.workspace != nil) && options.scheme == nil {
             throw ParseError.schemeRequired
@@ -267,7 +287,8 @@ public struct Options {
 
         return try XcodeProject(container: container, scheme: scheme!,
                                 configuration: configuration,
-                                deviceIdentifier: device)
+                                deviceIdentifier: device,
+                                simulatorIdentifier: simulator)
             .resolve(sourceRoots: sourceRoots)
     }
 
@@ -282,7 +303,14 @@ public struct Options {
         let url = URL(fileURLWithPath: contextPath)
         do {
             var context = try BuildContext.load(from: url)
-            if let device { context.deviceIdentifier = device }
+            if let device {
+                context.deviceIdentifier = device
+                context.simulatorIdentifier = nil
+            }
+            if let simulator {
+                context.deviceIdentifier = nil
+                context.simulatorIdentifier = simulator
+            }
             if let signingIdentity { context.codeSigningIdentity = signingIdentity }
             return context
         } catch {

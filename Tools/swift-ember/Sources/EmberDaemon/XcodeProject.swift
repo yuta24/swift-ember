@@ -34,16 +34,19 @@ public struct XcodeProject: Sendable {
     public let configuration: String
     public let destination: String
     public let deviceIdentifier: String?
+    public let simulatorIdentifier: String?
 
     public init(container: Container, scheme: String,
                 configuration: String = "Debug",
                 destination: String = "generic/platform=iOS Simulator",
-                deviceIdentifier: String? = nil) {
+                deviceIdentifier: String? = nil,
+                simulatorIdentifier: String? = nil) {
         self.container = container
         self.scheme = scheme
         self.configuration = configuration
         self.deviceIdentifier = deviceIdentifier
-        self.destination = deviceIdentifier.map { "id=\($0)" } ?? destination
+        self.simulatorIdentifier = simulatorIdentifier
+        self.destination = (deviceIdentifier ?? simulatorIdentifier).map { "id=\($0)" } ?? destination
     }
 
     /// Everything `doctor` needs to explain a misconfiguration, kept separate
@@ -168,6 +171,7 @@ public struct XcodeProject: Sendable {
             frameworkSearchPaths: [builtProducts]
                 + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
             deviceIdentifier: deviceIdentifier,
+            simulatorIdentifier: simulatorIdentifier,
             codeSigningIdentity: Self.signingIdentity(from: settings))
 
         return Resolved(context: context, settings: settings)

@@ -26,6 +26,12 @@ public struct BuildContext: Codable, Sendable {
     /// transport. Nil preserves the simulator socket transport.
     public var deviceIdentifier: String?
 
+    /// The simulator selected by Xcode. This keeps the socket transport while
+    /// making container discovery deterministic when more than one simulator
+    /// is booted. Nil preserves the `booted` fallback for manual invocations
+    /// that do not run inside an Xcode Scheme action.
+    public var simulatorIdentifier: String?
+
     /// Identity passed to codesign for patches loaded on a physical device.
     /// The bridge verifies the resulting TeamIdentifier against the app before
     /// it transfers the image.
@@ -36,7 +42,8 @@ public struct BuildContext: Codable, Sendable {
                 moduleSearchPaths: [String], extraCompilerFlags: [String],
                 sourceRoots: [String], bundleIdentifier: String,
                 debugDylibPath: String? = nil, frameworkSearchPaths: [String] = [],
-                deviceIdentifier: String? = nil, codeSigningIdentity: String? = nil) {
+                deviceIdentifier: String? = nil, simulatorIdentifier: String? = nil,
+                codeSigningIdentity: String? = nil) {
         self.debugDylibPath = debugDylibPath
         self.frameworkSearchPaths = frameworkSearchPaths
         self.moduleName = moduleName
@@ -51,6 +58,7 @@ public struct BuildContext: Codable, Sendable {
         self.sourceRoots = sourceRoots
         self.bundleIdentifier = bundleIdentifier
         self.deviceIdentifier = deviceIdentifier
+        self.simulatorIdentifier = simulatorIdentifier
         self.codeSigningIdentity = codeSigningIdentity
     }
 
@@ -114,6 +122,7 @@ public struct BuildContext: Codable, Sendable {
         frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
         debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
         deviceIdentifier = try container.decodeIfPresent(String.self, forKey: .deviceIdentifier)
+        simulatorIdentifier = try container.decodeIfPresent(String.self, forKey: .simulatorIdentifier)
         codeSigningIdentity = try container.decodeIfPresent(String.self, forKey: .codeSigningIdentity)
     }
 

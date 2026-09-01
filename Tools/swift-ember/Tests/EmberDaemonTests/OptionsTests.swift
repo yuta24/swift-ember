@@ -157,7 +157,7 @@ private func withConfiguration(
     #expect(options.xcodeAction == .stop)
 }
 
-@Test func xcodeInfersOnlyAPhysicalCoreDeviceIdentifier() throws {
+@Test func xcodeSeparatesPhysicalAndSimulatorIdentifiers() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("swift-ember-device-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -182,6 +182,7 @@ private func withConfiguration(
             "TARGET_DEVICE_IDENTIFIER": identifier,
         ], currentDirectory: root)
     #expect(simulator.device == nil)
+    #expect(simulator.simulator == identifier)
 
     let placeholder = try Options.parse(
         ["xcode", "start", "--scheme", "App"], environment: [
@@ -315,6 +316,35 @@ private func withConfiguration(
     #expect(options.signingIdentity == "SIGNING-SHA")
 }
 
+@Test func simulatorOptionsParseAndCannotConflictWithAPhysicalDevice() throws {
+    let options = try parse("watch", "--project", "App.xcodeproj", "--scheme", "App",
+                            "--simulator", "SIMULATOR-ID")
+    #expect(options.simulator == "SIMULATOR-ID")
+    #expect(options.device == nil)
+
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("watch", "--project", "App.xcodeproj", "--scheme", "App",
+                      "--device", "DEVICE-ID", "--simulator", "SIMULATOR-ID")
+    }
+}
+
+@Test func explicitSimulatorOverridesXcodesDestinationEnvironment() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("swift-ember-explicit-simulator-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let options = try Options.parse(
+        ["xcode", "start", "--scheme", "App", "--simulator", "EXPLICIT"],
+        environment: [
+            "PROJECT_FILE_PATH": root.appendingPathComponent("App.xcodeproj").path,
+            "PLATFORM_NAME": "iphonesimulator",
+            "TARGET_DEVICE_IDENTIFIER": "XCODE-SELECTED",
+        ], currentDirectory: root)
+    #expect(options.simulator == "EXPLICIT")
+    #expect(options.device == nil)
+}
+
 @Test func startupTimeoutMustBePositive() throws {
     #expect(try parse("start", "--startup-timeout", "90").startupTimeout == 90)
     #expect(try parse("start").startupTimeout == 60)
@@ -334,6 +364,26 @@ private func withConfiguration(
                                deviceIdentifier: "DEVICE-ID")
     #expect(project.destination == "id=DEVICE-ID")
     #expect(project.deviceIdentifier == "DEVICE-ID")
+    #expect(project.simulatorIdentifier == nil)
+}
+
+@Test func aSimulatorSelectsItsExactXcodeDestination() {
+    let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App",
+                               simulatorIdentifier: "SIMULATOR-ID")
+    #expect(project.destination == "id=SIMULATOR-ID")
+    #expect(project.deviceIdentifier == nil)
+    #expect(project.simulatorIdentifier == "SIMULATOR-ID")
+}
+
+@Test func simulatorContainerUsesTheSelectedDeviceInsteadOfBooted() {
+    #expect(SimulatorContainer.containerArguments(
+        bundleIdentifier: "dev.example.App", deviceIdentifier: "SIMULATOR-ID") == [
+            "simctl", "get_app_container", "SIMULATOR-ID", "dev.example.App", "data",
+        ])
+    #expect(SimulatorContainer.containerArguments(
+        bundleIdentifier: "dev.example.App", deviceIdentifier: nil) == [
+            "simctl", "get_app_container", "booted", "dev.example.App", "data",
+        ])
 }
 
 @Test func xcrunWarningsDoNotBecomePartOfTheToolPath() throws {
@@ -437,6 +487,7 @@ private func withConfiguration(
     let context = try! JSONDecoder().decode(BuildContext.self, from: Data(json.utf8))
     #expect(context.frameworkSearchPaths.isEmpty)
     #expect(context.sourceRoots == ["/r"])
+    #expect(context.simulatorIdentifier == nil)
 }
 
 @Test func aBuildContextRoundTrips() throws {
@@ -454,7 +505,16 @@ private func withConfiguration(
     #expect(decoded.frameworkSearchPaths == original.frameworkSearchPaths)
     #expect(decoded.linkTarget == original.linkTarget)
     #expect(decoded.deviceIdentifier == original.deviceIdentifier)
+    #expect(decoded.simulatorIdentifier == original.simulatorIdentifier)
     #expect(decoded.codeSigningIdentity == original.codeSigningIdentity)
+
+    var simulator = original
+    simulator.deviceIdentifier = nil
+    simulator.simulatorIdentifier = "SIMULATOR-ID"
+    let decodedSimulator = try JSONDecoder().decode(
+        BuildContext.self, from: try JSONEncoder().encode(simulator))
+    #expect(decodedSimulator.deviceIdentifier == nil)
+    #expect(decodedSimulator.simulatorIdentifier == "SIMULATOR-ID")
 }
 
 @Test func signingIdentityPrefersTheExpandedIdentityAndRejectsPlaceholders() {

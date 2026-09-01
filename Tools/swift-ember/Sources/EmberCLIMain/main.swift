@@ -63,7 +63,10 @@ case .status:
     print("sdk                \(context.sdkName)")
     print("compiler           \(context.swiftCompilerVersion)")
     print("bundle id          \(context.bundleIdentifier)")
-    print("transport          \(context.deviceIdentifier.map { "physical device \($0)" } ?? "simulator")")
+    let transport = context.deviceIdentifier.map { "physical device \($0)" }
+        ?? context.simulatorIdentifier.map { "simulator \($0)" }
+        ?? "simulator"
+    print("transport          \(transport)")
     if let identity = context.codeSigningIdentity {
         print("signing identity   \(identity)")
     }

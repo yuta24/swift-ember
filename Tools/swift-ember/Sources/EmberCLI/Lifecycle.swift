@@ -74,9 +74,15 @@ public enum Lifecycle {
             descriptor = "context|\(container.path)"
         }
 
+        // Keep the pre-0.4 identity for physical devices and the generic
+        // simulator. A changed hash makes a live watcher unreachable to stop
+        // and restart after upgrading the CLI.
+        let destination = options.device
+            ?? options.simulator.map { "simulator:\($0)" }
+            ?? "simulator"
         let identity = descriptor
             + "|configuration=\(options.configuration)"
-            + "|device=\(options.device ?? "simulator")"
+            + "|device=\(destination)"
         let key = "\(slug(label))-\(hexHash(identity))"
         let root = container.deletingLastPathComponent().appendingPathComponent(".ember")
         return Session(
@@ -90,7 +96,9 @@ public enum Lifecycle {
 
     public static func start(options: Options, context: BuildContext) throws {
         let session = session(for: options)
-        try withSessionLock(session) {
+        let legacy = legacySimulatorSession(for: options)
+        try withSessionLocks([session, legacy].compactMap { $0 }) {
+            if let legacy { try retireLegacySessionLocked(legacy) }
             try startLocked(options: options, context: context, session: session)
         }
     }
@@ -100,7 +108,9 @@ public enum Lifecycle {
     /// concurrent Scheme action cannot slip another owner between them.
     public static func restart(options: Options, context: BuildContext) throws {
         let session = session(for: options)
-        try withSessionLock(session) {
+        let legacy = legacySimulatorSession(for: options)
+        try withSessionLocks([session, legacy].compactMap { $0 }) {
+            if let legacy { try retireLegacySessionLocked(legacy) }
             try stopLocked(session: session)
             try startLocked(options: options, context: context, session: session)
         }
@@ -179,9 +189,21 @@ public enum Lifecycle {
     /// not start a watcher.
     public static func stop(options: Options) throws {
         let session = session(for: options)
-        try withSessionLock(session) {
+        let legacy = legacySimulatorSession(for: options)
+        try withSessionLocks([session, legacy].compactMap { $0 }) {
             try stopLocked(session: session)
+            if let legacy { try retireLegacySessionLocked(legacy) }
         }
+    }
+
+    /// A simulator-scoped session supersedes the single generic simulator
+    /// session used before simulator UDIDs were tracked. That old watcher must
+    /// not remain alive: it can keep replacing the selected simulator's token.
+    private static func retireLegacySessionLocked(_ session: Session) throws {
+        guard FileManager.default.fileExists(atPath: session.recordURL.path)
+                || FileManager.default.fileExists(atPath: session.contextURL.path)
+        else { return }
+        try stopLocked(session: session)
     }
 
     private static func stopLocked(session: Session) throws {
@@ -217,10 +239,13 @@ public enum Lifecycle {
     }
 
     public static func runningPID(options: Options) -> Int32? {
-        let session = session(for: options)
-        guard let record = try? readRecord(at: session.recordURL),
-              processMatches(record) else { return nil }
-        return record.pid
+        let sessions = [session(for: options), legacySimulatorSession(for: options)].compactMap { $0 }
+        for session in sessions {
+            guard let record = try? readRecord(at: session.recordURL),
+                  processMatches(record) else { continue }
+            return record.pid
+        }
+        return nil
     }
 
     public static func patchDirectory(
@@ -345,6 +370,28 @@ public enum Lifecycle {
         }
         defer { _ = flock(descriptor, LOCK_UN) }
         return try operation()
+    }
+
+    /// Acquires more than one session lock in path order, so simultaneous
+    /// launches for two simulators cannot deadlock while both retire the legacy
+    /// generic session.
+    static func withSessionLocks<T>(_ sessions: [Session], operation: () throws -> T) throws -> T {
+        var seen: Set<String> = []
+        let ordered = sessions.sorted { $0.lockURL.path < $1.lockURL.path }
+            .filter { seen.insert($0.lockURL.path).inserted }
+
+        func acquire(_ index: Int) throws -> T {
+            guard index < ordered.count else { return try operation() }
+            return try withSessionLock(ordered[index]) { try acquire(index + 1) }
+        }
+        return try acquire(0)
+    }
+
+    static func legacySimulatorSession(for options: Options) -> Session? {
+        guard options.device == nil, options.simulator != nil else { return nil }
+        var legacy = options
+        legacy.simulator = nil
+        return session(for: legacy)
     }
 
     /// Spawn directly into a new session. `Process` creates a process-group

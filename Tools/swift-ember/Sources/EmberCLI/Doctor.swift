@@ -28,6 +28,11 @@ public enum Doctor {
                   passed: line?.contains("connected") == true && line?.contains("physical") == true)
             check("Patch signing", context.codeSigningIdentity ?? "pass --signing-identity or configure Development signing",
                   passed: context.codeSigningIdentity?.isEmpty == false)
+        } else if let simulator = context.simulatorIdentifier {
+            let devices = shell("/usr/bin/xcrun", ["simctl", "list", "devices"])
+            let line = devices.split(separator: "\n").first { $0.contains(simulator) }.map(String.init)
+            check("Simulator", line ?? "boot the selected simulator \(simulator)",
+                  passed: line?.contains("(Booted)") == true)
         } else {
             let booted = shell("/usr/bin/xcrun", ["simctl", "list", "devices", "booted"])
             let hasDevice = booted.contains("Booted")
