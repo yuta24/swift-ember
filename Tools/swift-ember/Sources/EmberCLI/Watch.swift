@@ -74,7 +74,15 @@ public enum Watch {
 
         let watcher = FileWatcher(roots: roots)
         defer { watcher.stop() }
-        watcher.prime()
+        do {
+            try watcher.prime()
+        } catch let failure as FileWatcher.ScanFailure {
+            throw EmberError(
+                stage: .watch,
+                subject: "source roots",
+                reason: "cannot take the initial source snapshot.\n\n\(failure)",
+                recovery: .configure)
+        }
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         if let device = context.deviceIdentifier {
@@ -142,7 +150,13 @@ public enum Watch {
 
         var termination: TerminationSignals?
         let changes = AsyncStream<[FileWatcher.Change]> { continuation in
-            watcher.start { continuation.yield($0) }
+            watcher.start(onScanFailure: { failure in
+                print("")
+                print("[WATCH] source roots")
+                print(failure.description)
+                print("No source changes will be applied until a complete scan succeeds; retrying.")
+                print("")
+            }) { continuation.yield($0) }
             termination = TerminationSignals { continuation.finish() }
         }
         defer { termination?.cancel() }
