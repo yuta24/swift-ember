@@ -350,6 +350,13 @@ declaration returning an opaque result type except the explicitly erased
 SwiftUI shape above. `PRD.md` section 8 is the full tier list, and `DESIGN.md`
 section 7.3b is where those two numbers come from.
 
+Deleting or renaming a watched Swift file also requires a rebuild. The watcher
+refuses the whole save batch and all later saves in that watcher session. After
+the rebuild, the `xcode start` Build post-action starts a fresh watcher;
+foreground `swift-ember watch` sessions must be restarted manually. This keeps
+the added half of a rename and any changes skipped alongside it from being
+applied on their own.
+
 ## Layout
 
 ```
