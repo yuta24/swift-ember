@@ -224,10 +224,10 @@ app:
 
 `xcode start` skips configurations other than the one in the configuration
 file, replaces the old watcher after a rebuild, and returns only when the new
-watcher is ready. It also selects the active physical device when Xcode is
-building for one; Simulator needs no identifier. The background process keeps
-the selected `DEVELOPER_DIR` but does not inherit transient build-script or
-debugger variables. Its detailed output remains in `.ember/logs`.
+watcher is ready. It automatically selects Xcode's active Simulator or physical
+device; watchers for different Simulators remain isolated. The background
+process keeps the selected `DEVELOPER_DIR` but does not inherit transient
+build-script or debugger variables. Its detailed output remains in `.ember/logs`.
 
 The executable may live inside the repository instead; use its absolute path
 derived from `SRCROOT`, for example
@@ -240,6 +240,23 @@ fully explicit form remains supported:
 ```sh
 swift-ember watch --project App.xcodeproj --scheme App --sources Sources
 ```
+
+When more than one Simulator is booted, terminal commands need the Simulator
+UDID that Xcode Scheme actions obtain automatically:
+
+```sh
+xcrun simctl list devices booted
+
+swift-ember doctor --project App.xcodeproj --scheme App \
+  --simulator <Simulator-UDID>
+swift-ember watch --project App.xcodeproj --scheme App \
+  --simulator <Simulator-UDID>
+swift-ember stop --project App.xcodeproj --scheme App \
+  --simulator <Simulator-UDID>
+```
+
+Pass the same `--simulator` value to `start`, `status`, and `stop` when using
+the background lifecycle from a terminal.
 
 For a physical device, build and run the Debug app on that device once, then
 select its CoreDevice identifier:

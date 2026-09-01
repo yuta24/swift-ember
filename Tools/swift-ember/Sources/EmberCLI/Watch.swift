@@ -79,6 +79,8 @@ public enum Watch {
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         if let device = context.deviceIdentifier {
             print("targeting physical device \(device) through CoreDevice")
+        } else if let simulator = context.simulatorIdentifier {
+            print("targeting simulator \(simulator) on 127.0.0.1:\(port)")
         } else {
             print("listening on 127.0.0.1:\(port)")
         }

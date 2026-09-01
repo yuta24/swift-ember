@@ -71,7 +71,9 @@ public actor PatchCoordinator {
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
         if context.deviceIdentifier == nil {
-            self.simulatorContainer = SimulatorContainer(bundleIdentifier: context.bundleIdentifier)
+            self.simulatorContainer = SimulatorContainer(
+                bundleIdentifier: context.bundleIdentifier,
+                deviceIdentifier: context.simulatorIdentifier)
             self.physicalDevice = nil
         } else {
             self.simulatorContainer = nil
@@ -604,11 +606,13 @@ extension PatchCoordinator {
 /// Isolated here so that the rest of the daemon does not learn about `simctl`.
 final class SimulatorContainer: @unchecked Sendable {
     let bundleIdentifier: String
+    let deviceIdentifier: String?
     private let lock = NSLock()
     private var cached: URL?
 
-    init(bundleIdentifier: String) {
+    init(bundleIdentifier: String, deviceIdentifier: String? = nil) {
         self.bundleIdentifier = bundleIdentifier
+        self.deviceIdentifier = deviceIdentifier
     }
 
     /// Forgets the cached path. Called when the app goes away, because a
@@ -626,8 +630,10 @@ final class SimulatorContainer: @unchecked Sendable {
     private func dataContainer() throws -> URL {
         if let cached = lock.withLock({ cached }) { return cached }
 
-        let result = try Subprocess.run("/usr/bin/xcrun",
-                                        arguments: ["simctl", "get_app_container", "booted", bundleIdentifier, "data"])
+        let result = try Subprocess.run(
+            "/usr/bin/xcrun",
+            arguments: Self.containerArguments(
+                bundleIdentifier: bundleIdentifier, deviceIdentifier: deviceIdentifier))
         let path = result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard result.exitCode == 0, !path.isEmpty else {
             throw EmberError(stage: .transfer, subject: bundleIdentifier,
@@ -637,6 +643,10 @@ final class SimulatorContainer: @unchecked Sendable {
         let url = URL(fileURLWithPath: path)
         lock.withLock { cached = url }
         return url
+    }
+
+    static func containerArguments(bundleIdentifier: String, deviceIdentifier: String?) -> [String] {
+        ["simctl", "get_app_container", deviceIdentifier ?? "booted", bundleIdentifier, "data"]
     }
 
     /// The daemon publishes where to reach it into the app's own Documents

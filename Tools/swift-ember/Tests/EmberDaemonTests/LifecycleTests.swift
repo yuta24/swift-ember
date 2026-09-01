@@ -50,6 +50,55 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     first.configuration = "Debug"
     first.device = "DEVICE-ID"
     #expect(Lifecycle.session(for: first).name != Lifecycle.session(for: same).name)
+
+    first.device = nil
+    first.simulator = "SIMULATOR-A"
+    let otherSimulator = Options(command: .start, project: "App.xcodeproj", scheme: "App",
+                                 simulator: "SIMULATOR-B")
+    #expect(Lifecycle.session(for: first).name != Lifecycle.session(for: same).name)
+    #expect(Lifecycle.session(for: first).name != Lifecycle.session(for: otherSimulator).name)
+}
+
+@Test func existingSessionNamesRemainStableAcrossTheSimulatorSelectionUpgrade() {
+    var options = Options(command: .start, contextPath: "/tmp/ember-context.json")
+    #expect(Lifecycle.session(for: options).name == "ember-context-514d00a4f2046661")
+
+    options.device = "DEVICE-ID"
+    #expect(Lifecycle.session(for: options).name == "ember-context-afc0674b24c56583")
+}
+
+@Test func aSelectedSimulatorCanFindAndRetireTheLegacyGenericSession() throws {
+    var (options, root) = temporaryOptions()
+    defer { try? FileManager.default.removeItem(at: root) }
+    options.simulator = "SIMULATOR-ID"
+    let legacy = try #require(Lifecycle.legacySimulatorSession(for: options))
+    #expect(legacy.name == Lifecycle.session(for: Options(
+        command: .status, contextPath: options.contextPath)).name)
+
+    try FileManager.default.createDirectory(
+        at: legacy.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let data = Data(
+        #"{"pid":2147483647,"executablePath":"/bin/sleep","startedAtMicroseconds":0}"#.utf8)
+    try data.write(to: legacy.recordURL)
+    try Data("context".utf8).write(to: legacy.contextURL)
+
+    try Lifecycle.stop(options: options)
+    #expect(!FileManager.default.fileExists(atPath: legacy.recordURL.path))
+    #expect(!FileManager.default.fileExists(atPath: legacy.contextURL.path))
+}
+
+@Test func simulatorScopedStatusRecognisesALiveLegacyWatcher() throws {
+    var (options, root) = temporaryOptions()
+    defer { try? FileManager.default.removeItem(at: root) }
+    options.simulator = "SIMULATOR-ID"
+    let legacy = try #require(Lifecycle.legacySimulatorSession(for: options))
+    try FileManager.default.createDirectory(
+        at: legacy.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let environment = ["SWIFT_EMBER_SESSION_RECORD": legacy.recordURL.path]
+    try Lifecycle.markReady(environment: environment)
+
+    #expect(Lifecycle.runningPID(options: options) == getpid())
+    Lifecycle.removeOwnedRecord(environment: environment)
 }
 
 @Test func watchInvocationsSelectIsolatedPatchDirectories() {
