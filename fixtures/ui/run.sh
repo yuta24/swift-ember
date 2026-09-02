@@ -23,6 +23,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/.build}"
 MODULE=Fixture
 BUNDLE_ID=dev.swift-ember.UIFixture
+STARTUP_TIMEOUT_SECONDS=15
 
 # The crash these pin needs the iOS 26 eraser. Below that `some View` erases to
 # AnyView, which tolerates a type change, so a run at an older target is a
@@ -47,6 +48,25 @@ if ! xcrun simctl list devices booted | grep -q Booted; then
 fi
 RUNTIME="$(xcrun simctl getenv booted SIMULATOR_RUNTIME_VERSION 2>/dev/null)"
 [ -n "$RUNTIME" ] || RUNTIME=unknown
+
+wait_for_heartbeat() {
+    local deadline data heartbeat
+    deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+
+    while :; do
+        data="$(xcrun simctl get_app_container booted "$BUNDLE_ID" data 2>/dev/null)"
+        if [ -n "$data" ]; then
+            heartbeat="$(cat "$data/Documents/heartbeat" 2>/dev/null)"
+            if [ -n "$heartbeat" ]; then
+                printf '%s\n' "$data"
+                return 0
+            fi
+        fi
+
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 1
+    done
+}
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
@@ -139,16 +159,24 @@ for dir in "$ROOT"/Cases/*/; do
 
     if [ -z "$verdict" ]; then
         xcrun simctl uninstall booted "$BUNDLE_ID" > /dev/null 2>&1
-        xcrun simctl install booted "$app" > /dev/null 2>&1
-        xcrun simctl launch booted "$BUNDLE_ID" > /dev/null 2>&1
-        sleep 3
+        install_output=""
+        launch_output=""
+        if ! install_output="$(xcrun simctl install booted "$app" 2>&1)"; then
+            verdict=FAIL; detail="application install failed: ${install_output:-no diagnostic}"
+        elif ! launch_output="$(xcrun simctl launch booted "$BUNDLE_ID" 2>&1)"; then
+            verdict=FAIL; detail="application launch failed: ${launch_output:-no diagnostic}"
+        elif ! data="$(wait_for_heartbeat)"; then
+            verdict=FAIL
+            detail="application did not start beating within ${STARTUP_TIMEOUT_SECONDS}s (${launch_output:-launch returned no output})"
+        fi
 
-        data="$(xcrun simctl get_app_container booted "$BUNDLE_ID" data 2>/dev/null)"
-        before="$(cat "$data/Documents/heartbeat" 2>/dev/null || echo "")"
-        rendered_before="$(cat "$data/Documents/rendered" 2>/dev/null || echo "")"
-        if [ -z "$before" ]; then
-            verdict=FAIL; detail="the application never started beating"
-        else
+        before=""
+        rendered_before=""
+        if [ -z "$verdict" ]; then
+            before="$(cat "$data/Documents/heartbeat" 2>/dev/null || echo "")"
+            rendered_before="$(cat "$data/Documents/rendered" 2>/dev/null || echo "")"
+        fi
+        if [ -z "$verdict" ]; then
             mkdir -p "$data/Documents/Patches"
             cp "$out/Patch.dylib" "$data/Documents/Patches/Patch.dylib"
 
