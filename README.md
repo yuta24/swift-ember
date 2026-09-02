@@ -51,10 +51,10 @@ configuring the project.
 
 ### Host CLI
 
-Download the `0.3.0` binary and install it in `$HOME/.local/bin`:
+Download the `0.4.0` binary and install it in `$HOME/.local/bin`:
 
 ```sh
-version=0.3.0
+version=0.4.0
 curl -fL \
   "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip" \
   -o swift-ember.zip
@@ -76,7 +76,7 @@ targets and build-tool plugins. Normal command-line installation should use
 To build the host CLI from source instead:
 
 ```sh
-git clone --branch 0.3.0 --depth 1 https://github.com/yuta24/swift-ember.git
+git clone --branch 0.4.0 --depth 1 https://github.com/yuta24/swift-ember.git
 cd swift-ember
 swift build -c release --package-path Tools/swift-ember
 mkdir -p "$HOME/.local/bin"
@@ -94,7 +94,7 @@ the root package resolve no SwiftSyntax dependency.
 
 In Xcode, choose **File > Add Package Dependencies**, enter
 `https://github.com/yuta24/swift-ember.git`, and select **Up to Next Minor
-Version** starting at `0.3.0`. Add `EmberRuntime` to a UIKit target, or
+Version** starting at `0.4.0`. Add `EmberRuntime` to a UIKit target, or
 `EmberSwiftUI` to a SwiftUI target; `EmberSwiftUI` brings and re-exports the
 runtime.
 
@@ -103,7 +103,7 @@ In another Swift package, declare the same dependency as:
 ```swift
 .package(
     url: "https://github.com/yuta24/swift-ember.git",
-    .upToNextMinor(from: "0.3.0")
+    .upToNextMinor(from: "0.4.0")
 )
 ```
 
