@@ -26,6 +26,9 @@ public struct Options {
     public var scheme: String?
     public var configuration = "Debug"
     public var sourceRoots: [String] = []
+    /// Nil means an emitted context keeps its own exclusions. An explicit or
+    /// project-configured empty array deliberately clears them.
+    public var excludedSourcePaths: [String]?
     public var device: String?
     /// Populated from Xcode's environment for Scheme actions. This is kept
     /// separate from `device`, whose presence selects the physical transport.
@@ -56,6 +59,7 @@ public struct Options {
       --scheme <name>                required with either
       --configuration <name>         default Debug
       --sources <dir>[,<dir>...]     default the project's SRCROOT
+      --exclude <path>[,<path>...]   omit files or directories from change monitoring
       --device <CoreDevice-ID>       target a connected physical iOS device
       --simulator <Simulator-UDID>   target a specific iOS Simulator
       --signing-identity <name|SHA>  override the patch signing identity
@@ -114,6 +118,7 @@ public struct Options {
         var scheme = false
         var configuration = false
         var sources = false
+        var excludes = false
         var device = false
         var simulator = false
         var startupTimeout = false
@@ -164,6 +169,11 @@ public struct Options {
                     .split(separator: ",")
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
                 explicit.sources = true
+            case "--exclude":
+                options.excludedSourcePaths = try value(after: argument)
+                    .split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                explicit.excludes = true
             case "--device":
                 options.device = try value(after: argument)
                 explicit.device = true
@@ -289,13 +299,15 @@ public struct Options {
                                 configuration: configuration,
                                 deviceIdentifier: device,
                                 simulatorIdentifier: simulator)
-            .resolve(sourceRoots: sourceRoots)
+            .resolve(sourceRoots: sourceRoots,
+                     excludedSourcePaths: excludedSourcePaths ?? [])
     }
 
     /// The project when there is one, the manifest otherwise.
     public func buildContext(project: XcodeProject.Resolved?) throws -> BuildContext {
         if let project {
             var context = project.context
+            if let excludedSourcePaths { context.excludedSourcePaths = excludedSourcePaths }
             if let signingIdentity { context.codeSigningIdentity = signingIdentity }
             return context
         }
@@ -303,6 +315,7 @@ public struct Options {
         let url = URL(fileURLWithPath: contextPath)
         do {
             var context = try BuildContext.load(from: url)
+            if let excludedSourcePaths { context.excludedSourcePaths = excludedSourcePaths }
             if let device {
                 context.deviceIdentifier = device
                 context.simulatorIdentifier = nil

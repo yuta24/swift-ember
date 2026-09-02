@@ -72,6 +72,9 @@ case .status:
     }
     print("app binary         \(context.appBinaryPath)")
     print("sources            \(context.sourceRoots.joined(separator: ", "))")
+    if !context.excludedSourcePaths.isEmpty {
+        print("excluded           \(context.excludedSourcePaths.joined(separator: ", "))")
+    }
     print("defines            \(context.extraCompilerFlags.joined(separator: " "))")
     print("build identity     \(context.identity)")
 

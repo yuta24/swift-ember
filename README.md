@@ -170,6 +170,10 @@ checkout:
   "sources": [
     "Sources",
     "Packages/Feature/Sources"
+  ],
+  "exclude": [
+    "Sources/Generated",
+    "Sources/Legacy/DoNotWatch.swift"
   ]
 }
 ```
@@ -177,8 +181,13 @@ checkout:
 `project` may be used instead of `workspace`. `configuration` defaults to
 `Debug`, `sources` defaults to the app target's `SRCROOT`, and the nearest
 `.swift-ember.json` is found by walking upward from the current directory (or
-Xcode's `SRCROOT`). Command-line options override the file. Unknown keys are
-rejected so a misspelled `sources` cannot silently narrow what is watched.
+Xcode's `SRCROOT`). `exclude` accepts files or directories; a directory omits
+its complete subtree from change monitoring. Excluded Swift sources may still
+be read once when the watcher starts for cross-file safety validation. Paths
+are relative to `.swift-ember.json`, just like `sources`. Command-line options
+override the file, including `--exclude` for an explicit comma-separated list.
+Unknown keys are rejected so a misspelled `sources` or `exclude` cannot silently
+change what is watched.
 
 A complete explicit target (`--project`/`--workspace` together with `--scheme`,
 or `--context`) bypasses automatic discovery. Pass `--config <path>` to use a

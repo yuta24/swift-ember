@@ -1,4 +1,5 @@
 import Foundation
+import EmberCore
 
 /// Watches Swift sources for additions, saves, and removals.
 ///
@@ -40,13 +41,19 @@ public final class FileWatcher: @unchecked Sendable {
     }
 
     private let roots: [URL]
+    private let sourceFilter: SourcePathFilter
     private let interval: Duration
     private let lock = NSLock()
     private var stamps: [URL: Date] = [:]
     private var task: Task<Void, Never>?
 
-    public init(roots: [URL], interval: Duration = .milliseconds(150)) {
+    public init(
+        roots: [URL],
+        excluding excluded: [URL] = [],
+        interval: Duration = .milliseconds(150)
+    ) {
         self.roots = roots
+        self.sourceFilter = SourcePathFilter(excluding: excluded)
         self.interval = interval
     }
 
@@ -121,6 +128,7 @@ public final class FileWatcher: @unchecked Sendable {
         let manager = FileManager.default
         for root in roots {
             let root = root.standardizedFileURL
+            guard !sourceFilter.excludes(root) else { continue }
             guard let walker = manager.enumerator(at: root,
                                                   includingPropertiesForKeys: [.contentModificationDateKey],
                                                   options: [.skipsHiddenFiles],
@@ -131,7 +139,12 @@ public final class FileWatcher: @unchecked Sendable {
                 problems.append("\(root.path): could not enumerate the source root")
                 continue
             }
-            for case let url as URL in walker where url.pathExtension == "swift" {
+            for case let url as URL in walker {
+                if sourceFilter.excludes(url) {
+                    walker.skipDescendants()
+                    continue
+                }
+                guard url.pathExtension == "swift" else { continue }
                 do {
                     let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
                     guard let date = values.contentModificationDate else {

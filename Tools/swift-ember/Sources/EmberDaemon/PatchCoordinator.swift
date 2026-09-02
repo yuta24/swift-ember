@@ -42,6 +42,11 @@ public actor PatchCoordinator {
     private var physicalProcessId: Int32?
 
     private var baselines: [URL: String] = [:]
+    /// Build-time snapshots for sources omitted from file watching. They still
+    /// participate in cross-file safety checks because their declarations are
+    /// present in the running binary. Keeping their original text also avoids
+    /// trusting an ignored on-disk edit that the process has not rebuilt.
+    private var excludedSafetyBaselines: [URL: String] = [:]
     /// The baseline's parsed form, kept because it only changes when a patch
     /// lands. Re-parsing it on every save doubled the cost of classification,
     /// which is the one stage that grows with the size of the file being
@@ -92,7 +97,10 @@ public actor PatchCoordinator {
     /// Everything afterwards is diffed against this, and the baseline advances
     /// only when a patch actually lands, so a rejected edit stays visible on
     /// the next save instead of being silently absorbed.
-    public func primeBaselines(from roots: [URL]) {
+    public func primeBaselines(
+        from roots: [URL],
+        excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+    ) {
         for root in roots {
             guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
                                                               options: [.skipsHiddenFiles]) else { continue }
@@ -100,7 +108,13 @@ public actor PatchCoordinator {
                 // Text only. Parsing every file at startup would cost a large
                 // project seconds before the first edit, and most files are
                 // never touched in a session.
-                baselines[url.standardizedFileURL] = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                let url = url.standardizedFileURL
+                let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                if sourceFilter.excludes(url) {
+                    excludedSafetyBaselines[url] = source
+                } else {
+                    baselines[url] = source
+                }
             }
         }
     }
@@ -569,13 +583,17 @@ public actor PatchCoordinator {
         }
     }
 
-    /// A declaration in another watched file that can shadow the adapter's
-    /// modifier. The edited file was already checked by its FileIndex.
+    /// A declaration in another file from the running build that can shadow
+    /// the adapter's modifier. The edited file was already checked by its
+    /// FileIndex. Excluded sources use their build-time text: ignored edits do
+    /// not change the code already loaded in the process.
     private func emberBoundaryNameConflict(excluding edited: URL) -> URL? {
         let editedModule = resolver.resolve(edited).module
-        for candidate in baselines.keys where candidate != edited {
+        let candidates = Set(baselines.keys).union(excludedSafetyBaselines.keys)
+            .sorted { $0.path < $1.path }
+        for candidate in candidates where candidate != edited {
             guard resolver.resolve(candidate).module == editedModule else { continue }
-            guard let source = try? String(contentsOf: candidate, encoding: .utf8) else { continue }
+            guard let source = baselines[candidate] ?? excludedSafetyBaselines[candidate] else { continue }
             if DeclarationIndexer.index(source: source).declaresEmberable {
                 return candidate
             }

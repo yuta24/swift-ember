@@ -11,6 +11,8 @@ public enum Watch {
     ) async throws {
         try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
+        let excluded = context.excludedSourcePaths.map { URL(fileURLWithPath: $0) }
+        let sourceFilter = SourcePathFilter(excluding: excluded)
 
         // `doctor` checks this and `watch` did not, so pointing it at a
         // product that had never been built started a normal-looking session
@@ -69,10 +71,10 @@ public enum Watch {
         server.onEvent = { print($0) }
         let port = try await server.start()
 
-        await coordinator.primeBaselines(from: roots)
+        await coordinator.primeBaselines(from: roots, excluding: sourceFilter)
         try await coordinator.announceSession()
 
-        let watcher = FileWatcher(roots: roots)
+        let watcher = FileWatcher(roots: roots, excluding: excluded)
         defer { watcher.stop() }
         do {
             try watcher.prime()

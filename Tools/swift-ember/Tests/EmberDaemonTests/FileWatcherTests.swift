@@ -90,6 +90,39 @@ private func write(_ source: String, to url: URL) throws {
     }
 }
 
+@Test func excludedFilesAndDirectoriesDoNotProduceChanges() throws {
+    try withWatcher { root, _ in
+        let generated = root.appendingPathComponent("Generated", isDirectory: true)
+        let ignoredFile = root.appendingPathComponent("Ignored.swift")
+        let includedFile = root.appendingPathComponent("Included.swift")
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: true)
+        try write("struct Generated {}", to: generated.appendingPathComponent("Generated.swift"))
+        try write("struct Ignored {}", to: ignoredFile)
+        try write("struct Included {}", to: includedFile)
+
+        let watcher = FileWatcher(roots: [root], excluding: [generated, ignoredFile])
+        try watcher.prime()
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 60)],
+            ofItemAtPath: generated.appendingPathComponent("Generated.swift").path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: ignoredFile.path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: includedFile.path)
+
+        #expect(try watcher.poll() == [.init(url: includedFile, kind: .modified)])
+    }
+}
+
+@Test func exclusionsRespectPathComponentBoundaries() {
+    let filter = SourcePathFilter(excluding: [URL(fileURLWithPath: "/project/Sources")])
+
+    #expect(filter.excludes(URL(fileURLWithPath: "/project/Sources/Feature.swift")))
+    #expect(filter.excludes(URL(fileURLWithPath: "/project/Sources")))
+    #expect(!filter.excludes(URL(fileURLWithPath: "/project/SourcesExtra/Feature.swift")))
+}
+
 @Test func anIncompleteScanPreservesTheLastCompleteSnapshot() throws {
     try withWatcher { root, watcher in
         let source = root.appendingPathComponent("Feature.swift")

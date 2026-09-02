@@ -135,7 +135,7 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     #expect(error.reason.contains("App"), "and say what is patchable")
 }
 
-@Test func aSwiftUIBoundaryIsRefusedWhenAnotherFileCanShadowIt() async throws {
+@Test func aSwiftUIBoundaryChecksTheBuiltVersionOfAnExcludedFile() async throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("ember-swiftui-shadow-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -151,8 +151,8 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
         }
         """
     try baseline.write(to: subject, atomically: true, encoding: .utf8)
-    try "func emberable() {}"
-        .write(to: root.appendingPathComponent("Shadow.swift"), atomically: true, encoding: .utf8)
+    let shadow = root.appendingPathComponent("Shadow.swift")
+    try "func emberable() {}".write(to: shadow, atomically: true, encoding: .utf8)
 
     let server = try IPCServer()
     _ = try await server.start()
@@ -161,11 +161,17 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
         targetTriple: "arm64-apple-macosx26.0", sdkPath: "/", sdkName: "macosx",
         appBinaryPath: root.appendingPathComponent("app").path,
         moduleSearchPaths: [root.path], extraCompilerFlags: [],
-        sourceRoots: [root.path], bundleIdentifier: "dev.swift-ember.tests")
+        sourceRoots: [root.path], bundleIdentifier: "dev.swift-ember.tests",
+        excludedSourcePaths: [shadow.path])
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("p"),
         inventory: ModuleInventory(keys: ["App": 20]))
-    await coordinator.primeBaselines(from: [root])
+    await coordinator.primeBaselines(
+        from: [root], excluding: SourcePathFilter(excluding: [shadow]))
+
+    // The ignored file can change on disk without changing the running build.
+    // Safety checks must keep using the source snapshot that produced it.
+    try "func harmless() {}".write(to: shadow, atomically: true, encoding: .utf8)
 
     try baseline.replacingOccurrences(of: "Text(\"old\")", with: "VStack { Text(\"new\") }")
         .write(to: subject, atomically: true, encoding: .utf8)

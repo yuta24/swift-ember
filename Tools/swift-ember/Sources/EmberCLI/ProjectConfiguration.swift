@@ -10,6 +10,7 @@ struct ProjectConfiguration: Decodable {
     let scheme: String?
     let configuration: String?
     let sources: [String]?
+    let exclude: [String]?
     let startupTimeout: TimeInterval?
 
     enum ConfigurationError: Error, CustomStringConvertible {
@@ -17,6 +18,7 @@ struct ProjectConfiguration: Decodable {
         case bothContainers(URL)
         case missingScheme(URL)
         case invalidStartupTimeout(URL)
+        case emptyExcludePath(URL)
         case unknownKeys(URL, [String])
 
         var description: String {
@@ -29,6 +31,8 @@ struct ProjectConfiguration: Decodable {
                 "\(url.path) needs a scheme with its project or workspace"
             case .invalidStartupTimeout(let url):
                 "\(url.path) has an invalid startupTimeout; use a positive number"
+            case .emptyExcludePath(let url):
+                "\(url.path) has an empty exclude path; remove it or use an empty array"
             case .unknownKeys(let url, let keys):
                 "\(url.path) has unknown keys: \(keys.joined(separator: ", "))"
             }
@@ -41,7 +45,8 @@ struct ProjectConfiguration: Decodable {
             let data = try Data(contentsOf: url)
             if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 let allowed: Set<String> = [
-                    "project", "workspace", "scheme", "configuration", "sources", "startupTimeout",
+                    "project", "workspace", "scheme", "configuration", "sources", "exclude",
+                    "startupTimeout",
                 ]
                 let unknown = object.keys.filter { !allowed.contains($0) }.sorted()
                 if !unknown.isEmpty { throw ConfigurationError.unknownKeys(url, unknown) }
@@ -63,6 +68,11 @@ struct ProjectConfiguration: Decodable {
         if let timeout = configuration.startupTimeout,
            !timeout.isFinite || timeout <= 0 {
             throw ConfigurationError.invalidStartupTimeout(url)
+        }
+        if configuration.exclude?.contains(where: {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) == true {
+            throw ConfigurationError.emptyExcludePath(url)
         }
         return configuration
     }
@@ -113,6 +123,9 @@ struct ProjectConfiguration: Decodable {
         if !explicit.configuration, let configuration { options.configuration = configuration }
         if !explicit.context && !explicit.sources, let sources {
             options.sourceRoots = sources.map { Self.absoluteURL($0, relativeTo: root).path }
+        }
+        if !explicit.excludes, let exclude {
+            options.excludedSourcePaths = exclude.map { Self.absoluteURL($0, relativeTo: root).path }
         }
         if !explicit.startupTimeout, let startupTimeout {
             options.startupTimeout = startupTimeout
