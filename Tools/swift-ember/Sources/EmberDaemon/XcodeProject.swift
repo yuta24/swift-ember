@@ -66,7 +66,7 @@ public struct XcodeProject: Sendable {
         public var declaredConfigured: Bool { settings["EMBER_CONFIGURED"] == "YES" }
     }
 
-    public func resolve(sourceRoots: [String]) throws -> Resolved {
+    public func resolve(sourceRoots: [String], excludedSourcePaths: [String] = []) throws -> Resolved {
         let settings = try readSettings()
 
         func require(_ key: String) throws -> String {
@@ -172,7 +172,8 @@ public struct XcodeProject: Sendable {
                 + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
             deviceIdentifier: deviceIdentifier,
             simulatorIdentifier: simulatorIdentifier,
-            codeSigningIdentity: Self.signingIdentity(from: settings))
+            codeSigningIdentity: Self.signingIdentity(from: settings),
+            excludedSourcePaths: excludedSourcePaths)
 
         return Resolved(context: context, settings: settings)
     }

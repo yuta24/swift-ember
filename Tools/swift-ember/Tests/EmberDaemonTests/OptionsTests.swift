@@ -44,7 +44,8 @@ private func withConfiguration(
         {
           "workspace": "Bookshelf.xcworkspace",
           "scheme": "Client Develop",
-          "sources": ["Presentation/Sources", "Client/Sources"]
+          "sources": ["Presentation/Sources", "Client/Sources"],
+          "exclude": ["Client/Sources/Generated", "Vendor/Legacy.swift"]
         }
         """#, in: true) { root, current in
         let options = try Options.parse(
@@ -57,6 +58,10 @@ private func withConfiguration(
             root.appendingPathComponent("Presentation/Sources").path,
             root.appendingPathComponent("Client/Sources").path,
         ])
+        #expect(options.excludedSourcePaths == [
+            root.appendingPathComponent("Client/Sources/Generated").path,
+            root.appendingPathComponent("Vendor/Legacy.swift").path,
+        ])
         #expect(options.configPath == root.appendingPathComponent(".swift-ember.json").path)
     }
 }
@@ -67,19 +72,22 @@ private func withConfiguration(
           "workspace": "Configured.xcworkspace",
           "scheme": "Configured",
           "configuration": "Debug",
-          "sources": ["ConfiguredSources"]
+          "sources": ["ConfiguredSources"],
+          "exclude": ["ConfiguredSources/Generated"]
         }
         """#) { _, current in
         let options = try Options.parse([
             "watch", "--config", current.appendingPathComponent(".swift-ember.json").path,
             "--project", "Explicit.xcodeproj", "--scheme", "Explicit",
             "--configuration", "Profile", "--sources", "A,B",
+            "--exclude", "A/Fixtures,B/Generated.swift",
         ], environment: [:], currentDirectory: current)
         #expect(options.project == "Explicit.xcodeproj")
         #expect(options.workspace == nil)
         #expect(options.scheme == "Explicit")
         #expect(options.configuration == "Profile")
         #expect(options.sourceRoots == ["A", "B"])
+        #expect(options.excludedSourcePaths == ["A/Fixtures", "B/Generated.swift"])
     }
 }
 
@@ -231,6 +239,20 @@ private func withConfiguration(
     }
 }
 
+@Test func emptyProjectConfigurationExclusionsAreRejected() throws {
+    try withConfiguration(#"{"exclude":["  "]}"#) { _, current in
+        do {
+            _ = try Options.parse(["watch"], environment: [:], currentDirectory: current)
+            Issue.record("an empty exclude path should be rejected")
+        } catch Options.ParseError.configuration(let reason) {
+            #expect(reason.contains("empty exclude path"))
+            #expect(reason.contains("use an empty array"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+}
+
 @Test func flagsMayComeBeforeOrAfterTheCommand() throws {
     let before = try parse("--scheme", "App", "--project", "App.xcodeproj", "watch")
     let after = try parse("watch", "--project", "App.xcodeproj", "--scheme", "App")
@@ -307,6 +329,34 @@ private func withConfiguration(
 @Test func sourcesSplitOnCommasAndTrim() throws {
     let options = try parse("watch", "--sources", "a/Sources, b/Sources ,c")
     #expect(options.sourceRoots == ["a/Sources", "b/Sources", "c"])
+}
+
+@Test func exclusionsSplitOnCommasAndTrim() throws {
+    let options = try parse("watch", "--exclude", "a/Tests, b/Generated ,c.swift")
+    #expect(options.excludedSourcePaths == ["a/Tests", "b/Generated", "c.swift"])
+}
+
+@Test func explicitExclusionsOverrideAnEmittedContext() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("swift-ember-context-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let contextURL = root.appendingPathComponent("context.json")
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/swiftc", swiftCompilerVersion: "6",
+        targetTriple: "arm64-apple-ios16.0-simulator", sdkPath: "/sdk",
+        sdkName: "iphonesimulator", appBinaryPath: "/App", moduleSearchPaths: [],
+        extraCompilerFlags: [], sourceRoots: ["/Sources"], bundleIdentifier: "id",
+        excludedSourcePaths: ["/Sources/Generated"])
+    try context.write(to: contextURL)
+
+    let options = try Options.parse([
+        "status", "--context", contextURL.path, "--exclude", "/Sources/Fixtures",
+    ], environment: [:], currentDirectory: root)
+    let resolved = try options.buildContext(project: nil)
+
+    #expect(resolved.excludedSourcePaths == ["/Sources/Fixtures"])
 }
 
 @Test func physicalDeviceOptionsParse() throws {
@@ -487,6 +537,7 @@ private func withConfiguration(
     let context = try! JSONDecoder().decode(BuildContext.self, from: Data(json.utf8))
     #expect(context.frameworkSearchPaths.isEmpty)
     #expect(context.sourceRoots == ["/r"])
+    #expect(context.excludedSourcePaths.isEmpty)
     #expect(context.simulatorIdentifier == nil)
 }
 
@@ -497,7 +548,8 @@ private func withConfiguration(
         moduleSearchPaths: ["/m"], extraCompilerFlags: ["-D", "X"],
         sourceRoots: ["/r"], bundleIdentifier: "id",
         debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"],
-        deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING-SHA")
+        deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING-SHA",
+        excludedSourcePaths: ["/r/Generated", "/r/Fixture.swift"])
     let decoded = try JSONDecoder().decode(
         BuildContext.self, from: try JSONEncoder().encode(original))
     #expect(decoded.identity == original.identity)
@@ -507,6 +559,7 @@ private func withConfiguration(
     #expect(decoded.deviceIdentifier == original.deviceIdentifier)
     #expect(decoded.simulatorIdentifier == original.simulatorIdentifier)
     #expect(decoded.codeSigningIdentity == original.codeSigningIdentity)
+    #expect(decoded.excludedSourcePaths == original.excludedSourcePaths)
 
     var simulator = original
     simulator.deviceIdentifier = nil
@@ -564,7 +617,9 @@ private func withConfiguration(
         moduleName: "App", swiftCompilerPath: "/swiftc", swiftCompilerVersion: "6",
         targetTriple: "arm64-apple-ios16.0-simulator", sdkPath: "/sdk",
         sdkName: "iphonesimulator", appBinaryPath: "/App", moduleSearchPaths: [],
-        extraCompilerFlags: [], sourceRoots: [feature.path], bundleIdentifier: "id")
+        extraCompilerFlags: [], sourceRoots: [package.appendingPathComponent("Sources").path],
+        bundleIdentifier: "id",
+        excludedSourcePaths: [helper.path])
 
     #expect(Doctor.watchedModules(context: context) == ["Feature"])
 }

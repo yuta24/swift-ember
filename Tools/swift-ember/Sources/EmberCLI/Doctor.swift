@@ -164,10 +164,14 @@ public enum Doctor {
     /// linked package, including modules no watched file can ever belong to.
     static func watchedModules(context: BuildContext) -> [String] {
         let resolver = ModuleResolver(appModule: context.moduleName)
+        let sourceFilter = SourcePathFilter(excluding: context.excludedSourcePaths.map {
+            URL(fileURLWithPath: $0)
+        })
         var modules = Set<String>()
 
         for path in context.sourceRoots {
             let root = URL(fileURLWithPath: path).standardizedFileURL
+            guard !sourceFilter.excludes(root) else { continue }
             if root.pathExtension == "swift" {
                 if FileManager.default.fileExists(atPath: root.path) {
                     modules.insert(resolver.module(for: root))
@@ -178,7 +182,12 @@ public enum Doctor {
             guard let walker = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-            for case let file as URL in walker where file.pathExtension == "swift" {
+            for case let file as URL in walker {
+                if sourceFilter.excludes(file) {
+                    walker.skipDescendants()
+                    continue
+                }
+                guard file.pathExtension == "swift" else { continue }
                 modules.insert(resolver.module(for: file))
             }
         }
