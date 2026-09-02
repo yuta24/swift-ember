@@ -114,6 +114,29 @@ public struct LoadPatchRequest: Codable, Sendable {
     }
 }
 
+/// daemon -> runtime, for messages that are useful beside the application's
+/// own output in Xcode's debug console.
+///
+/// This is deliberately an additive, one-way message. A runtime built before
+/// it existed can ignore the envelope, and failure to display a log must never
+/// change whether a patch is considered applied.
+public struct RuntimeLogMessage: Codable, Sendable, Equatable {
+    public enum Level: String, Codable, Sendable {
+        case info
+        case success
+        case warning
+        case error
+    }
+
+    public let level: Level
+    public let message: String
+
+    public init(level: Level, message: String) {
+        self.level = level
+        self.message = message
+    }
+}
+
 /// runtime -> daemon.
 public enum LoadPatchResult: Codable, Sendable {
     /// `registered` is how many dynamic replacements the loaded image declared,

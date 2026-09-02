@@ -55,6 +55,32 @@ private func connectedRuntime(to server: IPCServer,
     #expect(generation == 3)
 }
 
+@Test func aOneWayRuntimeLogReachesTheAuthenticatedRuntime() async throws {
+    let server = try await startedServer()
+    defer { server.stop() }
+    let runtime = try await connectedRuntime(to: server)
+
+    let log = RuntimeLogMessage(level: .warning, message: "full rebuild required")
+    try server.send(type: "runtimeLog", payload: log)
+
+    guard let envelope = await runtime.waitForEnvelope() else {
+        Issue.record("the runtime never received the one-way log")
+        return
+    }
+    #expect(envelope.type == "runtimeLog")
+    #expect(try envelope.decode(RuntimeLogMessage.self) == log)
+}
+
+@Test func aOneWayRuntimeLogWithNoAppFailsImmediately() async throws {
+    let server = try await startedServer()
+    defer { server.stop() }
+
+    #expect(throws: IPCServer.IPCError.self) {
+        try server.send(type: "runtimeLog",
+                        payload: RuntimeLogMessage(level: .info, message: "not delivered"))
+    }
+}
+
 @Test func aSilentRuntimeTimesOutInsteadOfHanging() async throws {
     // The regression test. The original implementation raced the reply against
     // a timeout task inside a task group; when the timeout won, the group

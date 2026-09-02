@@ -42,6 +42,16 @@ final class EmberDeviceClient: @unchecked Sendable {
         let processId: Int32
     }
 
+    private struct DeviceRuntimeLogCommand: Codable {
+        let token: String
+        let log: RuntimeLogMessage
+        let expiresAt: Date
+    }
+
+    private struct DeviceRuntimeLogReceipt: Codable {
+        let processId: Int32
+    }
+
     private struct DeviceStatus: Codable {
         let protocolVersion: Int
         let token: String
@@ -143,32 +153,50 @@ final class EmberDeviceClient: @unchecked Sendable {
                   requestID: envelope.requestId, to: response)
             return
         }
-        guard envelope.type == "loadPatch",
-              let command = try? envelope.decode(DeviceLoadCommand.self) else {
-            write(.failed(stage: "LOAD", message: "the runtime could not decode the load request"),
-                  requestID: envelope.requestId, to: response)
-            return
-        }
+        switch envelope.type {
+        case "loadPatch":
+            guard let command = try? envelope.decode(DeviceLoadCommand.self) else {
+                write(.failed(stage: "LOAD", message: "the runtime could not decode the load request"),
+                      requestID: envelope.requestId, to: response)
+                return
+            }
 
-        guard command.expiresAt > Date() else {
-            write(.failed(stage: "LOAD", message: "the device request expired before the app could apply it"),
-                  requestID: envelope.requestId, to: response)
-            return
-        }
+            guard command.expiresAt > Date() else {
+                write(.failed(stage: "LOAD", message: "the device request expired before the app could apply it"),
+                      requestID: envelope.requestId, to: response)
+                return
+            }
 
-        guard command.token == session?.token else {
-            write(.rejected(reason: "the device request belongs to a different watch session"),
-                  requestID: envelope.requestId, to: response)
-            return
-        }
+            guard command.token == session?.token else {
+                write(.rejected(reason: "the device request belongs to a different watch session"),
+                      requestID: envelope.requestId, to: response)
+                return
+            }
 
-        var request = command.request
-        let imageName = URL(fileURLWithPath: request.path).lastPathComponent
-        request.path = documents
-            .appendingPathComponent("Patches", isDirectory: true)
-            .appendingPathComponent(imageName).path
-        write(applier.apply(request), requestID: envelope.requestId, to: response)
-        if let session { writeStatus(for: session) }
+            var request = command.request
+            let imageName = URL(fileURLWithPath: request.path).lastPathComponent
+            request.path = documents
+                .appendingPathComponent("Patches", isDirectory: true)
+                .appendingPathComponent(imageName).path
+            write(applier.apply(request), requestID: envelope.requestId, to: response)
+            if let session { writeStatus(for: session) }
+
+        case "runtimeLog":
+            guard let command = try? envelope.decode(DeviceRuntimeLogCommand.self),
+                  command.expiresAt > Date(), command.token == session?.token else {
+                writeRuntimeLogReceipt(requestID: envelope.requestId, to: response)
+                return
+            }
+            state.report(command.log)
+            // A receipt is a processed marker. The host intentionally does
+            // not wait for or interpret it.
+            writeRuntimeLogReceipt(requestID: envelope.requestId, to: response)
+
+        default:
+            // Mark an unknown request as handled so an additive message from a
+            // newer daemon cannot be re-read every 200 ms by this runtime.
+            writeRuntimeLogReceipt(requestID: envelope.requestId, to: response)
+        }
     }
 
     private func write(_ result: LoadPatchResult, requestID: String, to url: URL) {
@@ -181,10 +209,28 @@ final class EmberDeviceClient: @unchecked Sendable {
         try? data.write(to: url, options: .atomic)
     }
 
+    private func writeRuntimeLogReceipt(requestID: String, to url: URL) {
+        let receipt = DeviceRuntimeLogReceipt(
+            processId: ProcessInfo.processInfo.processIdentifier)
+        guard let payload = try? JSONEncoder().encode(receipt) else { return }
+        let envelope = Envelope(protocolVersion: ProtocolVersion, type: "runtimeLogResult",
+                                requestId: requestID, payload: payload)
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
     private func setConnected(_ value: Bool) {
         guard connected != value else { return }
         connected = value
-        state.setConnected(value)
+        // A session file proves only that a watcher published one at some
+        // point; it can outlive that watcher in the application container.
+        // Avoid claiming a live connection until the device transport has a
+        // heartbeat with which to prove one.
+        state.setConnected(
+            value,
+            consoleMessage: value
+                ? "watch session found on this device"
+                : "waiting for a watch session on this device")
     }
 
     private func writeStatus(for session: Session) {

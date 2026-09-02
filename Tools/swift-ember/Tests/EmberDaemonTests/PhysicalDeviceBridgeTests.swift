@@ -14,6 +14,12 @@ private struct TestDeviceLoadCommand: Codable {
     let expiresAt: Date
 }
 
+private struct TestDeviceRuntimeLogCommand: Codable {
+    let token: String
+    let log: RuntimeLogMessage
+    let expiresAt: Date
+}
+
 private struct TestDeviceStatus: Codable {
     let protocolVersion: Int
     let token: String
@@ -25,15 +31,29 @@ private struct TestDeviceStatus: Codable {
 
 private final class DeviceCommandRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private(set) var calls: [(String, [String])] = []
+    private var recordedCalls: [(String, [String])] = []
+    var calls: [(String, [String])] { lock.withLock { recordedCalls } }
     var appTeam = "TEAM"
     var patchTeam = "TEAM"
     var requestToken: String?
+    private var recordedRuntimeLog: RuntimeLogMessage?
+    private var recordedRuntimeLogs: [RuntimeLogMessage] = []
+    private var recordedRuntimeLogToken: String?
+    private var runtimeLogTransfersStarted = 0
+    private var runtimeLogDelay: TimeInterval = 0
+    var runtimeLog: RuntimeLogMessage? { lock.withLock { recordedRuntimeLog } }
+    var runtimeLogs: [RuntimeLogMessage] { lock.withLock { recordedRuntimeLogs } }
+    var runtimeLogToken: String? { lock.withLock { recordedRuntimeLogToken } }
+    var startedRuntimeLogTransfers: Int { lock.withLock { runtimeLogTransfersStarted } }
     private var response: Data?
     var status: Data?
 
+    func delayRuntimeLogs(by interval: TimeInterval) {
+        lock.withLock { runtimeLogDelay = interval }
+    }
+
     func run(_ executable: String, _ arguments: [String]) throws -> Subprocess.Result {
-        lock.withLock { calls.append((executable, arguments)) }
+        lock.withLock { recordedCalls.append((executable, arguments)) }
 
         if executable == "/usr/bin/codesign", arguments.first == "-d" {
             let path = arguments.last ?? ""
@@ -50,13 +70,27 @@ private final class DeviceCommandRecorder: @unchecked Sendable {
            let file = try FileManager.default.contentsOfDirectory(
             at: URL(fileURLWithPath: source), includingPropertiesForKeys: nil).first {
             let request = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: file))
-            requestToken = try request.decode(TestDeviceLoadCommand.self).token
-            let result = LoadPatchResult.loaded(generation: 1, durationMs: 2,
-                                                registered: 1, refreshed: "layout")
-            let deviceReply = TestDeviceLoadReply(result: result, processId: 42)
-            let reply = try Envelope(type: "loadResult", requestId: request.requestId,
-                                     payload: deviceReply)
-            response = try JSONEncoder().encode(reply)
+            if request.type == "runtimeLog" {
+                let command = try request.decode(TestDeviceRuntimeLogCommand.self)
+                let delay = lock.withLock { () -> TimeInterval in
+                    runtimeLogTransfersStarted += 1
+                    return runtimeLogDelay
+                }
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+                lock.withLock {
+                    recordedRuntimeLog = command.log
+                    recordedRuntimeLogs.append(command.log)
+                    recordedRuntimeLogToken = command.token
+                }
+            } else {
+                requestToken = try request.decode(TestDeviceLoadCommand.self).token
+                let result = LoadPatchResult.loaded(generation: 1, durationMs: 2,
+                                                    registered: 1, refreshed: "layout")
+                let deviceReply = TestDeviceLoadReply(result: result, processId: 42)
+                let reply = try Envelope(type: "loadResult", requestId: request.requestId,
+                                         payload: deviceReply)
+                response = try JSONEncoder().encode(reply)
+            }
         }
 
         if arguments.prefix(4) == ["devicectl", "device", "copy", "from"],
@@ -142,6 +176,60 @@ private func deviceContext(signingIdentity: String? = "SIGNING") -> BuildContext
     #expect(calls.filter { $0.0 == "/usr/bin/xcrun" }.allSatisfy {
         $0.1.contains("DEVICE-ID") && $0.1.contains("dev.example.App")
     })
+}
+
+@Test func physicalDeviceRuntimeLogsAreQueuedOneWayTokenBoundRequests() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("device-log-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let recorder = DeviceCommandRecorder()
+    let bridge = PhysicalDeviceBridge(context: deviceContext(), workDirectory: root,
+                                      runner: recorder.run)
+    try bridge.writeSession(token: "current", buildIdentity: "identity", buildUUIDs: ["uuid"])
+
+    let log = RuntimeLogMessage(level: .error, message: "[COMPILE] Cart.swift\nfailed")
+    recorder.delayRuntimeLogs(by: 0.2)
+    let started = Date()
+    bridge.sendRuntimeLog(log)
+    #expect(Date().timeIntervalSince(started) < 0.1,
+            "runtime log delivery blocked the patch coordinator")
+
+    for _ in 0..<100 where recorder.runtimeLog == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(recorder.runtimeLog == log)
+    #expect(recorder.runtimeLogToken == "current")
+    #expect(!recorder.calls.contains { call in
+        call.1.prefix(4) == ["devicectl", "device", "copy", "from"]
+    })
+}
+
+@Test func physicalDeviceRuntimeLogsKeepOnlyTheNewestPendingResult() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("device-log-coalesce-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let recorder = DeviceCommandRecorder()
+    let bridge = PhysicalDeviceBridge(context: deviceContext(), workDirectory: root,
+                                      runner: recorder.run)
+    try bridge.writeSession(token: "current", buildIdentity: "identity", buildUUIDs: ["uuid"])
+
+    let first = RuntimeLogMessage(level: .success, message: "first result")
+    let superseded = RuntimeLogMessage(level: .error, message: "superseded result")
+    let latest = RuntimeLogMessage(level: .success, message: "latest result")
+    recorder.delayRuntimeLogs(by: 0.2)
+    bridge.sendRuntimeLog(first)
+    for _ in 0..<100 where recorder.startedRuntimeLogTransfers == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(recorder.startedRuntimeLogTransfers == 1)
+
+    bridge.sendRuntimeLog(superseded)
+    bridge.sendRuntimeLog(latest)
+
+    for _ in 0..<100 where recorder.runtimeLogs.last != latest {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(recorder.runtimeLogs == [first, latest])
 }
 
 @Test func aPatchSignedByAnotherTeamIsNeverTransferred() throws {

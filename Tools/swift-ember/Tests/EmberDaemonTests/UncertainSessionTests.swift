@@ -91,6 +91,23 @@ private func edit(_ url: URL, to body: String) throws {
         .write(to: url, atomically: true, encoding: .utf8)
 }
 
+@Test func consecutiveRuntimeLogsAreDeduplicatedPerProcess() async throws {
+    let h = try await harness { .loaded(generation: 1, durationMs: 1,
+                                        registered: 1, refreshed: nil) }
+    let log = RuntimeLogMessage(level: .warning, message: "full rebuild required")
+
+    #expect(await h.coordinator.reportToRuntime(log))
+    #expect(await h.coordinator.reportToRuntime(log) == false)
+    guard let envelope = await h.runtime.waitForEnvelope() else {
+        Issue.record("the first log was not delivered")
+        return
+    }
+    #expect(envelope.type == "runtimeLog")
+    #expect(try envelope.decode(RuntimeLogMessage.self) == log)
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(h.runtime.envelopes().count == 1)
+}
+
 // MARK: - Poisoned
 
 @Test func aFailedLoadPoisonsTheSession() async throws {
