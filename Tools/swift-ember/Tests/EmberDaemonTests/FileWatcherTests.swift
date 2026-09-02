@@ -22,24 +22,24 @@ private func write(_ source: String, to url: URL) throws {
 @Test func primingDoesNotReportExistingSources() throws {
     try withWatcher { root, watcher in
         try write("struct Existing {}", to: root.appendingPathComponent("Existing.swift"))
-        watcher.prime()
-        #expect(watcher.poll().isEmpty)
+        try watcher.prime()
+        #expect(try watcher.poll().isEmpty)
     }
 }
 
 @Test func addingAndModifyingASourceAreDistinguished() throws {
     try withWatcher { root, watcher in
-        watcher.prime()
+        try watcher.prime()
         let source = root.appendingPathComponent("Feature.swift")
 
         try write("struct Feature {}", to: source)
-        #expect(watcher.poll() == [.init(url: source, kind: .added)])
+        #expect(try watcher.poll() == [.init(url: source, kind: .added)])
 
         // Pick a deterministic value instead of depending on the filesystem's
         // timestamp resolution when the two writes happen in the same test.
         try FileManager.default.setAttributes(
             [.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: source.path)
-        #expect(watcher.poll() == [.init(url: source, kind: .modified)])
+        #expect(try watcher.poll() == [.init(url: source, kind: .modified)])
     }
 }
 
@@ -47,10 +47,10 @@ private func write(_ source: String, to url: URL) throws {
     try withWatcher { root, watcher in
         let source = root.appendingPathComponent("Removed.swift")
         try write("struct Removed {}", to: source)
-        watcher.prime()
+        try watcher.prime()
 
         try FileManager.default.removeItem(at: source)
-        #expect(watcher.poll() == [.init(url: source, kind: .removed)])
+        #expect(try watcher.poll() == [.init(url: source, kind: .removed)])
     }
 }
 
@@ -59,10 +59,10 @@ private func write(_ source: String, to url: URL) throws {
         let old = root.appendingPathComponent("Old.swift")
         let new = root.appendingPathComponent("New.swift")
         try write("struct Feature {}", to: old)
-        watcher.prime()
+        try watcher.prime()
 
         try FileManager.default.moveItem(at: old, to: new)
-        #expect(watcher.poll() == [
+        #expect(try watcher.poll() == [
             .init(url: new, kind: .added),
             .init(url: old, kind: .removed),
         ])
@@ -73,20 +73,47 @@ private func write(_ source: String, to url: URL) throws {
     try withWatcher { root, watcher in
         let source = root.appendingPathComponent("Atomic.swift")
         try write("struct Atomic { let value = 1 }", to: source)
-        watcher.prime()
+        try watcher.prime()
 
         try write("struct Atomic { let value = 2 }", to: source)
         try FileManager.default.setAttributes(
             [.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: source.path)
-        #expect(watcher.poll() == [.init(url: source, kind: .modified)])
+        #expect(try watcher.poll() == [.init(url: source, kind: .modified)])
     }
 }
 
 @Test func nonSwiftFilesAreIgnored() throws {
     try withWatcher { root, watcher in
-        watcher.prime()
+        try watcher.prime()
         try write("notes", to: root.appendingPathComponent("Notes.txt"))
-        #expect(watcher.poll().isEmpty)
+        #expect(try watcher.poll().isEmpty)
+    }
+}
+
+@Test func anIncompleteScanPreservesTheLastCompleteSnapshot() throws {
+    try withWatcher { root, watcher in
+        let source = root.appendingPathComponent("Feature.swift")
+        let unavailable = root.deletingLastPathComponent()
+            .appendingPathComponent("\(root.lastPathComponent)-unavailable", isDirectory: true)
+        try write("struct Feature { let value = 1 }", to: source)
+        try watcher.prime()
+
+        try FileManager.default.moveItem(at: root, to: unavailable)
+        defer {
+            if FileManager.default.fileExists(atPath: unavailable.path),
+               !FileManager.default.fileExists(atPath: root.path) {
+                try? FileManager.default.moveItem(at: unavailable, to: root)
+            }
+            try? FileManager.default.removeItem(at: unavailable)
+        }
+        #expect(throws: FileWatcher.ScanFailure.self) {
+            try watcher.poll()
+        }
+
+        try FileManager.default.moveItem(at: unavailable, to: root)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: source.path)
+        #expect(try watcher.poll() == [.init(url: source, kind: .modified)])
     }
 }
 
