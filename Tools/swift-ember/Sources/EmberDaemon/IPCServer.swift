@@ -450,6 +450,25 @@ public final class IPCServer: @unchecked Sendable {
         for continuation in outstanding { continuation.resume(throwing: error) }
     }
 
+    /// Sends a message to the authenticated runtime without waiting for a
+    /// reply. Runtime console logs use this path because observability is
+    /// best-effort: a closed console channel must not turn an otherwise valid
+    /// patch result into a load failure or an uncertain session.
+    public func send<P: Codable>(type: String, payload: P) throws {
+        guard let connection = lock.withLock({ () -> NWConnection? in
+            guard let id = sessionPeer, session != nil else { return nil }
+            return peers[id]?.connection
+        }) else {
+            if let version = lock.withLock({ mismatched?.version }) {
+                throw IPCError.versionMismatch(version)
+            }
+            throw IPCError.notConnected
+        }
+
+        let line = try Envelope(type: type, payload: payload).encodedLine()
+        connection.send(content: line, completion: .contentProcessed { _ in })
+    }
+
     /// Sends a request and waits for the reply carrying the same requestId.
     ///
     /// The timeout is a scheduled eviction rather than a sibling task racing

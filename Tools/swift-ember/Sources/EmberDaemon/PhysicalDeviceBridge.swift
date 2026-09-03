@@ -25,7 +25,20 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
     private let workDirectory: URL
     private let runner: Runner
     private let lock = NSLock()
+    /// Console delivery is observability, not part of the patch transaction.
+    /// Keep CoreDevice's synchronous subprocess off the coordinator actor and
+    /// serialize messages. While one transfer is active, only the newest
+    /// pending result is retained so Xcode is not fed a stale backlog.
+    private let runtimeLogQueue = DispatchQueue(label: "dev.swift-ember.device-runtime-log")
     private var sessionToken = ""
+    private var pendingRuntimeLog: QueuedRuntimeLog?
+    private var runtimeLogDeliveryActive = false
+
+    private struct QueuedRuntimeLog: Sendable {
+        let token: String
+        let log: RuntimeLogMessage
+        let expiresAt: Date
+    }
 
     private struct DeviceLoadCommand: Codable {
         let token: String
@@ -36,6 +49,12 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
     private struct DeviceLoadReply: Codable {
         let result: LoadPatchResult
         let processId: Int32
+    }
+
+    private struct DeviceRuntimeLogCommand: Codable {
+        let token: String
+        let log: RuntimeLogMessage
+        let expiresAt: Date
     }
 
     private struct DeviceStatus: Codable {
@@ -165,6 +184,60 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
         throw EmberError(stage: .load, subject: requestFile.lastPathComponent,
                           reason: "the physical device did not answer within 10 seconds: \(lastOutput.trimmingCharacters(in: .whitespacesAndNewlines))",
                           recovery: .restart)
+    }
+
+    /// Copies a console message to the app without waiting for a response.
+    /// The runtime leaves a receipt file solely to avoid processing the same
+    /// request on every polling tick; delivery remains best-effort to the host.
+    func sendRuntimeLog(_ log: RuntimeLogMessage) {
+        let startDelivery = lock.withLock { () -> Bool in
+            // Snapshot both the token and the expiry at enqueue time. A later
+            // session must not relabel this message, and a delayed diagnostic
+            // must not become fresh merely because CoreDevice was slow.
+            pendingRuntimeLog = QueuedRuntimeLog(
+                token: sessionToken, log: log,
+                expiresAt: Date().addingTimeInterval(9.5))
+            guard !runtimeLogDeliveryActive else { return false }
+            runtimeLogDeliveryActive = true
+            return true
+        }
+        guard startDelivery else { return }
+        runtimeLogQueue.async { [self] in drainRuntimeLogs() }
+    }
+
+    private func drainRuntimeLogs() {
+        while let queued = lock.withLock({ () -> QueuedRuntimeLog? in
+            guard let queued = pendingRuntimeLog else {
+                runtimeLogDeliveryActive = false
+                return nil
+            }
+            pendingRuntimeLog = nil
+            return queued
+        }) {
+            guard queued.expiresAt > Date() else { continue }
+            let requestID = UUID().uuidString
+            let command = DeviceRuntimeLogCommand(
+                token: queued.token, log: queued.log, expiresAt: queued.expiresAt)
+            guard let envelope = try? Envelope(
+                type: "runtimeLog", requestId: requestID, payload: command) else { continue }
+            let stagingRoot = workDirectory
+                .appendingPathComponent("log-\(requestID)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: stagingRoot) }
+            let staging = stagingRoot
+                .appendingPathComponent(TransportPath.requests, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(
+                    at: staging, withIntermediateDirectories: true)
+                let requestFile = staging.appendingPathComponent("\(requestID).json")
+                try JSONEncoder.sorted.encode(envelope)
+                    .write(to: requestFile, options: .atomic)
+                try copyToDevice(source: staging,
+                                 destination: "Documents/\(TransportPath.requests)")
+            } catch {
+                // The daemon log remains canonical. Console delivery never
+                // changes a patch outcome or the session's uncertainty state.
+            }
+        }
     }
 
     private func signAndVerify(_ image: URL) throws {

@@ -40,6 +40,10 @@ public actor PatchCoordinator {
     /// The process the flag is about. Clearing needs a different one.
     private var uncertainProcess: Int32?
     private var physicalProcessId: Int32?
+    /// Suppresses only consecutive duplicates for one running process. A
+    /// different message, or an app relaunch with a new pid, makes the same
+    /// diagnostic useful again.
+    private var lastRuntimeLog: (processId: Int32, log: RuntimeLogMessage)?
 
     private var baselines: [URL: String] = [:]
     /// Build-time snapshots for sources omitted from file watching. They still
@@ -195,6 +199,41 @@ public actor PatchCoordinator {
     }
 
     public var isUncertain: Bool { uncertain != nil }
+
+    /// Mirrors a user-facing watcher result into the running application's
+    /// Xcode console. This channel is deliberately best-effort: the daemon's
+    /// own log remains canonical, and a display failure cannot change patch
+    /// state or poison a session.
+    @discardableResult
+    public func reportToRuntime(_ log: RuntimeLogMessage) -> Bool {
+        do {
+            let processId: Int32
+            if let physicalDevice {
+                // Reporting must not launch a synchronous `devicectl` status
+                // probe. Session maintenance and the patch path establish this
+                // value; without one, the canonical host log is sufficient.
+                guard let connected = physicalProcessId else { return false }
+                processId = connected
+                if let previous = lastRuntimeLog,
+                   previous.processId == processId, previous.log == log {
+                    return false
+                }
+                physicalDevice.sendRuntimeLog(log)
+            } else {
+                guard let session = server.currentSession else { return false }
+                processId = session.hello.processId
+                if let previous = lastRuntimeLog,
+                   previous.processId == processId, previous.log == log {
+                    return false
+                }
+                try server.send(type: "runtimeLog", payload: log)
+            }
+            lastRuntimeLog = (processId, log)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     /// Called when an app connects, with the pid it reported.
     ///

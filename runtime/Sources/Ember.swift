@@ -175,7 +175,14 @@ public enum Ember {
 
         var snapshot: Status { lock.withLock { status } }
 
-        func setConnected(_ connected: Bool) {
+        #if EMBER_ENABLED
+        /// Console connection state is separate from `Status`: callers have
+        /// historically received every retry through `onUpdate`, while a
+        /// debug console needs only transitions rather than one line a second.
+        private var consoleConnection: Bool?
+        #endif
+
+        func setConnected(_ connected: Bool, consoleMessage: String? = nil) {
             let copy: Status = lock.withLock {
                 status.connected = connected
                 status.lines.append(connected ? "connected to the daemon" : "waiting for the daemon")
@@ -186,6 +193,24 @@ public enum Ember {
                 return status
             }
             onUpdate?(copy)
+            #if EMBER_ENABLED
+            let message: String? = lock.withLock {
+                let previous = consoleConnection
+                consoleConnection = connected
+                return if previous == connected {
+                    nil
+                } else if let consoleMessage {
+                    consoleMessage
+                } else if connected {
+                    "connected to the watcher"
+                } else if previous == true {
+                    "disconnected from the watcher"
+                } else {
+                    "waiting for the watcher"
+                }
+            }
+            if let message { writeToConsole(message) }
+            #endif
         }
 
         func recordLoaded(_ generation: UInt64) {
@@ -204,6 +229,21 @@ public enum Ember {
             }
             onUpdate?(copy)
         }
+
+        #if EMBER_ENABLED
+        /// Mirrors a host-side result into both the observable runtime status
+        /// and Xcode's debug console. stderr is captured by Xcode while a
+        /// debugger is attached and remains useful for command-line apps too.
+        func report(_ log: RuntimeLogMessage) {
+            note(log.message)
+            writeToConsole("[\(log.level.rawValue.uppercased())] \(log.message)")
+        }
+
+        private func writeToConsole(_ message: String) {
+            let line = "[swift-ember] \(message)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+        #endif
 
         var generations: [UInt64] { lock.withLock { status.loadedGenerations } }
 

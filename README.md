@@ -236,7 +236,10 @@ file, replaces the old watcher after a rebuild, and returns only when the new
 watcher is ready. It automatically selects Xcode's active Simulator or physical
 device; watchers for different Simulators remain isolated. The background
 process keeps the selected `DEVELOPER_DIR` but does not inherit transient
-build-script or debugger variables. Its detailed output remains in `.ember/logs`.
+build-script or debugger variables. Hot-reload successes, actionable warnings,
+and failures are mirrored into Xcode's debug console with a `[swift-ember]`
+prefix while the app is connected. Complete stage timings and transport detail
+remain in `.ember/logs`, which is the canonical log if the app is disconnected.
 
 The executable may live inside the repository instead; use its absolute path
 derived from `SRCROOT`, for example

@@ -186,6 +186,12 @@ final class EmberClient: @unchecked Sendable {
             }
             let result = applier.apply(request)
             send(type: "loadResult", payload: result, requestId: envelope.requestId)
+        case "runtimeLog":
+            guard let log = try? envelope.decode(RuntimeLogMessage.self) else {
+                state.note("could not read a runtimeLog message; the two sides' protocol types have drifted")
+                return
+            }
+            state.report(log)
         default:
             state.note("ignored \(envelope.type)")
         }
@@ -236,6 +242,18 @@ struct LoadPatchRequest: Codable {
     var buildIdentity: String
     var buildUUIDs: [String]
     var declarations: [String]
+}
+
+struct RuntimeLogMessage: Codable {
+    enum Level: String, Codable {
+        case info
+        case success
+        case warning
+        case error
+    }
+
+    var level: Level
+    var message: String
 }
 
 enum LoadPatchResult: Codable {

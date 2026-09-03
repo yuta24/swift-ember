@@ -52,6 +52,11 @@ public enum Watch {
                   The app was built again after it launched, so patches would be
                   linked against a binary it is not running. Relaunch it.
                 """)
+                Task {
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .warning,
+                        message: "This process is not running the build being watched. Relaunch the app."))
+                }
             } else if hello.buildIdentity == context.identity {
                 print("connected  pid \(hello.processId), \(hello.moduleName)")
             } else {
@@ -65,6 +70,11 @@ public enum Watch {
 
                 Rebuild the app from these sources before editing.
                 """)
+                Task {
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .warning,
+                        message: "The running app's build identity does not match the watcher. Rebuild the app from the watched sources."))
+                }
             }
         }
         server.onDisconnect = { print("disconnected; waiting for the app to reconnect") }
@@ -158,6 +168,11 @@ public enum Watch {
                 print(failure.description)
                 print("No source changes will be applied until a complete scan succeeds; retrying.")
                 print("")
+                Task {
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .error,
+                        message: "[WATCH] source roots\n\(failure.description)\n\nNo source changes will be applied until a complete scan succeeds; retrying."))
+                }
             }) { continuation.yield($0) }
             termination = TerminationSignals { continuation.finish() }
         }
@@ -169,6 +184,8 @@ public enum Watch {
                 print("")
                 print(error.description)
                 print("")
+                await coordinator.reportToRuntime(RuntimeLogMessage(
+                    level: .warning, message: error.description))
                 continue
             }
             for change in batch {
@@ -179,12 +196,14 @@ public enum Watch {
                     print("")
                     print(error.description)
                     print("")
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .error, message: error.description))
                 case .sessionUncertain(let cause):
                     // Repeated on every save rather than said once and
                     // forgotten: the developer is editing, watching nothing
                     // happen, and the reason scrolled off some time ago.
                     print("")
-                    print("""
+                    let message = """
                     Not patching: this process cannot be described any more.
 
                     \(cause.stage.rawValue) failed earlier and the patch may
@@ -194,22 +213,32 @@ public enum Watch {
 
                     The failure was:
                     \(cause.reason)
-                    """)
+                    """
+                    print(message)
                     print("")
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .error, message: message))
                 case .applied(let generation, let declarations, let carried, let verified,
                               let registered, let refreshed, let oneShot, let timeline):
                     let count = declarations.count
                     let noun = count == 1 ? "declaration" : "declarations"
+                    var runtimeLines = [String(format: "hot reloaded %d %@ in %.0f ms  (g%llu)",
+                                               count, noun, timeline.totalMs, generation)]
                     print("")
-                    print(String(format: "hot reloaded %d %@ in %.0f ms  (g%llu)",
-                                 count, noun, timeline.totalMs, generation))
-                    for name in declarations { print("  \(name)") }
+                    print(runtimeLines[0])
+                    for name in declarations {
+                        let line = "  \(name)"
+                        print(line)
+                        runtimeLines.append(line)
+                    }
                     // Named rather than counted. A carried declaration is one
                     // the patch had to bring with it -- a private helper, or one
                     // that did not exist in the build -- and seeing which is the
                     // difference between "that is why it worked" and a mystery.
                     if !carried.isEmpty {
-                        print("  carried: \(carried.joined(separator: ", "))")
+                        let line = "  carried: \(carried.joined(separator: ", "))"
+                        print(line)
+                        runtimeLines.append(line)
                     }
                     // Said only when it is not true. A reload that could not be
                     // confirmed is still a reload, but the developer should know
@@ -235,10 +264,14 @@ public enum Watch {
                             // are not counts of the same thing and saying
                             // "declarations" made a correct pair look wrong.
                             let plural = registered.expected == 1 ? "was" : "were"
-                            print("  not verified: the image carries \(registered.counted) replacement "
-                                  + "records and \(registered.expected) \(plural) generated")
+                            let line = "  not verified: the image carries \(registered.counted) replacement "
+                                + "records and \(registered.expected) \(plural) generated"
+                            print(line)
+                            runtimeLines.append(line)
                         } else {
-                            print("  not verified: the runtime could not read the image's records")
+                            let line = "  not verified: the runtime could not read the image's records"
+                            print(line)
+                            runtimeLines.append(line)
                         }
                     }
                     // What it took to put the change on screen. A UIKit process
@@ -246,7 +279,9 @@ public enum Watch {
                     // that the body is replaced in the process and the screen
                     // keeps whatever it drew last.
                     if let refreshed {
-                        print("  refreshed: \(refreshed)")
+                        let line = "  refreshed: \(refreshed)"
+                        print(line)
+                        runtimeLines.append(line)
                     }
                     // The entry points a refresh cannot reach on its own. Said
                     // rather than left to be discovered: an edit that loads and
@@ -261,17 +296,29 @@ public enum Watch {
                     let reachable = oneShot.filter { $0.scope == .instance }
                     let unreachable = oneShot.filter { $0.scope == .process }
                     if !reachable.isEmpty {
-                        print("  already ran: \(reachable.map(\.name).joined(separator: ", "))")
-                        print("  replaced, but UIKit will not call it again for anything that")
-                        print("  already exists; the next instance of that type runs the new body")
+                        let lines = [
+                            "  already ran: \(reachable.map(\.name).joined(separator: ", "))",
+                            "  replaced, but UIKit will not call it again for anything that",
+                            "  already exists; the next instance of that type runs the new body",
+                        ]
+                        lines.forEach { print($0) }
+                        runtimeLines.append(contentsOf: lines)
                     }
                     if !unreachable.isEmpty {
-                        print("  already ran: \(unreachable.map(\.name).joined(separator: ", "))")
-                        print("  there is one of these per process, and relaunching starts from the")
-                        print("  built binary, so seeing this change takes a build")
+                        let lines = [
+                            "  already ran: \(unreachable.map(\.name).joined(separator: ", "))",
+                            "  there is one of these per process, and relaunching starts from the",
+                            "  built binary, so seeing this change takes a build",
+                        ]
+                        lines.forEach { print($0) }
+                        runtimeLines.append(contentsOf: lines)
                     }
                     print(timeline.summary())
                     print("")
+                    let hasCaveat = !verified || !oneShot.isEmpty
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: hasCaveat ? .warning : .success,
+                        message: runtimeLines.joined(separator: "\n")))
                 }
             }
         }

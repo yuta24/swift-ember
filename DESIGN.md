@@ -976,6 +976,18 @@ Messages SHOULD be versioned:
 
 Protocol incompatibility should fail with a clear diagnostic.
 
+`runtimeLog` is an additive daemon-to-runtime message for user-facing results:
+successful reloads, verification or lifecycle caveats, and actionable failures.
+The runtime writes it to stderr so it appears beside application output in
+Xcode's debug console. Delivery is one-way and best-effort; it cannot change a
+patch outcome or mark a session uncertain. The Simulator uses the authenticated
+socket. A physical device uses the same token-bound, expiring CoreDevice request
+files as patch loading and writes a receipt only to prevent polling the same log
+again. While a device transfer is active, only the newest pending message is
+retained, and messages expire from their enqueue time so stale results cannot
+form a delayed console backlog. Consecutive identical messages are suppressed
+per process. Detailed host logs remain canonical when no application is connected.
+
 ## 12. Dynamic replacement constraints
 
 ### 12.1 Struct support
