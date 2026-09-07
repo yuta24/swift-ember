@@ -732,6 +732,55 @@ None of this was visible to the test suite, because every end-to-end test ran
 exactly one generation. `Loop.runGenerations` is the harness that would have
 caught it.
 
+### 7.3e Atomic multi-file saves
+
+The file watcher reports one complete poll, not a stream of unrelated paths.
+That poll is the smallest useful transaction: an editor may write an extracted
+helper and its new caller as two files, in either order, while neither version
+is independently compilable.
+
+For changes in one module, the coordinator therefore classifies every path
+before generating or transferring anything. It emits one generated source per
+original file so `@_private(sourceFile:)` continues to describe the right file,
+then compiles those sources as one whole-module object and links one patch
+image. The runtime loads that image once under one generation number. Baselines
+and `SessionMemory` advance only after the runtime confirms that load; a
+classification, compilation, transfer, or load failure cannot commit a
+successful prefix of the batch.
+
+The retry state is deliberately coarser than the watcher polls. For each
+compiler target the coordinator keeps only the URLs whose current contents are
+not represented by the running process. Every later event re-reads and
+reclassifies every deferred URL for the affected target, then attempts the
+target as one unit. Thus failed saves in one target merge instead of becoming
+parallel transactions with separate snapshots and identities. This can delay
+an otherwise independent edit behind an unsafe file in the same target, but it
+has three useful properties: retries always use the latest disk contents,
+successful loads clear one unambiguous unit, and no declaration can move
+between competing pending stores.
+
+An addition-only file may remain deferred because the watcher has already
+consumed its event. A refused classification records its unsafe URLs as
+blockers on the target, and later saves in that target cannot bypass them. A
+safe event for the blocker clears it and retries the complete target without
+requiring another save of the other files. Targets from different modules are
+never pooled.
+
+An addition-only save has no replacement record and cannot affect the running
+process by itself. The coordinator holds that source URL until a later
+observable change in the same module can carry it. Once loaded, every later
+generation for the module re-emits the session contributions from all files,
+so a caller does not lose a helper merely because the next edit occurred in a
+different file.
+
+A watcher poll whose observable changes resolve to different modules is
+refused as a rebuild. Local package targets can use different Swift language
+modes and private-import contexts, so combining them into one compiler unit is
+not sound; loading one image per module would instead expose a partially
+applied save if the second image failed. A future protocol could add an
+explicit prepare/commit transaction, but sequential `dlopen` is not atomic and
+is deliberately not presented as one reload.
+
 ### 7.4 Implementation options
 
 Phase 1 can be conservative and file/declaration based.

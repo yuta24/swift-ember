@@ -21,6 +21,23 @@ public struct PatchPlan: Sendable {
     }
 }
 
+/// One source file's contribution to an atomic patch image.
+///
+/// Imports and private-import identity belong to the original source file,
+/// while every contribution is emitted into the same compiler unit so one
+/// linked image and one `dlopen` make the complete save batch visible at once.
+public struct PatchFilePlan: Sendable {
+    public let plan: PatchPlan
+    public let imports: [String]
+    public let privateImportOf: String?
+
+    public init(plan: PatchPlan, imports: [String] = [], privateImportOf: String? = nil) {
+        self.plan = plan
+        self.imports = imports
+        self.privateImportOf = privateImportOf
+    }
+}
+
 /// What this session has already put into a patch for one file.
 ///
 /// A carried declaration lives in the patch dylib and nowhere else. Once a
@@ -85,6 +102,20 @@ public enum ChangeClassifier {
     /// parses to disagree about the policy.
     public static func classify(before: FileIndex, after: FileIndex,
                                 memory: SessionMemory = SessionMemory()) -> ChangeClassification {
+        classify(before: before, after: after, memory: memory, carryOnly: false)
+    }
+
+    /// Batch classification keeps a safe addition even when that file has no
+    /// replacement of its own. Another file in the same atomic compiler unit
+    /// may call the new declaration; the ordinary single-file API continues
+    /// to treat an unreachable addition as no change.
+    public static func classifyForBatch(before: FileIndex, after: FileIndex,
+                                        memory: SessionMemory = SessionMemory()) -> ChangeClassification {
+        classify(before: before, after: after, memory: memory, carryOnly: true)
+    }
+
+    private static func classify(before: FileIndex, after: FileIndex,
+                                 memory: SessionMemory, carryOnly: Bool) -> ChangeClassification {
 
         if before.residue != after.residue {
             return .rebuildRequired(reason: "something outside a replaceable declaration changed, such as a type's declaration, an import, or a stored property")
@@ -163,7 +194,9 @@ public enum ChangeClassifier {
         // that nothing calls yet is exactly that, and it needs no patch: the
         // baseline does not advance, so the addition is still pending when the
         // edit that uses it arrives, and both land together.
-        if replacedIdentities.isEmpty { return .noChange }
+        if replacedIdentities.isEmpty && (!carryOnly || carriedIdentities.isEmpty) {
+            return .noChange
+        }
 
         let replacements = replacedIdentities.compactMap { after.patchable[$0] }
             .sorted { $0.identity < $1.identity }
@@ -197,11 +230,33 @@ public enum ReplacementGenerator {
     public static func generate(module: String, generation: UInt64,
                                 plan: PatchPlan, imports: [String] = [],
                                 privateImportOf sourceFile: String? = nil) throws -> String {
+        try generateFile(module: module, generation: generation,
+                         file: PatchFilePlan(plan: plan, imports: imports,
+                                             privateImportOf: sourceFile))
+    }
+
+    /// Emits one generated source per original file. The compiler type-checks
+    /// them together and the linker puts every object in one image, preserving
+    /// file-scoped private imports without giving up atomic loading.
+    public static func generateFiles(module: String, generation: UInt64,
+                                     files: [PatchFilePlan]) throws -> [String] {
+        guard !files.isEmpty else {
+            throw EmberError(stage: .generate, subject: "source batch",
+                             reason: "an atomic patch needs at least one source file",
+                             recovery: .editAndRetry)
+        }
+        return try files.map {
+            try generateFile(module: module, generation: generation, file: $0)
+        }
+    }
+
+    private static func generateFile(module: String, generation: UInt64,
+                                     file: PatchFilePlan) throws -> String {
         // Escaped, because this becomes a Swift string literal and a file name
         // may legally contain a quote or a backslash. Unescaped, the patch did
         // not parse and the developer was shown a syntax error in source they
         // never wrote.
-        let moduleImport = sourceFile.map { name -> String in
+        let moduleImport = file.privateImportOf.map { name -> String in
             let escaped = name
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
@@ -219,7 +274,7 @@ public enum ReplacementGenerator {
         // `import CoreData` from one called Core, reintroducing the very
         // "cannot find type in scope" failure carrying imports exists to
         // prevent. Lines that are `#if` scaffolding pass through untouched.
-        for statement in imports {
+        for statement in file.imports {
             guard statement.hasPrefix("import") || statement.contains(" import ") else {
                 lines.append(statement)   // #if / #else / #endif
                 continue
@@ -229,16 +284,17 @@ public enum ReplacementGenerator {
         }
         lines.append("")
 
-        // Carried declarations first, so the file reads in the order the
-        // compiler will need them and a human reading the patch sees what the
-        // replacements below are calling.
-        if !plan.carried.isEmpty {
+        // Carried declarations first, so replacements in this compiler unit
+        // can resolve them regardless of original source order.
+        if !file.plan.carried.isEmpty {
             lines.append("// Carried into the patch: declarations that did not exist when the app")
             lines.append("// was built, so nothing already running can reach them.")
-            lines.append(contentsOf: try emit(plan.carried) { try copy($0) })
+            lines.append(contentsOf: try emit(file.plan.carried) { try copy($0) })
         }
 
-        lines.append(contentsOf: try emit(plan.replacements) { try render($0, generation: generation) })
+        lines.append(contentsOf: try emit(file.plan.replacements) {
+            try render($0, generation: generation)
+        })
 
         return lines.joined(separator: "\n")
     }

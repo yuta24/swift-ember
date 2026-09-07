@@ -9,6 +9,34 @@ import EmberGen
 /// DESIGN.md section 4.3. The runtime's only decision is whether `dlopen`
 /// worked.
 public actor PatchCoordinator {
+    private struct PreparedChange: Sendable {
+        let url: URL
+        let current: String
+        let index: FileIndex
+        let plan: PatchPlan
+        let resolution: ModuleResolver.Resolution
+
+        /// A carried declaration already resident in an earlier image changed.
+        /// It has no replacement record of its own, but loading its new copy
+        /// together with the remembered callers is observable.
+        let updatesLoadedContribution: Bool
+
+        var requiresImage: Bool {
+            !plan.replacements.isEmpty || updatesLoadedContribution
+        }
+    }
+
+    private struct PatchContribution: Sendable {
+        let url: URL
+        let index: FileIndex
+        let plan: PatchPlan
+    }
+
+    private struct DeferredTarget: Sendable {
+        var urls: Set<URL> = []
+        var blockers: Set<URL> = []
+    }
+
     private let context: BuildContext
     private let server: IPCServer
     private let compiler: PatchCompiler
@@ -62,6 +90,11 @@ public actor PatchCoordinator {
     /// every later patch for that file has to carry it again. A rebuild ends
     /// the session, which is the only thing that makes it stale.
     private var memories: [URL: SessionMemory] = [:]
+    /// Source URLs whose on-disk contents are not represented by the running
+    /// process. One target owns one conservative retry unit: later saves are
+    /// re-read from disk and folded into it, so no stored source snapshot can
+    /// go stale and no declaration moves between competing pending stores.
+    private var deferredTargets: [String: DeferredTarget] = [:]
     private var generation: UInt64 = 0
 
     /// `deliver` exists so the load path can be reached without a simulator.
@@ -367,73 +400,268 @@ public actor PatchCoordinator {
     }
 
     public func handle(change url: URL) async -> Outcome {
-        let url = url.standardizedFileURL
-        let baseline = baselines[url] ?? ""
-        guard let current = try? String(contentsOf: url, encoding: .utf8) else { return .ignored }
+        await handle(changes: [url])
+    }
+
+    private func targetKey(_ resolution: ModuleResolver.Resolution) -> String {
+        resolution.module + "\u{0}" + (resolution.manifest?.standardizedFileURL.path ?? "")
+    }
+
+    /// Applies one complete file-watcher batch as one dynamic image.
+    ///
+    /// Classification and generation finish for every contributing file
+    /// before anything reaches the application. Baselines and session memory
+    /// advance only after that single image is confirmed loaded, so there is
+    /// no state in which the process represents only a successful prefix of a
+    /// multi-file save.
+    public func handle(changes input: [URL]) async -> Outcome {
+        let inputURLs = Set(input.map(\.standardizedFileURL))
+            .sorted { $0.path < $1.path }
+        guard !inputURLs.isEmpty else { return .ignored }
+
+        let inputSet = Set(inputURLs)
+        let directlyTouchedTargets = Set(inputURLs.map {
+            targetKey(resolver.resolve($0))
+        })
+        for url in inputURLs {
+            let target = targetKey(resolver.resolve(url))
+            deferredTargets[target, default: DeferredTarget()].urls.insert(url)
+        }
+
+        // A safe event for a blocker also wakes the target that was waiting on
+        // it, even though that URL belongs to another compiler context.
+        var affectedTargets = directlyTouchedTargets
+        for (target, deferred) in deferredTargets
+            where !deferred.blockers.isDisjoint(with: inputSet) {
+            affectedTargets.insert(target)
+        }
+        let urls = Array(affectedTargets.flatMap {
+            deferredTargets[$0]?.urls ?? []
+        }).sorted { $0.path < $1.path }
 
         let next = generation + 1
         let timeline = StageTimeline(generation: next)
+        var currentIndexes: [URL: FileIndex] = [:]
+        var currentChanges: [PreparedChange] = []
+        var noChangeURLs: Set<URL> = []
+        var refusal: EmberError?
+        var refusedURLs: Set<URL> = []
+        var safelyObservedURLs: Set<URL> = []
 
-        // One measurement: indexing is the bulk of classification, and two
-        // rows in the summary read as two stages.
-        let (currentIndex, classification) = timeline.measure(.classify) {
-            let currentIndex = DeclarationIndexer.index(source: current)
-            let baselineIndex = baselineIndexes[url]
-                ?? DeclarationIndexer.index(source: baseline)
-            baselineIndexes[url] = baselineIndex
-            return (currentIndex, ChangeClassifier.classify(before: baselineIndex, after: currentIndex,
-                                                            memory: memories[url] ?? SessionMemory()))
+        // One classification timing for the atomic unit. Indexing is the bulk
+        // of this stage, and splitting it into one row per file would make the
+        // generation summary stop adding up to the batch the user saved.
+        timeline.measure(.classify) {
+            for url in urls {
+                let baseline = baselines[url] ?? ""
+                guard let current = try? String(contentsOf: url, encoding: .utf8) else {
+                    refusedURLs.insert(url)
+                    if refusal == nil {
+                        refusal = EmberError(
+                            stage: .watch, subject: url.lastPathComponent,
+                            reason: "the changed source could not be read, so the complete save batch is unavailable",
+                            recovery: .editAndRetry)
+                    }
+                    continue
+                }
+                let currentIndex = DeclarationIndexer.index(source: current)
+                let baselineIndex = baselineIndexes[url]
+                    ?? DeclarationIndexer.index(source: baseline)
+                baselineIndexes[url] = baselineIndex
+                currentIndexes[url] = currentIndex
+                let memory = memories[url] ?? SessionMemory()
+
+                switch ChangeClassifier.classifyForBatch(
+                    before: baselineIndex, after: currentIndex,
+                    memory: memory) {
+                case .noChange:
+                    noChangeURLs.insert(url)
+                    safelyObservedURLs.insert(url)
+                    continue
+                case .rebuildRequired(let reason):
+                    refusedURLs.insert(url)
+                    if refusal == nil {
+                        refusal = EmberError(stage: .classify, subject: url.lastPathComponent,
+                                             reason: reason, recovery: .rebuild)
+                    }
+                case .hotPatch(let plan):
+                    let updatesLoadedContribution = memory.carried.contains { identity in
+                        baselineIndex.patchable[identity]?.body
+                            != currentIndex.patchable[identity]?.body
+                    }
+                    let change = PreparedChange(
+                        url: url, current: current, index: currentIndex, plan: plan,
+                        resolution: resolver.resolve(url),
+                        updatesLoadedContribution: updatesLoadedContribution)
+                    currentChanges.append(change)
+                    safelyObservedURLs.insert(url)
+                }
+            }
         }
 
-        let plan: PatchPlan
-        switch classification {
-        case .noChange:
-            return .ignored
-        case .rebuildRequired(let reason):
-            return .rejected(EmberError(stage: .classify, subject: url.lastPathComponent,
-                                         reason: reason, recovery: .rebuild))
-        case .hotPatch(let planned):
-            plan = planned
+        var newlyUnblockedTargets: Set<String> = []
+        for target in Array(deferredTargets.keys) {
+            guard var deferred = deferredTargets[target] else { continue }
+            let wasBlocked = !deferred.blockers.isEmpty
+            deferred.blockers.subtract(safelyObservedURLs)
+            if wasBlocked && deferred.blockers.isEmpty {
+                newlyUnblockedTargets.insert(target)
+            }
+            deferredTargets[target] = deferred
         }
-        let declarations = plan.replacements
 
-        // Syntax can identify the boundary call but cannot reproduce overload
-        // resolution for a method declared in another source file of the app
-        // module. Reserve the name across every watched source before trusting
-        // the boundary. Generated source still adds a SwiftUI.AnyView binding
-        // as a compiler check; this scan protects the running generation,
-        // whose source was compiled in the app module rather than the patch.
-        if declarations.contains(where: \.requiresAnyViewBoundaryValidation),
-           let conflict = emberBoundaryNameConflict(excluding: url) {
+        if let refusal {
+            for target in affectedTargets {
+                deferredTargets[target]?.blockers.formUnion(refusedURLs)
+            }
+            return .rejected(refusal)
+        }
+
+        // A reverted URL no longer differs from the process and therefore no
+        // longer belongs to any deferred unit.
+        for target in affectedTargets {
+            guard var deferred = deferredTargets[target] else { continue }
+            deferred.urls.subtract(noChangeURLs)
+            if deferred.urls.isEmpty {
+                deferredTargets.removeValue(forKey: target)
+            } else {
+                deferredTargets[target] = deferred
+            }
+        }
+
+        var candidateTargets = directlyTouchedTargets.union(newlyUnblockedTargets)
+        candidateTargets = Set(candidateTargets.filter { deferredTargets[$0] != nil })
+        guard !candidateTargets.isEmpty else { return .ignored }
+
+        let unresolvedBlockers = candidateTargets.reduce(into: Set<URL>()) {
+            blockers, target in
+            blockers.formUnion(deferredTargets[target]?.blockers ?? [])
+        }
+        if !unresolvedBlockers.isEmpty {
+            // Every target participating in this poll waits on the same union;
+            // this preserves the poll as one unit without retaining snapshots.
+            for target in candidateTargets {
+                deferredTargets[target]?.blockers.formUnion(unresolvedBlockers)
+            }
+            let names = unresolvedBlockers.map(\.lastPathComponent).sorted()
+                .joined(separator: ", ")
             return .rejected(EmberError(
-                stage: .classify, subject: url.lastPathComponent,
+                stage: .classify, subject: "\(urls.count) source files",
+                reason: "a deferred atomic reload is still waiting for a safe event from: \(names)",
+                recovery: .editAndRetry))
+        }
+
+        let currentByURL = Dictionary(
+            uniqueKeysWithValues: currentChanges.map { ($0.url, $0) })
+        let effectiveChanges = candidateTargets.flatMap { target in
+            (deferredTargets[target]?.urls ?? []).compactMap { currentByURL[$0] }
+        }
+
+        // An addition with no changed caller is deliberately left pending. It
+        // joins a later atomic patch when another file begins to use it, but a
+        // carried-only image would register no replacement and change nothing.
+        let observable = effectiveChanges.filter(\.requiresImage)
+            .sorted { $0.url.path < $1.url.path }
+        guard !observable.isEmpty else { return .ignored }
+
+        let targets = Set(observable.map { targetKey($0.resolution) })
+        let initialSubject = observable.count == 1
+            ? observable[0].url.lastPathComponent
+            : "\(observable.count) source files"
+        guard targets.count == 1, let resolution = observable.first?.resolution else {
+            let details = observable.map { change in
+                let package = change.resolution.manifest.map { " (\($0.path))" } ?? ""
+                return "  \(change.url.lastPathComponent): \(change.resolution.module)\(package)"
+            }.joined(separator: "\n")
+            return .rejected(EmberError(
+                stage: .classify, subject: initialSubject,
                 reason: """
-                    \(conflict.lastPathComponent) declares `emberable`, which is \
-                    reserved while a SwiftUI body uses the ember boundary. A \
-                    shadowing overload can remove `AnyView`; rename it and rebuild.
+                    one atomic image cannot preserve different module or Swift \
+                    language-mode contexts:
+
+                    \(details)
+
+                    No part of this save was loaded. Rebuild to apply the \
+                    cross-module change.
                     """,
                 recovery: .rebuild))
         }
+        let module = resolution.module
+        let selectedTarget = targetKey(resolution)
 
-        // After the filters. Checked first, a poisoned session printed the
-        // whole paragraph for every touched file -- and a build or a checkout
-        // touches many, none of which would have been patched anyway.
+        let prepared = (deferredTargets[selectedTarget]?.urls ?? [])
+            .compactMap { currentByURL[$0] }
+            .sorted { $0.url.path < $1.url.path }
+        let subject = prepared.count == 1
+            ? prepared[0].url.lastPathComponent
+            : "\(prepared.count) source files"
+        let preparedURLs = Set(prepared.map(\.url))
+        var contributions = prepared.map {
+            PatchContribution(url: $0.url, index: $0.index, plan: $0.plan)
+        }
+
+        // A declaration added by an earlier patch exists only in that dylib.
+        // Re-emit the module's complete session contribution so a replacement
+        // in another source file can keep calling it in every later generation.
+        for url in memories.keys.sorted(by: { $0.path < $1.path }) where !preparedURLs.contains(url) {
+            let rememberedResolution = resolver.resolve(url)
+            guard targetKey(rememberedResolution) == targetKey(resolution),
+                  let baseline = baselines[url] else { continue }
+            let index = baselineIndexes[url] ?? DeclarationIndexer.index(source: baseline)
+            baselineIndexes[url] = index
+            guard let memory = memories[url] else { continue }
+            let carried = memory.carried.compactMap { index.patchable[$0] }
+                .sorted { $0.identity < $1.identity }
+            let replacements = memory.replaced.subtracting(memory.carried)
+                .compactMap { index.patchable[$0] }
+                .sorted { $0.identity < $1.identity }
+            guard !carried.isEmpty || !replacements.isEmpty else { continue }
+            contributions.append(PatchContribution(
+                url: url, index: index,
+                plan: PatchPlan(replacements: replacements, carried: carried)))
+        }
+
+        let declarations = contributions.flatMap(\.plan.replacements)
+        let carried = contributions.flatMap(\.plan.carried)
+        var effectiveIndexes = currentIndexes
+        for change in prepared { effectiveIndexes[change.url] = change.index }
+
+        // Syntax can identify the boundary call but cannot reproduce overload
+        // resolution for a method declared in another source file of the app
+        // module. Include the new indexes for every file in this batch: using
+        // their old baselines here would allow the first half of an unsafe
+        // multi-file edit into the process.
+        for contribution in contributions
+            where contribution.plan.replacements.contains(where: \.requiresAnyViewBoundaryValidation) {
+            if let conflict = emberBoundaryNameConflict(
+                excluding: contribution.url, updatedIndexes: effectiveIndexes) {
+                return .rejected(EmberError(
+                    stage: .classify, subject: contribution.url.lastPathComponent,
+                    reason: """
+                        \(conflict.lastPathComponent) declares `emberable`, which is \
+                        reserved while a SwiftUI body uses the ember boundary. A \
+                        shadowing overload can remove `AnyView`; rename it and rebuild.
+                        """,
+                    recovery: .rebuild))
+            }
+        }
+
+        // After every source-only filter. A poisoned session should not hide a
+        // useful classification error, but no compile or transfer may begin
+        // while the process is undescribable.
         if let physicalDevice, let processId = physicalDevice.connectedProcess() {
             sessionDidConnect(processId: processId)
             physicalProcessId = processId
         }
-        if let uncertain { return .sessionUncertain(uncertain) }
+        if let uncertain {
+            // URLs stay deferred. A later event after relaunch re-reads their
+            // current contents instead of reviving a stored snapshot.
+            return .sessionUncertain(uncertain)
+        }
 
-        // Which module owns this file decides what the patch imports and what
-        // it is compiled against. A module that exports no replacement keys
-        // cannot be patched at all, and saying so here is the difference
-        // between a refusal and an edit that silently does nothing -- which is
-        // what editing a Swift package used to do.
-        let resolution = resolver.resolve(url)
-        let module = resolution.module
         guard inventory.isPatchable(module) else {
             return .rejected(EmberError(
-                stage: .classify, subject: url.lastPathComponent,
+                stage: .classify, subject: subject,
                 reason: """
                     \(module) exports no dynamic replacement keys, so nothing in it \
                     can be replaced.
@@ -451,10 +679,6 @@ public actor PatchCoordinator {
                 recovery: .rebuild))
         }
 
-        // A local package's target need not share the application's language
-        // mode, and the build settings do not report one for it. Compiling a
-        // Swift 6 package's file under the app's Swift 5 was measured accepting
-        // a body the project's own compiler rejects as a data race.
         var flags = context.extraCompilerFlags
         if let manifest = resolution.manifest {
             switch PackageLanguageMode.read(from: manifest) {
@@ -462,7 +686,7 @@ public actor PatchCoordinator {
                 flags = Self.replacingLanguageMode(in: flags, with: mode)
             case .unknown(let reason):
                 return .rejected(EmberError(
-                    stage: .classify, subject: url.lastPathComponent,
+                    stage: .classify, subject: subject,
                     reason: """
                         \(module) is a local package and \(reason), so the language mode \
                         this patch would be compiled under is a guess.
@@ -476,17 +700,17 @@ public actor PatchCoordinator {
         }
 
         do {
-            let imports = currentIndex.imports
-            let source = try timeline.measure(.generate) {
-                try ReplacementGenerator.generate(
-                    module: module, generation: next, plan: plan, imports: imports,
-                    // Only when the file has private code to reach. A project
-                    // without -enable-private-imports then keeps working for
-                    // everything else, instead of failing on every save.
-                    privateImportOf: currentIndex.declaresFileLocal ? url.lastPathComponent : nil)
+            let files = contributions.map { contribution in
+                PatchFilePlan(
+                    plan: contribution.plan, imports: contribution.index.imports,
+                    privateImportOf: contribution.index.declaresFileLocal
+                        ? contribution.url.lastPathComponent : nil)
             }
-
-            let artifact = try compiler.compile(source: source, generation: next,
+            let sources = try timeline.measure(.generate) {
+                try ReplacementGenerator.generateFiles(
+                    module: module, generation: next, files: files)
+            }
+            let artifact = try compiler.compile(sources: sources, generation: next,
                                                 flags: flags, timeline: timeline)
 
             let delivered = try timeline.measure(.transfer) {
@@ -500,23 +724,10 @@ public actor PatchCoordinator {
                 return try simulatorContainer.deliver(artifact.imageURL)
             }
 
-            // What the loaded image should say it replaced. Declarations, not
-            // their count: a computed property with a getter and a setter is
-            // one declaration and two records.
-            //
-            // Carried declarations are deliberately absent from this sum. They
-            // replace nothing, and the runtime does not count them -- see
-            // `RegisteredReplacements`, which distinguishes the two by how
-            // many selectors reach an implementation. An earlier version
-            // allowed for them with a range instead, and the range cancelled
-            // the check: an `@objcMembers` class where the edit also extracted
-            // a helper produced a patch whose replacement was missing
-            // entirely, whose carried helper made up the difference, and which
-            // was therefore reported as a verified reload. Measured, and
-            // cumulative --- `SessionMemory` re-emits carried declarations, so
-            // the slack grew with every save for the rest of the session.
+            // Carried declarations replace nothing and are absent from the
+            // runtime's section count. Every actual replacement from every
+            // contributing file must be present before the batch can stand.
             let expected = declarations.reduce(0) { $0 + $1.replacementCount }
-
             var verified = false
             var counted: Int?
             var refreshed: String?
@@ -538,86 +749,72 @@ public actor PatchCoordinator {
                 }
             } catch {
                 timeline.record(.load, since: start, success: false)
-                let failure = Self.loadFailure(from: error,
-                                               subject: url.lastPathComponent)
-                // No answer is not the same as no load: a request that was
-                // sent may have been carried out and its reply lost. One that
-                // never left the daemon, because nothing was connected, leaves
-                // the app exactly where it was -- and that is the ordinary case
-                // of saving a file before launching the app.
+                let failure = Self.loadFailure(from: error, subject: subject)
                 throw Self.cannotDescribeProcess(after: error) ? poison(failure) : failure
             }
 
             switch result {
             case .loaded(let echoed, _, let registered, let refresh):
                 timeline.record(.load, since: start, success: true)
-                // The generation came back for a reason. A runtime answering
-                // about a different one is not a runtime whose answer about
-                // this one means anything -- and it was being discarded, so a
-                // reply naming g999999 was reported as a successful reload of
-                // g1.
                 guard echoed == next else {
                     throw poison(EmberError(
-                        stage: .register, subject: url.lastPathComponent,
+                        stage: .register, subject: subject,
                         reason: "asked the app to load g\(next) and it answered about g\(echoed)",
                         recovery: .restart))
                 }
-                // FR-13. `dlopen` returning a handle says the image mapped, not
-                // that the Swift runtime bound anything in it. The count comes
-                // from the image's own replacement section -- the same one the
-                // runtime reads -- so a patch that loaded and replaced nothing
-                // is a failure with a stage of its own rather than a reload
-                // nobody can tell from a real one.
                 if let registered, registered < expected {
                     throw poison(EmberError(
-                        stage: .register, subject: url.lastPathComponent,
+                        stage: .register, subject: subject,
                         reason: registered == 0
                             ? "the patch loaded and registered no replacements at all"
                             : "the patch registered \(registered) replacements; \(expected) were generated",
                         recovery: .restart))
                 }
-                // Fewer than expected is the failure FR-13 names: the patch did
-                // less than it said. More is not a failure --- a patch cannot
-                // register a replacement it does not contain, so a count above
-                // the expected one says the reader misread the image rather
-                // than that the process is wrong, and ending a session every
-                // time a toolchain moved a field would be worse than saying so.
-                // It is reported as unverified instead.
                 verified = registered == expected
                 counted = registered
                 refreshed = refresh
             case .rejected(let reason):
                 timeline.record(.load, since: start, success: false)
-                // The runtime declined before loading anything, so the process
-                // is exactly where it was. This one does not poison.
-                throw EmberError(stage: .load, subject: url.lastPathComponent,
+                throw EmberError(stage: .load, subject: subject,
                                   reason: reason, recovery: .rebuild)
             case .failed(let stage, let message):
                 timeline.record(stage, since: start, success: false)
-                let uncertain = Self.cannotDescribeProcess(afterRuntimeStage: stage)
-                let failure = EmberError(stage: stage, subject: url.lastPathComponent,
-                                          reason: message,
-                                          recovery: uncertain ? .restart : .editAndRetry)
-                throw uncertain ? poison(failure) : failure
+                let isUncertain = Self.cannotDescribeProcess(afterRuntimeStage: stage)
+                let failure = EmberError(stage: stage, subject: subject, reason: message,
+                                          recovery: isUncertain ? .restart : .editAndRetry)
+                throw isUncertain ? poison(failure) : failure
             }
 
+            // The only commit point. Nothing above changes the sources the
+            // coordinator believes the process represents.
             generation = next
-            baselines[url] = current
-            baselineIndexes[url] = currentIndex
-            memories[url, default: SessionMemory()].remember(plan)
-            return .applied(generation: next, declarations: declarations.map(\.displayName),
-                            carried: plan.carried.map(\.displayName),
+            for change in prepared {
+                baselines[change.url] = change.current
+                baselineIndexes[change.url] = change.index
+                memories[change.url, default: SessionMemory()].remember(change.plan)
+            }
+            if var deferred = deferredTargets[selectedTarget] {
+                deferred.urls.subtract(preparedURLs)
+                if deferred.urls.isEmpty {
+                    deferredTargets.removeValue(forKey: selectedTarget)
+                } else {
+                    deferredTargets[selectedTarget] = deferred
+                }
+            }
+            return .applied(generation: next,
+                            declarations: declarations.map(\.displayName),
+                            carried: carried.map(\.displayName),
                             verified: verified,
                             registered: counted.map { ($0, expected) },
                             refreshed: refreshed,
                             oneShot: Self.oneShotLifecycleMethods(among: declarations),
                             timeline: timeline)
         } catch let error as EmberError {
+            // The target's URLs remain deferred. The next event re-reads every
+            // one, so a failed compile or load cannot commit a stale snapshot.
             return .rejected(error)
         } catch {
-            // Anything reaching here failed to name its own stage, so do not
-            // invent one. Every deliberate failure above throws a EmberError.
-            return .rejected(EmberError(stage: .verify, subject: url.lastPathComponent,
+            return .rejected(EmberError(stage: .verify, subject: subject,
                                          reason: "unattributed failure: \(error)", recovery: .rebuild))
         }
     }
@@ -626,16 +823,22 @@ public actor PatchCoordinator {
     /// the adapter's modifier. The edited file was already checked by its
     /// FileIndex. Excluded sources use their build-time text: ignored edits do
     /// not change the code already loaded in the process.
-    private func emberBoundaryNameConflict(excluding edited: URL) -> URL? {
+    private func emberBoundaryNameConflict(
+        excluding edited: URL, updatedIndexes: [URL: FileIndex] = [:]
+    ) -> URL? {
         let editedModule = resolver.resolve(edited).module
         let candidates = Set(baselines.keys).union(excludedSafetyBaselines.keys)
+            .union(updatedIndexes.keys)
             .sorted { $0.path < $1.path }
         for candidate in candidates where candidate != edited {
             guard resolver.resolve(candidate).module == editedModule else { continue }
-            guard let source = baselines[candidate] ?? excludedSafetyBaselines[candidate] else { continue }
-            if DeclarationIndexer.index(source: source).declaresEmberable {
+            if let index = updatedIndexes[candidate], index.declaresEmberable {
                 return candidate
             }
+            guard updatedIndexes[candidate] == nil,
+                  let source = baselines[candidate] ?? excludedSafetyBaselines[candidate]
+            else { continue }
+            if DeclarationIndexer.index(source: source).declaresEmberable { return candidate }
         }
         return nil
     }

@@ -293,6 +293,20 @@ struct Order {
     }
 }
 
+@Test func aBatchCanCarryAnAdditionForAnotherFilesReplacement() {
+    let baseline = "struct Order {\n    func total() -> String { \"x\" }\n}"
+    let current = "struct Order {\n    func total() -> String { \"x\" }\n    func dollars() -> String { \"y\" }\n}"
+    let before = DeclarationIndexer.index(source: baseline)
+    let after = DeclarationIndexer.index(source: current)
+    guard case .hotPatch(let plan) = ChangeClassifier.classifyForBatch(
+        before: before, after: after) else {
+        Issue.record("the batch discarded an addition another file may call")
+        return
+    }
+    #expect(plan.replacements.isEmpty)
+    #expect(plan.carried.map(\.simpleNameForTest) == ["dollars"])
+}
+
 @Test func addingAnOverrideIsARebuild() {
     let baseline = #"class B { func f() -> String { "x" } }\#nclass C: B { }"#
     let current = #"class B { func f() -> String { "x" } }\#nclass C: B { override func f() -> String { "y" } }"#

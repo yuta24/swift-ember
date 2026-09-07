@@ -188,8 +188,7 @@ public enum Watch {
                     level: .warning, message: error.description))
                 continue
             }
-            for change in batch {
-                switch await coordinator.handle(change: change.url) {
+            switch await coordinator.handle(changes: batch.map(\.url)) {
                 case .ignored:
                     continue
                 case .rejected(let error):
@@ -319,7 +318,6 @@ public enum Watch {
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: hasCaveat ? .warning : .success,
                         message: runtimeLines.joined(separator: "\n")))
-                }
             }
         }
     }
