@@ -329,6 +329,14 @@ and those are not comparable.
 Method and function bodies, computed property bodies, and the implementations
 they reach. Concretely:
 
+When one editor action saves several Swift files in the same module, the
+watcher treats that poll as one reload: it checks every file first, compiles
+their generated sources together, and loads one patch image. A helper added in
+one file can therefore land with a changed caller in another file. If any file
+requires a rebuild, none of that batch is loaded. Changes spanning different
+modules are refused as a rebuild for now, because their compiler contexts may
+differ and cannot safely share one primitive patch image.
+
 - methods on `class`, `struct`, `enum`, and `actor`, including `mutating`,
   `static`, `async`, `throws`, and `@MainActor` ones;
 - **overrides**, including a body that opens with `super.viewDidLoad()`, and

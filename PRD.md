@@ -411,10 +411,21 @@ not.
 The system MUST generate replacement declarations compatible with Swift
 dynamic replacement semantics.
 
+All compatible changes observed in one watcher batch for one module MUST be
+generated as one patch generation. Classification MUST finish for the complete
+batch before any part is sent to the runtime, and a refused file MUST prevent
+every file in that batch from loading. An addition in one source file MAY be
+carried with a replacement in another source file in the same module.
+
 ### FR-6 Patch compilation
 
 The patch MUST be compiled using the same effective
 toolchain/configuration as the running target.
+
+The generated contributions for one accepted multi-file batch MUST be linked
+into one loadable image. The host MUST advance every affected baseline only
+after that image is confirmed loaded. Batches requiring different module or
+language-mode contexts MAY conservatively require a rebuild.
 
 ### FR-7 Runtime communication
 

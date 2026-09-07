@@ -14,7 +14,8 @@ public struct PatchCompiler: Sendable {
 
     public struct Artifact: Sendable {
         public let generation: UInt64
-        public let sourceURL: URL
+        public let sourceURLs: [URL]
+        public var sourceURL: URL { sourceURLs[0] }
         public let imageURL: URL
     }
 
@@ -27,23 +28,46 @@ public struct PatchCompiler: Sendable {
     /// stage attribution by grepping the output.
     public func compile(source: String, generation: UInt64, flags: [String]? = nil,
                         timeline: StageTimeline) throws -> Artifact {
+        try compile(sources: [source], generation: generation, flags: flags, timeline: timeline)
+    }
+
+    /// Compiles every original source contribution as one Swift module and
+    /// links the resulting whole-module object into one dylib. Separate source
+    /// files preserve `@_private(sourceFile:)` scopes; one image is the commit
+    /// boundary the runtime can load atomically.
+    public func compile(sources: [String], generation: UInt64, flags: [String]? = nil,
+                        timeline: StageTimeline) throws -> Artifact {
+        guard !sources.isEmpty else {
+            throw EmberError(stage: .compile, subject: "source batch",
+                             reason: "an atomic patch needs at least one generated source",
+                             recovery: .editAndRetry)
+        }
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
 
         let name = String(format: "Patch_%03llu", generation)
-        let sourceURL = workDirectory.appendingPathComponent("\(name).swift")
+        let sourceURLs = sources.indices.map { index in
+            sources.count == 1
+                ? workDirectory.appendingPathComponent("\(name).swift")
+                : workDirectory.appendingPathComponent(
+                    String(format: "%@_%03d.swift", name, index + 1))
+        }
         let objectURL = workDirectory.appendingPathComponent("\(name).o")
         let imageURL = workDirectory.appendingPathComponent("\(name).dylib")
-        try source.write(to: sourceURL, atomically: true, encoding: .utf8)
+        for (source, url) in zip(sources, sourceURLs) {
+            try source.write(to: url, atomically: true, encoding: .utf8)
+        }
 
-        try compile(frontendArguments(source: sourceURL, object: objectURL, name: name,
+        try compile(frontendArguments(sources: sourceURLs, object: objectURL, name: name,
                                       flags: flags ?? context.extraCompilerFlags),
-                    subject: sourceURL.lastPathComponent, timeline: timeline)
+                    subject: sources.count == 1 ? sourceURLs[0].lastPathComponent : "\(sources.count) generated sources",
+                    timeline: timeline)
 
         try run(linkArguments(object: objectURL, image: imageURL, name: name),
-                stage: .link, subject: sourceURL.lastPathComponent,
+                stage: .link,
+                subject: sources.count == 1 ? sourceURLs[0].lastPathComponent : "\(sources.count) generated sources",
                 recovery: .rebuild, timeline: timeline)
 
-        return Artifact(generation: generation, sourceURL: sourceURL, imageURL: imageURL)
+        return Artifact(generation: generation, sourceURLs: sourceURLs, imageURL: imageURL)
     }
 
     private func run(_ arguments: [String], stage: Stage, subject: String,
@@ -151,8 +175,11 @@ public struct PatchCompiler: Sendable {
         return arguments
     }
 
-    private func frontendArguments(source: URL, object: URL, name: String, flags: [String]) -> [String] {
-        common + ["-c", "-o", object.path, "-module-name", name] + flags + [source.path]
+    private func frontendArguments(sources: [URL], object: URL, name: String,
+                                   flags: [String]) -> [String] {
+        let wholeModule = sources.count > 1 ? ["-whole-module-optimization"] : []
+        return common + wholeModule + ["-c", "-o", object.path, "-module-name", name]
+            + flags + sources.map(\.path)
     }
 
     private func linkArguments(object: URL, image: URL, name: String) -> [String] {

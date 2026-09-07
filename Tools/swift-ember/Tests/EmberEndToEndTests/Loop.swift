@@ -81,6 +81,152 @@ enum Loop {
         return Outcome(before: before, after: after)
     }
 
+    /// Builds and loads one atomic image from several original source files.
+    /// This is the production shape: private imports remain file-scoped, the
+    /// compiler sees cross-file carried declarations, and dyld receives one
+    /// image rather than a sequence that cannot be rolled back.
+    static func runAtomic(baselines: [String], currents: [String]) throws -> Outcome {
+        precondition(!baselines.isEmpty && baselines.count == currents.count)
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ember-e2e-atomic-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let module = "Fixture"
+        let appSources = try baselines.enumerated().map { offset, source in
+            let url = work.appendingPathComponent("Source\(offset + 1).swift")
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        }
+        let binary = work.appendingPathComponent("app")
+        try compileApplication(sources: [harness] + appSources, module: module,
+                               into: work, binary: binary)
+        let before = try execute(binary, arguments: [])
+
+        var files: [PatchFilePlan] = []
+        for (offset, pair) in zip(baselines, currents).enumerated() {
+            let currentIndex = DeclarationIndexer.index(source: pair.1)
+            let classification = ChangeClassifier.classifyForBatch(
+                before: DeclarationIndexer.index(source: pair.0), after: currentIndex)
+            switch classification {
+            case .noChange:
+                continue
+            case .rebuildRequired:
+                throw Failure.notHotPatchable(classification)
+            case .hotPatch(let plan):
+                files.append(PatchFilePlan(
+                    plan: plan, imports: currentIndex.imports,
+                    privateImportOf: currentIndex.declaresFileLocal
+                        ? appSources[offset].lastPathComponent : nil))
+            }
+        }
+        guard files.contains(where: { !$0.plan.replacements.isEmpty }) else {
+            throw Failure.notHotPatchable(.noChange)
+        }
+
+        let generated = try ReplacementGenerator.generateFiles(
+            module: module, generation: 1, files: files)
+        let patchSources = try generated.enumerated().map { offset, source in
+            let url = work.appendingPathComponent("Patch_\(offset + 1).swift")
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        }
+        let image = work.appendingPathComponent("Patch.dylib")
+        try compilePatch(sources: patchSources, moduleSearchPath: work,
+                         appBinary: binary, image: image,
+                         generatedSources: generated)
+        let after = try execute(binary, arguments: [image.path])
+        return Outcome(before: before, after: after)
+    }
+
+    /// Runs several complete multi-file source snapshots through one process.
+    /// Each generation includes the changed files plus every contribution the
+    /// earlier images left resident, matching the coordinator's module-wide
+    /// carry behavior.
+    static func runAtomicGenerations(_ versions: [[String]]) throws -> [String] {
+        precondition(versions.count >= 2 && !versions[0].isEmpty)
+        precondition(versions.allSatisfy { $0.count == versions[0].count })
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ember-e2e-atomic-generations-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let module = "Fixture"
+        let appSources = try versions[0].enumerated().map { offset, source in
+            let url = work.appendingPathComponent("Source\(offset + 1).swift")
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        }
+        let binary = work.appendingPathComponent("app")
+        try compileApplication(sources: [harness] + appSources, module: module,
+                               into: work, binary: binary)
+
+        var baselines = versions[0]
+        var memories = Array(repeating: SessionMemory(), count: baselines.count)
+        var images: [String] = []
+
+        for (generationOffset, currents) in versions.dropFirst().enumerated() {
+            let generation = UInt64(generationOffset + 1)
+            var changedPlans: [Int: (index: FileIndex, plan: PatchPlan)] = [:]
+            for offset in currents.indices where currents[offset] != baselines[offset] {
+                let index = DeclarationIndexer.index(source: currents[offset])
+                let classification = ChangeClassifier.classifyForBatch(
+                    before: DeclarationIndexer.index(source: baselines[offset]),
+                    after: index, memory: memories[offset])
+                guard case .hotPatch(let plan) = classification else {
+                    throw Failure.notHotPatchable(classification)
+                }
+                changedPlans[offset] = (index, plan)
+            }
+
+            var files: [PatchFilePlan] = []
+            for offset in currents.indices {
+                let index: FileIndex
+                let plan: PatchPlan
+                if let changed = changedPlans[offset] {
+                    index = changed.index
+                    plan = changed.plan
+                } else {
+                    index = DeclarationIndexer.index(source: baselines[offset])
+                    let carried = memories[offset].carried.compactMap { index.patchable[$0] }
+                    let replacements = memories[offset].replaced
+                        .subtracting(memories[offset].carried)
+                        .compactMap { index.patchable[$0] }
+                    guard !carried.isEmpty || !replacements.isEmpty else { continue }
+                    plan = PatchPlan(replacements: replacements, carried: carried)
+                }
+                files.append(PatchFilePlan(
+                    plan: plan, imports: index.imports,
+                    privateImportOf: index.declaresFileLocal
+                        ? appSources[offset].lastPathComponent : nil))
+            }
+            guard files.contains(where: { !$0.plan.replacements.isEmpty }) else {
+                throw Failure.notHotPatchable(.noChange)
+            }
+
+            let generated = try ReplacementGenerator.generateFiles(
+                module: module, generation: generation, files: files)
+            let patchSources = try generated.enumerated().map { offset, source in
+                let url = work.appendingPathComponent(
+                    "Patch_\(generation)_\(offset + 1).swift")
+                try source.write(to: url, atomically: true, encoding: .utf8)
+                return url
+            }
+            let image = work.appendingPathComponent("Patch_\(generation).dylib")
+            try compilePatch(sources: patchSources, moduleSearchPath: work,
+                             appBinary: binary, image: image,
+                             generatedSources: generated)
+            images.append(image.path)
+
+            for (offset, changed) in changedPlans {
+                memories[offset].remember(changed.plan)
+                baselines[offset] = currents[offset]
+            }
+        }
+
+        return try execute(binary, arguments: images)
+    }
+
     /// Several saves in a row against one process, the way a session actually
     /// goes: each patch is generated with the memory of what the ones before it
     /// put in, and all of them are loaded in order.
@@ -221,6 +367,32 @@ enum Loop {
                                 "-Xlinker", "-bundle_loader", "-Xlinker", appBinary.path])
         guard result.status == 0 else {
             throw Failure.build("the patch build", result.output + "\n--- generated ---\n" + generatedSource)
+        }
+    }
+
+    private static func compilePatch(sources: [URL], moduleSearchPath: URL, appBinary: URL,
+                                     image: URL, generatedSources: [String]) throws {
+        let object = image.deletingPathExtension().appendingPathExtension("o")
+        var compile = ["swiftc", "-Onone", "-whole-module-optimization",
+                       "-c", "-o", object.path,
+                       "-module-name", "Patch", "-I", moduleSearchPath.path]
+        compile += sources.map(\.path)
+        let compiled = try shell(compile)
+        let dump = generatedSources.enumerated().map {
+            "--- generated \($0.offset + 1) ---\n\($0.element)"
+        }.joined(separator: "\n")
+        guard compiled.status == 0 else {
+            throw Failure.build("the atomic patch compile", compiled.output + "\n" + dump)
+        }
+
+        let linked = try shell([
+            "swiftc", "-Onone", "-emit-library", "-o", image.path,
+            "-module-name", "Patch", object.path,
+            "-Xlinker", "-bundle",
+            "-Xlinker", "-bundle_loader", "-Xlinker", appBinary.path,
+        ])
+        guard linked.status == 0 else {
+            throw Failure.build("the atomic patch link", linked.output + "\n" + dump)
         }
     }
 
