@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import EmberCore
+import EmberDaemon
 import EmberGen
 
 /// Runs a source edit through the real pipeline and into a real process.
@@ -18,6 +20,20 @@ enum Loop {
     struct Outcome {
         var before: [String]
         var after: [String]
+    }
+
+    struct ModuleEdit {
+        let module: String
+        let baseline: String
+        let current: String
+        let flags: [String]
+
+        init(module: String, baseline: String, current: String, flags: [String] = []) {
+            self.module = module
+            self.baseline = baseline
+            self.current = current
+            self.flags = flags
+        }
     }
 
     private static var repoRoot: URL {
@@ -136,6 +152,83 @@ enum Loop {
                          appBinary: binary, image: image,
                          generatedSources: generated)
         let after = try execute(binary, arguments: [image.path])
+        return Outcome(before: before, after: after)
+    }
+
+    /// Builds several independently compiled modules into one executable,
+    /// compiles each module's replacement under its own patch-module context,
+    /// and links all resulting objects into one image. This is the research
+    /// gate for cross-module atomicity: dyld sees one load or no load.
+    static func runCrossModuleAtomic(_ edits: [ModuleEdit]) throws -> Outcome {
+        precondition(edits.count > 1)
+        let work = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ember-e2e-cross-module-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        var moduleObjects: [URL] = []
+        var moduleSources: [URL] = []
+        for edit in edits {
+            let source = work.appendingPathComponent("\(edit.module).swift")
+            try edit.baseline.write(to: source, atomically: true, encoding: .utf8)
+            moduleSources.append(source)
+            let object = work.appendingPathComponent("\(edit.module).o")
+            let result = try shell([
+                "swiftc", "-parse-as-library", "-Onone", "-enable-testing",
+                "-Xfrontend", "-enable-implicit-dynamic",
+                "-Xfrontend", "-enable-private-imports",
+                "-module-name", edit.module,
+                "-emit-module", "-emit-module-path",
+                work.appendingPathComponent("\(edit.module).swiftmodule").path,
+                "-emit-object", "-o", object.path, source.path,
+            ] + edit.flags)
+            guard result.status == 0 else {
+                throw Failure.build("the \(edit.module) build", result.output)
+            }
+            moduleObjects.append(object)
+        }
+
+        let appSource = work.appendingPathComponent("App.swift")
+        let imports = edits.map { "import \($0.module)" }.joined(separator: "\n")
+        let calls = edits.map { "\($0.module).value()" }.joined(separator: ", ")
+        try "\(imports)\n\(probe("[\(calls)]"))\n"
+            .write(to: appSource, atomically: true, encoding: .utf8)
+        let binary = work.appendingPathComponent("app")
+        var appArguments = [
+            "swiftc", "-parse-as-library", "-Onone", "-module-name", "FixtureApp",
+            "-I", work.path, "-emit-executable", "-o", binary.path,
+            harness.path, appSource.path,
+        ]
+        appArguments += moduleObjects.map(\.path)
+        let app = try shell(appArguments)
+        guard app.status == 0 else { throw Failure.build("the fixture app build", app.output) }
+        let before = try execute(binary, arguments: [])
+
+        var units: [PatchCompiler.CompilationUnit] = []
+        for (offset, edit) in edits.enumerated() {
+            let index = DeclarationIndexer.index(source: edit.current)
+            let classification = ChangeClassifier.classify(
+                before: DeclarationIndexer.index(source: edit.baseline), after: index)
+            guard case .hotPatch(let plan) = classification else {
+                throw Failure.notHotPatchable(classification)
+            }
+            let generated = try ReplacementGenerator.generate(
+                module: edit.module, generation: 1, plan: plan, imports: index.imports,
+                privateImportOf: index.declaresFileLocal
+                    ? moduleSources[offset].lastPathComponent : nil)
+            units.append(PatchCompiler.CompilationUnit(
+                module: edit.module, sources: [generated], flags: edit.flags))
+        }
+
+        let context = try hostContext(
+            appBinary: binary, moduleSearchPath: work,
+            sourceRoots: moduleSources.map { $0.deletingLastPathComponent().path })
+        let compiler = PatchCompiler(
+            context: context,
+            workDirectory: work.appendingPathComponent("Patches", isDirectory: true))
+        let artifact = try compiler.compile(
+            units: units, generation: 1, timeline: StageTimeline(generation: 1))
+        let after = try execute(binary, arguments: [artifact.imageURL.path])
         return Outcome(before: before, after: after)
     }
 
@@ -354,6 +447,38 @@ enum Loop {
         arguments += sources.map(\.path)
         let result = try shell(arguments)
         guard result.status == 0 else { throw Failure.build("the fixture build", result.output) }
+    }
+
+    private static func hostContext(
+        appBinary: URL, moduleSearchPath: URL, sourceRoots: [String]
+    ) throws -> BuildContext {
+        let compilerResult = try shell(["--find", "swiftc"])
+        guard compilerResult.status == 0 else {
+            throw Failure.build("swiftc discovery", compilerResult.output)
+        }
+        let compiler = compilerResult.output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sdkResult = try shell(["--sdk", "macosx", "--show-sdk-path"])
+        guard sdkResult.status == 0 else {
+            throw Failure.build("macOS SDK discovery", sdkResult.output)
+        }
+        let sdk = sdkResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetResult = try shell(["swiftc", "-print-target-info"])
+        guard targetResult.status == 0,
+              let json = try? JSONSerialization.jsonObject(
+                with: Data(targetResult.output.utf8)) as? [String: Any],
+              let target = json["target"] as? [String: Any],
+              let triple = target["triple"] as? String,
+              let version = json["compilerVersion"] as? String else {
+            throw Failure.build("Swift target discovery", targetResult.output)
+        }
+        return BuildContext(
+            moduleName: "FixtureApp", swiftCompilerPath: compiler,
+            swiftCompilerVersion: version, targetTriple: triple,
+            sdkPath: sdk, sdkName: "macosx", appBinaryPath: appBinary.path,
+            moduleSearchPaths: [moduleSearchPath.path], extraCompilerFlags: [],
+            sourceRoots: sourceRoots,
+            bundleIdentifier: "dev.swift-ember.cross-module-production-e2e")
     }
 
     private static func compilePatch(source: URL, moduleSearchPath: URL, appBinary: URL,

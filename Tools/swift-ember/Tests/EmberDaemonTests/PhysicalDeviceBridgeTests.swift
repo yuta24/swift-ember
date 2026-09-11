@@ -26,6 +26,7 @@ private struct TestDeviceStatus: Codable {
     let buildIdentity: String
     let processId: Int32
     let loadedGenerations: [UInt64]
+    let expectedBuildUUIDs: [String]
     let buildMatchesProcess: Bool
 }
 
@@ -121,13 +122,19 @@ private final class DeviceCommandRecorder: @unchecked Sendable {
     recorder.status = try JSONEncoder().encode(TestDeviceStatus(
         protocolVersion: EmberProtocol.version, token: "old",
         buildIdentity: context.identity, processId: 10,
-        loadedGenerations: [], buildMatchesProcess: true))
+        loadedGenerations: [], expectedBuildUUIDs: ["uuid"], buildMatchesProcess: true))
+    #expect(bridge.connectedProcess() == nil)
+
+    recorder.status = try JSONEncoder().encode(TestDeviceStatus(
+        protocolVersion: EmberProtocol.version, token: "current",
+        buildIdentity: context.identity, processId: 10,
+        loadedGenerations: [], expectedBuildUUIDs: ["stale"], buildMatchesProcess: true))
     #expect(bridge.connectedProcess() == nil)
 
     recorder.status = try JSONEncoder().encode(TestDeviceStatus(
         protocolVersion: EmberProtocol.version, token: "current",
         buildIdentity: context.identity, processId: 11,
-        loadedGenerations: [], buildMatchesProcess: true))
+        loadedGenerations: [], expectedBuildUUIDs: ["uuid"], buildMatchesProcess: true))
     #expect(bridge.connectedProcess() == 11)
 }
 

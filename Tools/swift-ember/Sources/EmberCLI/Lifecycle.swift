@@ -142,9 +142,17 @@ public enum Lifecycle {
         var environment = backgroundEnvironment(from: ProcessInfo.processInfo.environment)
         environment[recordEnvironment] = session.recordURL.path
         environment[patchDirectoryEnvironment] = session.patchURL.path
+        var arguments = [Options.Command.watch.rawValue, "--context", session.contextURL.path]
+        if let command = options.rebuildCommand {
+            arguments += ["--rebuild-command", command]
+        }
+        if let directory = options.rebuildDirectory {
+            arguments += ["--rebuild-directory", directory]
+        }
+        arguments += ["--rebuild-timeout", String(options.rebuildTimeout)]
         let pid = try spawnDetached(
             executable: executable,
-            arguments: [Options.Command.watch.rawValue, "--context", session.contextURL.path],
+            arguments: arguments,
             environment: environment,
             logDescriptor: log.fileDescriptor)
 

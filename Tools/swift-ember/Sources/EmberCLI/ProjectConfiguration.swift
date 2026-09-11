@@ -12,12 +12,16 @@ struct ProjectConfiguration: Decodable {
     let sources: [String]?
     let exclude: [String]?
     let startupTimeout: TimeInterval?
+    let rebuildCommand: String?
+    let rebuildTimeout: TimeInterval?
 
     enum ConfigurationError: Error, CustomStringConvertible {
         case unreadable(URL, String)
         case bothContainers(URL)
         case missingScheme(URL)
         case invalidStartupTimeout(URL)
+        case invalidRebuildTimeout(URL)
+        case emptyRebuildCommand(URL)
         case emptyExcludePath(URL)
         case unknownKeys(URL, [String])
 
@@ -31,6 +35,10 @@ struct ProjectConfiguration: Decodable {
                 "\(url.path) needs a scheme with its project or workspace"
             case .invalidStartupTimeout(let url):
                 "\(url.path) has an invalid startupTimeout; use a positive number"
+            case .invalidRebuildTimeout(let url):
+                "\(url.path) has an invalid rebuildTimeout; use a positive number"
+            case .emptyRebuildCommand(let url):
+                "\(url.path) has an empty rebuildCommand; remove it or provide a command"
             case .emptyExcludePath(let url):
                 "\(url.path) has an empty exclude path; remove it or use an empty array"
             case .unknownKeys(let url, let keys):
@@ -46,7 +54,7 @@ struct ProjectConfiguration: Decodable {
             if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 let allowed: Set<String> = [
                     "project", "workspace", "scheme", "configuration", "sources", "exclude",
-                    "startupTimeout",
+                    "startupTimeout", "rebuildCommand", "rebuildTimeout",
                 ]
                 let unknown = object.keys.filter { !allowed.contains($0) }.sorted()
                 if !unknown.isEmpty { throw ConfigurationError.unknownKeys(url, unknown) }
@@ -68,6 +76,14 @@ struct ProjectConfiguration: Decodable {
         if let timeout = configuration.startupTimeout,
            !timeout.isFinite || timeout <= 0 {
             throw ConfigurationError.invalidStartupTimeout(url)
+        }
+        if let timeout = configuration.rebuildTimeout,
+           !timeout.isFinite || timeout <= 0 {
+            throw ConfigurationError.invalidRebuildTimeout(url)
+        }
+        if let command = configuration.rebuildCommand,
+           command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigurationError.emptyRebuildCommand(url)
         }
         if configuration.exclude?.contains(where: {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -129,6 +145,15 @@ struct ProjectConfiguration: Decodable {
         }
         if !explicit.startupTimeout, let startupTimeout {
             options.startupTimeout = startupTimeout
+        }
+        if !explicit.rebuildCommand, let rebuildCommand {
+            options.rebuildCommand = rebuildCommand
+            if !explicit.rebuildDirectory {
+                options.rebuildDirectory = root.path
+            }
+        }
+        if !explicit.rebuildTimeout, let rebuildTimeout {
+            options.rebuildTimeout = rebuildTimeout
         }
     }
 
