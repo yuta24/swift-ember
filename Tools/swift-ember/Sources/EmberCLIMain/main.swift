@@ -27,6 +27,14 @@ do {
 
 do {
     if options.command == .xcode && options.xcodeAction == .start
+        && ProcessInfo.processInfo.environment["SWIFT_EMBER_REBUILD"] == "1" {
+        // An automatic rebuild may execute xcodebuild, whose Scheme post-action
+        // would otherwise stop the watcher that is waiting for the new app and
+        // replace it with a nested one. The outer watcher owns this recovery.
+        print("swift-ember: keeping the current watcher during its automatic rebuild")
+        exit(0)
+    }
+    if options.command == .xcode && options.xcodeAction == .start
         && !options.appliesToXcodeConfiguration() {
         print("swift-ember: skipping \(ProcessInfo.processInfo.environment["CONFIGURATION"] ?? "this") configuration")
         exit(0)
@@ -75,6 +83,11 @@ case .status:
     if !context.excludedSourcePaths.isEmpty {
         print("excluded           \(context.excludedSourcePaths.joined(separator: ", "))")
     }
+    if let rebuildCommand = options.rebuildCommand {
+        print("rebuild command    \(rebuildCommand)")
+        print("rebuild directory  \(options.rebuildDirectory ?? FileManager.default.currentDirectoryPath)")
+        print("rebuild timeout    \(String(format: "%.0f", options.rebuildTimeout)) s")
+    }
     print("defines            \(context.extraCompilerFlags.joined(separator: " "))")
     print("build identity     \(context.identity)")
 
@@ -113,6 +126,11 @@ case .watch:
         try await Watch.run(
             context: context,
             workDirectory: Lifecycle.patchDirectory(for: options),
+            rebuildCommand: options.rebuildCommand,
+            rebuildDirectory: options.rebuildDirectory.map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            },
+            rebuildTimeout: options.rebuildTimeout,
             onReady: { try Lifecycle.markReady() })
     } catch let error as EmberError {
         abort(error.description)

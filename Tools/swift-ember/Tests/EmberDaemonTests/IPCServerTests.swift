@@ -33,6 +33,22 @@ private func connectedRuntime(to server: IPCServer,
     return runtime
 }
 
+@Test func requestingASessionRefreshDisconnectsTheCurrentRuntime() async throws {
+    let server = try await startedServer()
+    defer { server.stop() }
+    let runtime = try await connectedRuntime(to: server)
+    defer { runtime.disconnect() }
+
+    server.disconnectCurrentSession()
+    // Cancellation is asynchronous in Network.framework. The logical session
+    // must nevertheless disappear before a rebuild poll can inspect it.
+    #expect(server.currentSession == nil)
+    for _ in 0..<100 where server.currentSession != nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(server.currentSession == nil)
+}
+
 @Test func aRequestGetsItsReply() async throws {
     let server = try await startedServer()
     defer { server.stop() }

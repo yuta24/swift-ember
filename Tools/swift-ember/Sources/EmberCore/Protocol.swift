@@ -16,7 +16,10 @@ public enum EmberProtocol {
     /// make the generation visible, which for a UIKit application is the
     /// difference between a loaded patch and a changed screen. Version 6 added
     /// expiring requests and process-bearing replies for physical devices.
-    public static let version = 6
+    /// Version 7 binds the runtime's build verdict to the exact UUIDs it
+    /// checked, so a hello or device status from the previous rebuild cannot
+    /// prove that a newly published binary is running.
+    public static let version = 7
     public static let defaultPort: UInt16 = 51_237
 }
 
@@ -73,6 +76,9 @@ public struct Hello: Codable, Sendable {
     public var moduleName: String
     public var processId: Int32
     public var loadedGenerations: [UInt64]
+    /// The UUIDs from the session file against which the runtime made its
+    /// `buildMatchesProcess` decision.
+    public var expectedBuildUUIDs: [String]
     /// Whether the process found one of the daemon's build UUIDs among its own
     /// loaded images.
     ///
@@ -82,12 +88,14 @@ public struct Hello: Codable, Sendable {
     public var buildMatchesProcess: Bool
 
     public init(token: String, buildIdentity: String, moduleName: String, processId: Int32,
-                loadedGenerations: [UInt64], buildMatchesProcess: Bool) {
+                loadedGenerations: [UInt64], expectedBuildUUIDs: [String] = [],
+                buildMatchesProcess: Bool) {
         self.token = token
         self.buildIdentity = buildIdentity
         self.moduleName = moduleName
         self.processId = processId
         self.loadedGenerations = loadedGenerations
+        self.expectedBuildUUIDs = expectedBuildUUIDs
         self.buildMatchesProcess = buildMatchesProcess
     }
 }

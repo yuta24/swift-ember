@@ -189,6 +189,29 @@ override the file, including `--exclude` for an explicit comma-separated list.
 Unknown keys are rejected so a misspelled `sources` or `exclude` cannot silently
 change what is watched.
 
+`rebuildCommand` is optional and explicitly opts into automatic recovery for a
+change that cannot be patched, such as adding a stored property. It runs through
+`zsh -lc` from the configuration file's directory, must rebuild and relaunch the
+app, and receives `SWIFT_EMBER_REBUILD=1`. The watcher accepts recovery only
+after a different process connects and proves that it is running the new Mach-O
+UUID, then discards every old patch generation and atomically adopts the exact
+source snapshot used for that build. A command that only relaunches the old
+binary is refused: the Mach-O UUID on disk must change. Sources are checked both
+across the command and after the replacement process connects; a change reruns
+the command up to three times so the baseline cannot absorb an edit the build
+missed. SIGINT and SIGTERM stop the command's complete process group.
+`rebuildTimeout` controls how long it waits for the replacement process and
+defaults to 300 seconds.
+Command-line equivalents are `--rebuild-command`, `--rebuild-directory`, and
+`--rebuild-timeout`.
+
+```json
+{
+  "rebuildCommand": "scripts/rebuild-and-launch.sh",
+  "rebuildTimeout": 300
+}
+```
+
 A complete explicit target (`--project`/`--workspace` together with `--scheme`,
 or `--context`) bypasses automatic discovery. Pass `--config <path>` to use a
 specific file anyway, or `--no-config` to disable discovery explicitly. A
@@ -329,13 +352,15 @@ and those are not comparable.
 Method and function bodies, computed property bodies, and the implementations
 they reach. Concretely:
 
-When one editor action saves several Swift files in the same module, the
-watcher treats that poll as one reload: it checks every file first, compiles
-their generated sources together, and loads one patch image. A helper added in
-one file can therefore land with a changed caller in another file. If any file
-requires a rebuild, none of that batch is loaded. Changes spanning different
-modules are refused as a rebuild for now, because their compiler contexts may
-differ and cannot safely share one primitive patch image.
+When one editor action saves several Swift files, the watcher treats that poll
+as one reload: it checks every file first, compiles each module under its own
+evaluated package flags, Swift language mode, and private-import context, links
+the resulting objects into one patch image, and loads that image once. A helper
+added in one file can therefore land with a changed caller in another file of
+the same module, while
+body edits in an app target and local package can land atomically together. If
+any file or module fails classification or compilation, no image is delivered;
+if runtime loading fails, no later module remains to apply as a partial prefix.
 
 - methods on `class`, `struct`, `enum`, and `actor`, including `mutating`,
   `static`, `async`, `throws`, and `@MainActor` ones;
@@ -373,7 +398,9 @@ section 7.3b is where those two numbers come from.
 Deleting or renaming a watched Swift file also requires a rebuild. The watcher
 refuses the whole save batch and all later saves in that watcher session. After
 the rebuild, the `xcode start` Build post-action starts a fresh watcher;
-foreground `swift-ember watch` sessions must be restarted manually. This keeps
+foreground `swift-ember watch` sessions must be restarted manually unless a
+`rebuildCommand` is configured. Automatic recovery instead waits for the new
+process and resets the existing watcher from the rebuilt sources. This keeps
 the added half of a rename and any changes skipped alongside it from being
 applied on their own.
 
@@ -404,11 +431,12 @@ Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
 of iOS 16 or later. Compatibility evidence spans Swift 6.2.3
 through 6.4 across eight configurations, six locally and two on CI. The newest
 full run passes all 44 fixtures on the Simulator, 41 on the host with the three
-Simulator-only UIKit cases skipped, and all 226 tests on local Swift 6.3.3. A
-44-fixture, 203-test snapshot also passes in full on Swift 6.4. `DESIGN.md`
-section 20 records exactly what was run on each configuration. Physical-device
-delivery is verified on an arm64 iPhone running iOS 26.4 with a binary
-targeting iOS 16; an actual iOS 16 device has not yet been measured.
+Simulator-only UIKit cases skipped, and the then-current 226 tests on local
+Swift 6.3.3. The current M6 host verification passes all 330 tests on Swift
+6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. `DESIGN.md` section 20
+records exactly what was run on each configuration. Physical-device delivery
+is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16;
+an actual iOS 16 device has not yet been measured.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The

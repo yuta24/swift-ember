@@ -24,7 +24,7 @@ final class EmberDeviceClient: @unchecked Sendable {
         static let responses = "SpliceResponses"
     }
 
-    private struct Session: Codable {
+    private struct Session: Codable, Equatable {
         let protocolVersion: Int
         let token: String
         let buildIdentity: String
@@ -58,6 +58,7 @@ final class EmberDeviceClient: @unchecked Sendable {
         let buildIdentity: String
         let processId: Int32
         let loadedGenerations: [UInt64]
+        let expectedBuildUUIDs: [String]
         let buildMatchesProcess: Bool
     }
 
@@ -91,7 +92,7 @@ final class EmberDeviceClient: @unchecked Sendable {
             return
         }
 
-        if session?.token != found.token {
+        if session != found {
             session = found
             applier.expect(buildIdentity: found.buildIdentity, buildUUIDs: found.buildUUIDs)
             writeStatus(for: found)
@@ -240,6 +241,7 @@ final class EmberDeviceClient: @unchecked Sendable {
             buildIdentity: session.buildIdentity,
             processId: ProcessInfo.processInfo.processIdentifier,
             loadedGenerations: state.generations,
+            expectedBuildUUIDs: session.buildUUIDs,
             buildMatchesProcess: LoadedImages.running(oneOf: session.buildUUIDs))
         guard let data = try? JSONEncoder().encode(status) else { return }
         let url = documents.appendingPathComponent(TransportPath.status)
