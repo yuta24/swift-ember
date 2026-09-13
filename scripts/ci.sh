@@ -143,13 +143,10 @@ build_package() {
 }
 
 run_tests() {
-    # The end-to-end tests launch many synchronous compiler and fixture
-    # processes. Running them concurrently can exhaust Swift Testing's
-    # cooperative executor on hosted macOS runners and stall the test run.
-    swift test --package-path "$TOOL_PACKAGE" \
-        --skip EmberEndToEndTests || return 1
-    swift test --package-path "$TOOL_PACKAGE" --skip-build \
-        --filter EmberEndToEndTests --no-parallel
+    # Several test targets synchronously wait for compiler, SwiftPM, and fixture
+    # processes. On hosted macOS runners, parallel execution can occupy every
+    # cooperative-executor thread and stall the suite indefinitely.
+    swift test --package-path "$TOOL_PACKAGE" --no-parallel
 }
 
 check_release_assets() {
