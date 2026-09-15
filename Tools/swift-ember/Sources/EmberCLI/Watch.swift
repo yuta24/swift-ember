@@ -7,6 +7,9 @@ public enum Watch {
     public static func run(
         context: BuildContext,
         workDirectory: URL,
+        rebuildCommand: String? = nil,
+        rebuildDirectory: URL? = nil,
+        rebuildTimeout: TimeInterval = 300,
         onReady: (() throws -> Void)? = nil
     ) async throws {
         try validatePhysicalDevice(context)
@@ -35,13 +38,13 @@ public enum Watch {
         let server = try IPCServer()
         defer { server.stop() }
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
+        let watchedBuildUUID = BuildUUID(binary: context.linkTarget)
 
-        server.onConnect = { hello in
-            // Carries the pid: a reconnect from the same process is not a
-            // restart, and clearing on one would resume patching exactly the
-            // process the flag exists to stop patching.
-            Task { await coordinator.sessionDidConnect(processId: hello.processId) }
-            if hello.buildIdentity == context.identity && !hello.buildMatchesProcess {
+        server.shouldAcceptHello = { hello in
+            let matchesPublishedUUIDs = hello.expectedBuildUUIDs
+                == watchedBuildUUID.current()
+            if hello.buildIdentity == context.identity
+                && (!hello.buildMatchesProcess || !matchesPublishedUUIDs) {
                 // The identity matched and the process still is not this build.
                 // Module, triple, SDK and compiler version are equal across
                 // rebuilds; only the linker UUID is not, and only the process
@@ -52,14 +55,9 @@ public enum Watch {
                   The app was built again after it launched, so patches would be
                   linked against a binary it is not running. Relaunch it.
                 """)
-                Task {
-                    await coordinator.reportToRuntime(RuntimeLogMessage(
-                        level: .warning,
-                        message: "This process is not running the build being watched. Relaunch the app."))
-                }
-            } else if hello.buildIdentity == context.identity {
-                print("connected  pid \(hello.processId), \(hello.moduleName)")
-            } else {
+                return false
+            }
+            if hello.buildIdentity != context.identity {
                 // Section 6.3: refuse to patch a process built differently from
                 // the sources being watched.
                 print("""
@@ -70,12 +68,16 @@ public enum Watch {
 
                 Rebuild the app from these sources before editing.
                 """)
-                Task {
-                    await coordinator.reportToRuntime(RuntimeLogMessage(
-                        level: .warning,
-                        message: "The running app's build identity does not match the watcher. Rebuild the app from the watched sources."))
-                }
+                return false
             }
+            return true
+        }
+        server.onConnect = { hello in
+            // Carries the pid: a reconnect from the same process is not a
+            // restart, and clearing on one would resume patching exactly the
+            // process the flag exists to stop patching.
+            Task { await coordinator.sessionDidConnect(hello: hello) }
+            print("connected  pid \(hello.processId), \(hello.moduleName)")
         }
         server.onDisconnect = { print("disconnected; waiting for the app to reconnect") }
         server.onEvent = { print($0) }
@@ -161,6 +163,7 @@ public enum Watch {
         defer { reannounce.cancel() }
 
         var termination: TerminationSignals?
+        let rebuildRunner = RebuildCommand.Runner()
         let changes = AsyncStream<[FileWatcher.Change]> { continuation in
             watcher.start(onScanFailure: { failure in
                 print("")
@@ -174,21 +177,126 @@ public enum Watch {
                         message: "[WATCH] source roots\n\(failure.description)\n\nNo source changes will be applied until a complete scan succeeds; retrying."))
                 }
             }) { continuation.yield($0) }
-            termination = TerminationSignals { continuation.finish() }
+            termination = TerminationSignals {
+                rebuildRunner.cancel()
+                continuation.finish()
+            }
         }
         defer { termination?.cancel() }
 
         var removalGuard = RemovalGuard()
+
+        func recoverByRebuilding(_ failure: EmberError) async -> Bool {
+            guard RebuildCommand.shouldRun(for: failure),
+                  let rebuildCommand else { return false }
+            let previousProcess = await coordinator.connectedProcessID()
+            let previousBuildUUIDs = Set(await coordinator.currentBuildUUIDs())
+            let directory = rebuildDirectory
+                ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+
+            print("automatic rebuild requested; running in \(directory.path):")
+            print("  \(rebuildCommand)")
+            print("")
+            do {
+                var attempt = 0
+                while attempt < 3 {
+                    try rebuildRunner.throwIfStopping()
+                    attempt += 1
+                    let before = try SourceSnapshot.capture(
+                        from: roots, excluding: sourceFilter)
+                    let beforeUUIDs = Set(await coordinator.currentBuildUUIDs())
+                    try await rebuildRunner.run(rebuildCommand, in: directory)
+                    try rebuildRunner.throwIfStopping()
+                    let built = try SourceSnapshot.capture(
+                        from: roots, excluding: sourceFilter)
+                    let rebuiltUUIDs = Set(await coordinator.currentBuildUUIDs())
+                    guard !rebuiltUUIDs.isEmpty, rebuiltUUIDs != beforeUUIDs,
+                          rebuiltUUIDs != previousBuildUUIDs else {
+                        throw RebuildRecoveryError.binaryDidNotChange
+                    }
+
+                    if built != before {
+                        print("sources changed during the rebuild; rerunning with the latest snapshot")
+                        print("")
+                        continue
+                    }
+
+                    // A reinstall moves the container. Publish the current
+                    // binary UUIDs there before waiting for the relaunched runtime.
+                    try await coordinator.announceSession()
+                    await coordinator.refreshRuntimeSession()
+                    let deadline = Date().addingTimeInterval(rebuildTimeout)
+                    var replacement: Int32?
+                    repeat {
+                        try rebuildRunner.throwIfStopping()
+                        if context.deviceIdentifier != nil {
+                            _ = try? await coordinator.maintainPhysicalSession()
+                        }
+                        if let process = await coordinator.currentBuildProcessID(),
+                           process != previousProcess {
+                            replacement = process
+                            break
+                        }
+                        try await Task.sleep(for: .milliseconds(250))
+                    } while Date() < deadline
+
+                    guard let replacement else {
+                        throw RebuildRecoveryError.relaunchTimedOut(rebuildTimeout)
+                    }
+
+                    try rebuildRunner.throwIfStopping()
+                    let current = try SourceSnapshot.capture(
+                        from: roots, excluding: sourceFilter)
+                    if current != built {
+                        print("sources changed while the rebuilt app was launching; rebuilding again")
+                        print("")
+                        continue
+                    }
+
+                    // Commit the exact content proven stable around the build.
+                    // Do not re-prime the live watcher: buffered events then
+                    // remain available for an edit racing this final commit.
+                    await coordinator.resetAfterRebuild(to: built)
+                    print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
+                    print("")
+                    await coordinator.reportToRuntime(RuntimeLogMessage(
+                        level: .success,
+                        message: "Automatic rebuild complete. Hot reload resumed from a fresh baseline."))
+                    return true
+                }
+                throw RebuildRecoveryError.sourcesDidNotSettle
+            } catch is CancellationError {
+                return false
+            } catch {
+                print("automatic rebuild failed: \(error)")
+                print("Fix the rebuild command or rebuild and relaunch the app manually.")
+                print("")
+                return false
+            }
+        }
+
         for await batch in changes {
-            if let error = removalGuard.check(batch) {
+            var guardedBatch: [FileWatcher.Change] = []
+            for change in batch {
+                if change.kind == .removed,
+                   !(await coordinator.hasBaseline(for: change.url)) {
+                    await coordinator.discardRemovedSourceWithoutBaseline(change.url)
+                    continue
+                }
+                guardedBatch.append(change)
+            }
+            if let error = removalGuard.check(guardedBatch) {
                 print("")
                 print(error.description)
                 print("")
                 await coordinator.reportToRuntime(RuntimeLogMessage(
                     level: .warning, message: error.description))
+                if await recoverByRebuilding(error) {
+                    removalGuard = RemovalGuard()
+                }
                 continue
             }
-            switch await coordinator.handle(changes: batch.map(\.url)) {
+            switch await coordinator.handle(changes: guardedBatch.map(\.url)) {
                 case .ignored:
                     continue
                 case .rejected(let error):
@@ -197,6 +305,9 @@ public enum Watch {
                     print("")
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: .error, message: error.description))
+                    if await recoverByRebuilding(error) {
+                        removalGuard = RemovalGuard()
+                    }
                 case .sessionUncertain(let cause):
                     // Repeated on every save rather than said once and
                     // forgotten: the developer is editing, watching nothing
@@ -318,6 +429,23 @@ public enum Watch {
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: hasCaveat ? .warning : .success,
                         message: runtimeLines.joined(separator: "\n")))
+            }
+        }
+    }
+
+    enum RebuildRecoveryError: Error, CustomStringConvertible {
+        case relaunchTimedOut(TimeInterval)
+        case sourcesDidNotSettle
+        case binaryDidNotChange
+
+        var description: String {
+            switch self {
+            case .relaunchTimedOut(let timeout):
+                "the rebuild command finished, but no new app process running the rebuilt binary connected within \(String(format: "%.0f", timeout)) seconds"
+            case .sourcesDidNotSettle:
+                "sources kept changing across three rebuild attempts; waiting for a manual rebuild avoids adopting an unbuilt baseline"
+            case .binaryDidNotChange:
+                "the rebuild command did not produce a new Mach-O UUID; refusing to adopt source that the running binary may not contain"
             }
         }
     }

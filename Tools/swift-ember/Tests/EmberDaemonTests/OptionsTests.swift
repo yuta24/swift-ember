@@ -66,6 +66,78 @@ private func withConfiguration(
     }
 }
 
+@Test func rebuildRecoveryReadsTheCommandRelativeToItsConfiguration() throws {
+    try withConfiguration(#"""
+        {
+          "workspace": "Bookshelf.xcworkspace",
+          "scheme": "Client",
+          "rebuildCommand": "scripts/rebuild-and-launch.sh",
+          "rebuildTimeout": 180
+        }
+        """#, in: true) { root, current in
+        let options = try Options.parse(
+            ["watch"], environment: [:], currentDirectory: current)
+        #expect(options.rebuildCommand == "scripts/rebuild-and-launch.sh")
+        #expect(options.rebuildDirectory == root.path)
+        #expect(options.rebuildTimeout == 180)
+    }
+}
+
+@Test func explicitRebuildRecoveryOptionsOverrideConfiguration() throws {
+    try withConfiguration(#"""
+        {
+          "workspace": "Bookshelf.xcworkspace",
+          "scheme": "Client",
+          "rebuildCommand": "configured.sh",
+          "rebuildTimeout": 180
+        }
+        """#) { _, current in
+        let options = try Options.parse([
+            "watch", "--rebuild-command", "explicit.sh",
+            "--rebuild-directory", "BuildScripts", "--rebuild-timeout", "45",
+        ], environment: [:], currentDirectory: current)
+        #expect(options.rebuildCommand == "explicit.sh")
+        #expect(options.rebuildDirectory == current.appendingPathComponent("BuildScripts").path)
+        #expect(options.rebuildTimeout == 45)
+    }
+}
+
+@Test func explicitRebuildDirectoryAppliesToAConfiguredCommand() throws {
+    try withConfiguration(#"""
+        {
+          "workspace": "Bookshelf.xcworkspace",
+          "scheme": "Client",
+          "rebuildCommand": "configured.sh"
+        }
+        """#) { _, current in
+        let options = try Options.parse(
+            ["watch", "--rebuild-directory", "BuildScripts"],
+            environment: [:], currentDirectory: current)
+        #expect(options.rebuildCommand == "configured.sh")
+        #expect(options.rebuildDirectory == current.appendingPathComponent("BuildScripts").path)
+    }
+}
+
+@Test func invalidRebuildRecoveryConfigurationIsRejected() throws {
+    try withConfiguration(#"{"rebuildCommand":"   "}"#) { _, current in
+        #expect(throws: Options.ParseError.self) {
+            _ = try Options.parse(["watch"], environment: [:], currentDirectory: current)
+        }
+    }
+    try withConfiguration(#"{"rebuildCommand":"build.sh","rebuildTimeout":0}"#) {
+        _, current in
+        #expect(throws: Options.ParseError.self) {
+            _ = try Options.parse(["watch"], environment: [:], currentDirectory: current)
+        }
+    }
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("watch", "--rebuild-command", "")
+    }
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("watch", "--rebuild-command", "build.sh", "--rebuild-timeout", "0")
+    }
+}
+
 @Test func explicitArgumentsOverrideProjectConfigurationDefaults() throws {
     try withConfiguration(#"""
         {

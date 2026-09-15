@@ -32,6 +32,15 @@ public actor PatchCoordinator {
         let plan: PatchPlan
     }
 
+    private struct PreparedTarget: Sendable {
+        let key: String
+        let resolution: ModuleResolver.Resolution
+        let changes: [PreparedChange]
+        let urls: Set<URL>
+        let contributions: [PatchContribution]
+        let flags: [String]
+    }
+
     private struct DeferredTarget: Sendable {
         var urls: Set<URL> = []
         var blockers: Set<URL> = []
@@ -43,10 +52,17 @@ public actor PatchCoordinator {
     private let simulatorContainer: SimulatorContainer?
     private let physicalDevice: PhysicalDeviceBridge?
     private let resolver: ModuleResolver
-    /// Read once per session from the running binary. A rebuild changes it,
-    /// and a rebuild means a relaunch, which is a new session.
-    private lazy var inventory = inventoryOverride
-        ?? ModuleInventory.read(from: context.linkTarget)
+    /// Read once per running-build epoch. A proven automatic rebuild clears
+    /// the cache before the next patch inspects the replacement keys.
+    private var cachedInventory: ModuleInventory?
+    private var packageFlags: [String: [String]] = [:]
+    private var inventory: ModuleInventory {
+        if let inventoryOverride { return inventoryOverride }
+        if let cachedInventory { return cachedInventory }
+        let inventory = ModuleInventory.read(from: context.linkTarget)
+        cachedInventory = inventory
+        return inventory
+    }
     private let inventoryOverride: ModuleInventory?
     /// Unlike the inventory, re-read whenever the binary changes.
     ///
@@ -86,9 +102,9 @@ public actor PatchCoordinator {
     private var baselineIndexes: [URL: FileIndex] = [:]
     /// What each file has already contributed to this session's patches.
     ///
-    /// Cleared by nothing: a carried declaration stays only in the patches, so
-    /// every later patch for that file has to carry it again. A rebuild ends
-    /// the session, which is the only thing that makes it stale.
+    /// A carried declaration stays only in the patches, so every later patch
+    /// for that file has to carry it again. Only a proven rebuild clears this:
+    /// the new binary has absorbed the declaration and starts a fresh epoch.
     private var memories: [URL: SessionMemory] = [:]
     /// Source URLs whose on-disk contents are not represented by the running
     /// process. One target owns one conservative retry unit: later saves are
@@ -156,6 +172,92 @@ public actor PatchCoordinator {
         }
     }
 
+    /// Starts a new source-to-process session after an explicitly configured
+    /// rebuild command has produced and launched a different process.
+    ///
+    /// A rebuild makes every in-memory fact about the previous process stale:
+    /// additions are now in the binary, removed files are no longer in it, and
+    /// replacement keys may have changed. Reset all of those facts together,
+    /// then adopt the exact source snapshot already proven to match the build.
+    public func resetAfterRebuild(to snapshot: SourceSnapshot) {
+        cachedInventory = nil
+        packageFlags = [:]
+        baselines = snapshot.watched
+        excludedSafetyBaselines = snapshot.excluded
+        baselineIndexes = [:]
+        memories = [:]
+        deferredTargets = [:]
+        uncertain = nil
+        uncertainProcess = nil
+        lastRuntimeLog = nil
+        generation = 0
+        simulatorContainer?.invalidate()
+    }
+
+    /// Used by the watcher to discard a removal event queued while a rebuild
+    /// was running. If the rebuilt binary was produced without that file, its
+    /// absence is already represented by the new baseline and must not trigger
+    /// another rebuild.
+    public func hasBaseline(for url: URL) -> Bool {
+        baselines[url.standardizedFileURL] != nil
+    }
+
+    /// Forgets a file that was created after the running build and then
+    /// removed before any patch containing it loaded. The removal itself is
+    /// safe to ignore because the process never contained the file, but its
+    /// pending URL must also disappear or every later edit in that target will
+    /// keep trying to read a path that no longer exists.
+    public func discardRemovedSourceWithoutBaseline(_ url: URL) {
+        let url = url.standardizedFileURL
+        guard baselines[url] == nil else { return }
+        baselineIndexes.removeValue(forKey: url)
+        memories.removeValue(forKey: url)
+        for target in Array(deferredTargets.keys) {
+            guard var deferred = deferredTargets[target] else { continue }
+            deferred.urls.remove(url)
+            deferred.blockers.remove(url)
+            if deferred.urls.isEmpty {
+                deferredTargets.removeValue(forKey: target)
+            } else {
+                deferredTargets[target] = deferred
+            }
+        }
+    }
+
+    /// The process whose source baseline this coordinator currently describes.
+    /// Physical devices expose it through their status file; Simulator apps
+    /// expose it through the authenticated socket session.
+    public func connectedProcessID() -> Int32? {
+        if let physicalDevice {
+            physicalProcessId = physicalDevice.connectedProcess()
+            return physicalProcessId
+        }
+        return server.currentSession?.hello.processId
+    }
+
+    /// A rebuild must change the binary, not merely relaunch the old app.
+    public func currentBuildUUIDs() -> [String] { buildUUIDs }
+
+    /// Simulator runtimes read the expected build UUIDs when opening their
+    /// socket. Reconnect after publishing a rebuilt session in case the new
+    /// process launched before that publication completed.
+    public func refreshRuntimeSession() {
+        if physicalDevice == nil { server.disconnectCurrentSession() }
+    }
+
+    /// Returns a process only when it proves that it is running the binary
+    /// currently on disk. This is the success condition for automatic rebuild
+    /// recovery; a different pid alone is not enough if launch raced session
+    /// publication and read the previous build UUIDs.
+    public func currentBuildProcessID() -> Int32? {
+        if physicalDevice != nil { return connectedProcessID() }
+        guard let hello = server.currentSession?.hello,
+              hello.buildIdentity == context.identity,
+              hello.expectedBuildUUIDs == buildUUIDs,
+              hello.buildMatchesProcess else { return nil }
+        return hello.processId
+    }
+
     /// Publishes where to reach the daemon into the app's container.
     ///
     /// Re-runs the lookup rather than trusting the cache, because the usual
@@ -165,6 +267,9 @@ public actor PatchCoordinator {
     /// connection that could not happen.
     public func announceSession() throws {
         if let physicalDevice {
+            // A status cached from the preceding build must not survive the
+            // publication of a new expected UUID set.
+            physicalProcessId = nil
             try physicalDevice.writeSession(token: server.token,
                                             buildIdentity: context.identity,
                                             buildUUIDs: buildUUIDs)
@@ -281,6 +386,16 @@ public actor PatchCoordinator {
         guard processId != uncertainProcess else { return }
         uncertain = nil
         uncertainProcess = nil
+    }
+
+    /// A reconnect clears an uncertain session only when the runtime proves
+    /// the current build. A different PID carrying the preceding session
+    /// file's UUIDs is not recovery.
+    public func sessionDidConnect(hello: Hello) {
+        guard hello.buildIdentity == context.identity,
+              hello.expectedBuildUUIDs == buildUUIDs,
+              hello.buildMatchesProcess else { return }
+        sessionDidConnect(processId: hello.processId)
     }
 
     /// Records the failure as the reason the session can no longer be
@@ -564,67 +679,101 @@ public actor PatchCoordinator {
             .sorted { $0.url.path < $1.url.path }
         guard !observable.isEmpty else { return .ignored }
 
-        let targets = Set(observable.map { targetKey($0.resolution) })
-        let initialSubject = observable.count == 1
+        let selectedTargetKeys = Set(observable.map { targetKey($0.resolution) })
+        let subject = observable.count == 1
             ? observable[0].url.lastPathComponent
             : "\(observable.count) source files"
-        guard targets.count == 1, let resolution = observable.first?.resolution else {
-            let details = observable.map { change in
-                let package = change.resolution.manifest.map { " (\($0.path))" } ?? ""
-                return "  \(change.url.lastPathComponent): \(change.resolution.module)\(package)"
-            }.joined(separator: "\n")
-            return .rejected(EmberError(
-                stage: .classify, subject: initialSubject,
-                reason: """
-                    one atomic image cannot preserve different module or Swift \
-                    language-mode contexts:
+        var preparedTargets: [PreparedTarget] = []
+        for selectedTarget in selectedTargetKeys.sorted() {
+            guard let resolution = observable.first(where: {
+                targetKey($0.resolution) == selectedTarget
+            })?.resolution else { continue }
+            let prepared = (deferredTargets[selectedTarget]?.urls ?? [])
+                .compactMap { currentByURL[$0] }
+                .sorted { $0.url.path < $1.url.path }
+            let preparedURLs = Set(prepared.map(\.url))
+            var contributions = prepared.map {
+                PatchContribution(url: $0.url, index: $0.index, plan: $0.plan)
+            }
 
-                    \(details)
+            // A declaration added by an earlier patch exists only in that
+            // module's patch object. Re-emit the module's complete session
+            // contribution in every later image that touches the module.
+            for url in memories.keys.sorted(by: { $0.path < $1.path })
+                where !preparedURLs.contains(url) {
+                let rememberedResolution = resolver.resolve(url)
+                guard targetKey(rememberedResolution) == selectedTarget,
+                      let baseline = baselines[url] else { continue }
+                let index = baselineIndexes[url] ?? DeclarationIndexer.index(source: baseline)
+                baselineIndexes[url] = index
+                guard let memory = memories[url] else { continue }
+                let carried = memory.carried.compactMap { index.patchable[$0] }
+                    .sorted { $0.identity < $1.identity }
+                let replacements = memory.replaced.subtracting(memory.carried)
+                    .compactMap { index.patchable[$0] }
+                    .sorted { $0.identity < $1.identity }
+                guard !carried.isEmpty || !replacements.isEmpty else { continue }
+                contributions.append(PatchContribution(
+                    url: url, index: index,
+                    plan: PatchPlan(replacements: replacements, carried: carried)))
+            }
 
-                    No part of this save was loaded. Rebuild to apply the \
-                    cross-module change.
-                    """,
-                recovery: .rebuild))
+            let module = resolution.module
+            let targetSubject = prepared.count == 1
+                ? prepared[0].url.lastPathComponent
+                : "\(prepared.count) source files in \(module)"
+            guard inventory.isPatchable(module) else {
+                return .rejected(EmberError(
+                    stage: .classify, subject: targetSubject,
+                    reason: """
+                        \(module) exports no dynamic replacement keys, so nothing in it \
+                        can be replaced.
+
+                        Xcode does not pass OTHER_SWIFT_FLAGS into Swift package targets, \
+                        so a package needs the setting in its own manifest:
+
+                            .target(name: "\(module)", swiftSettings: [
+                                .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
+                                             .when(configuration: .debug))
+                            ])
+
+                        Patchable modules in this build: \(inventory.patchableModules.joined(separator: ", "))
+                        """,
+                    recovery: .configure))
+            }
+
+            var flags = context.extraCompilerFlags
+            if let manifest = resolution.manifest {
+                let settings = packageFlags[selectedTarget].map(PackageCompilerSettings.flags)
+                    ?? PackageCompilerSettings.read(
+                        module: module, manifest: manifest,
+                        swiftCompilerPath: context.swiftCompilerPath,
+                        sdkName: context.sdkName,
+                        cacheDirectory: compiler.workDirectory
+                            .appendingPathComponent("package-manifest-cache", isDirectory: true))
+                switch settings {
+                case .flags(let targetFlags):
+                    packageFlags[selectedTarget] = targetFlags
+                    flags = targetFlags
+                case .unknown(let reason):
+                    return .rejected(EmberError(
+                        stage: .classify, subject: targetSubject,
+                        reason: "\(module)'s compiler settings are unavailable: \(reason)",
+                        recovery: .configure))
+                }
+            }
+            preparedTargets.append(PreparedTarget(
+                key: selectedTarget, resolution: resolution, changes: prepared,
+                urls: preparedURLs, contributions: contributions, flags: flags))
         }
-        let module = resolution.module
-        let selectedTarget = targetKey(resolution)
 
-        let prepared = (deferredTargets[selectedTarget]?.urls ?? [])
-            .compactMap { currentByURL[$0] }
-            .sorted { $0.url.path < $1.url.path }
-        let subject = prepared.count == 1
-            ? prepared[0].url.lastPathComponent
-            : "\(prepared.count) source files"
-        let preparedURLs = Set(prepared.map(\.url))
-        var contributions = prepared.map {
-            PatchContribution(url: $0.url, index: $0.index, plan: $0.plan)
-        }
-
-        // A declaration added by an earlier patch exists only in that dylib.
-        // Re-emit the module's complete session contribution so a replacement
-        // in another source file can keep calling it in every later generation.
-        for url in memories.keys.sorted(by: { $0.path < $1.path }) where !preparedURLs.contains(url) {
-            let rememberedResolution = resolver.resolve(url)
-            guard targetKey(rememberedResolution) == targetKey(resolution),
-                  let baseline = baselines[url] else { continue }
-            let index = baselineIndexes[url] ?? DeclarationIndexer.index(source: baseline)
-            baselineIndexes[url] = index
-            guard let memory = memories[url] else { continue }
-            let carried = memory.carried.compactMap { index.patchable[$0] }
-                .sorted { $0.identity < $1.identity }
-            let replacements = memory.replaced.subtracting(memory.carried)
-                .compactMap { index.patchable[$0] }
-                .sorted { $0.identity < $1.identity }
-            guard !carried.isEmpty || !replacements.isEmpty else { continue }
-            contributions.append(PatchContribution(
-                url: url, index: index,
-                plan: PatchPlan(replacements: replacements, carried: carried)))
-        }
-
+        let contributions = preparedTargets.flatMap(\.contributions)
         let declarations = contributions.flatMap(\.plan.replacements)
         let carried = contributions.flatMap(\.plan.carried)
         var effectiveIndexes = currentIndexes
-        for change in prepared { effectiveIndexes[change.url] = change.index }
+        for change in preparedTargets.flatMap(\.changes) {
+            effectiveIndexes[change.url] = change.index
+        }
 
         // Syntax can identify the boundary call but cannot reproduce overload
         // resolution for a method declared in another source file of the app
@@ -659,59 +808,24 @@ public actor PatchCoordinator {
             return .sessionUncertain(uncertain)
         }
 
-        guard inventory.isPatchable(module) else {
-            return .rejected(EmberError(
-                stage: .classify, subject: subject,
-                reason: """
-                    \(module) exports no dynamic replacement keys, so nothing in it \
-                    can be replaced.
-
-                    Xcode does not pass OTHER_SWIFT_FLAGS into Swift package targets, \
-                    so a package needs the setting in its own manifest:
-
-                        .target(name: "\(module)", swiftSettings: [
-                            .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
-                                         .when(configuration: .debug))
-                        ])
-
-                    Patchable modules in this build: \(inventory.patchableModules.joined(separator: ", "))
-                    """,
-                recovery: .rebuild))
-        }
-
-        var flags = context.extraCompilerFlags
-        if let manifest = resolution.manifest {
-            switch PackageLanguageMode.read(from: manifest) {
-            case .mode(let mode):
-                flags = Self.replacingLanguageMode(in: flags, with: mode)
-            case .unknown(let reason):
-                return .rejected(EmberError(
-                    stage: .classify, subject: subject,
-                    reason: """
-                        \(module) is a local package and \(reason), so the language mode \
-                        this patch would be compiled under is a guess.
-
-                        A body type-checked under the wrong mode loses the isolation and \
-                        sendability rules the package was written with, and the result \
-                        compiles.
-                        """,
-                    recovery: .configure))
-            }
-        }
-
         do {
-            let files = contributions.map { contribution in
-                PatchFilePlan(
-                    plan: contribution.plan, imports: contribution.index.imports,
-                    privateImportOf: contribution.index.declaresFileLocal
-                        ? contribution.url.lastPathComponent : nil)
+            let units = try timeline.measure(.generate) {
+                try preparedTargets.map { target in
+                    let files = target.contributions.map { contribution in
+                        PatchFilePlan(
+                            plan: contribution.plan, imports: contribution.index.imports,
+                            privateImportOf: contribution.index.declaresFileLocal
+                                ? contribution.url.lastPathComponent : nil)
+                    }
+                    return PatchCompiler.CompilationUnit(
+                        module: target.resolution.module,
+                        sources: try ReplacementGenerator.generateFiles(
+                            module: target.resolution.module, generation: next, files: files),
+                        flags: target.flags)
+                }
             }
-            let sources = try timeline.measure(.generate) {
-                try ReplacementGenerator.generateFiles(
-                    module: module, generation: next, files: files)
-            }
-            let artifact = try compiler.compile(sources: sources, generation: next,
-                                                flags: flags, timeline: timeline)
+            let artifact = try compiler.compile(
+                units: units, generation: next, timeline: timeline)
 
             let delivered = try timeline.measure(.transfer) {
                 if let deliverOverride { return try deliverOverride(artifact.imageURL) }
@@ -788,17 +902,19 @@ public actor PatchCoordinator {
             // The only commit point. Nothing above changes the sources the
             // coordinator believes the process represents.
             generation = next
-            for change in prepared {
-                baselines[change.url] = change.current
-                baselineIndexes[change.url] = change.index
-                memories[change.url, default: SessionMemory()].remember(change.plan)
-            }
-            if var deferred = deferredTargets[selectedTarget] {
-                deferred.urls.subtract(preparedURLs)
-                if deferred.urls.isEmpty {
-                    deferredTargets.removeValue(forKey: selectedTarget)
-                } else {
-                    deferredTargets[selectedTarget] = deferred
+            for target in preparedTargets {
+                for change in target.changes {
+                    baselines[change.url] = change.current
+                    baselineIndexes[change.url] = change.index
+                    memories[change.url, default: SessionMemory()].remember(change.plan)
+                }
+                if var deferred = deferredTargets[target.key] {
+                    deferred.urls.subtract(target.urls)
+                    if deferred.urls.isEmpty {
+                        deferredTargets.removeValue(forKey: target.key)
+                    } else {
+                        deferredTargets[target.key] = deferred
+                    }
                 }
             }
             return .applied(generation: next,
@@ -841,24 +957,6 @@ public actor PatchCoordinator {
             if DeclarationIndexer.index(source: source).declaresEmberable { return candidate }
         }
         return nil
-    }
-}
-
-extension PatchCoordinator {
-    /// Substitutes the `-swift-version` pair rather than appending one, because
-    /// two of them is not a question the compiler answers predictably.
-    static func replacingLanguageMode(in flags: [String], with mode: String) -> [String] {
-        var result: [String] = []
-        var index = flags.startIndex
-        while index < flags.endIndex {
-            if flags[index] == "-swift-version", flags.index(after: index) < flags.endIndex {
-                index = flags.index(index, offsetBy: 2)
-                continue
-            }
-            result.append(flags[index])
-            index = flags.index(after: index)
-        }
-        return result + ["-swift-version", mode]
     }
 }
 

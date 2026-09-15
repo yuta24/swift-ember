@@ -15,6 +15,7 @@ final class FakeRuntime: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
     private var received: [Envelope] = []
+    private var disconnected = false
 
     /// Set to answer requests automatically. Leave nil to stay silent, which is
     /// how a wedged or crashed app behaves.
@@ -46,6 +47,7 @@ final class FakeRuntime: @unchecked Sendable {
                     self?.receive()
                     finish(true)
                 case .failed, .cancelled:
+                    self?.markDisconnected()
                     finish(false)
                 default:
                     break
@@ -82,6 +84,19 @@ final class FakeRuntime: @unchecked Sendable {
         return nil
     }
 
+    func waitForDisconnect(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = Date().addingTimeInterval(Double(timeout.components.seconds))
+        while Date() < deadline {
+            if lock.withLock({ disconnected }) { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return lock.withLock { disconnected }
+    }
+
+    private func markDisconnected() {
+        lock.withLock { disconnected = true }
+    }
+
     private func receive() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
             guard let self else { return }
@@ -89,7 +104,11 @@ final class FakeRuntime: @unchecked Sendable {
                 self.lock.withLock { self.buffer.append(data) }
                 self.drain()
             }
-            if isComplete || error != nil { return }
+            if isComplete || error != nil {
+                self.markDisconnected()
+                self.connection.cancel()
+                return
+            }
             self.receive()
         }
     }

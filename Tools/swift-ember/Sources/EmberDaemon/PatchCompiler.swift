@@ -19,6 +19,21 @@ public struct PatchCompiler: Sendable {
         public let imageURL: URL
     }
 
+    /// One original module's generated sources and effective compiler flags.
+    /// Several units may be compiled independently and linked into one image,
+    /// preserving their language modes without giving up atomic loading.
+    public struct CompilationUnit: Sendable {
+        public let module: String
+        public let sources: [String]
+        public let flags: [String]
+
+        public init(module: String, sources: [String], flags: [String]) {
+            self.module = module
+            self.sources = sources
+            self.flags = flags
+        }
+    }
+
     /// Two invocations, not one.
     ///
     /// DESIGN.md section 9.2 asks for compile and link timing kept separate,
@@ -37,7 +52,22 @@ public struct PatchCompiler: Sendable {
     /// boundary the runtime can load atomically.
     public func compile(sources: [String], generation: UInt64, flags: [String]? = nil,
                         timeline: StageTimeline) throws -> Artifact {
-        guard !sources.isEmpty else {
+        try compile(
+            units: [CompilationUnit(
+                module: context.moduleName,
+                sources: sources,
+                flags: flags ?? context.extraCompilerFlags)],
+            generation: generation,
+            timeline: timeline)
+    }
+
+    /// Compiles each original module under its own effective flags, then links
+    /// every object into one image. A compile or link failure occurs before
+    /// the runtime sees anything; a successful batch crosses one `dlopen`
+    /// boundary and therefore cannot expose a successful module prefix.
+    public func compile(units: [CompilationUnit], generation: UInt64,
+                        timeline: StageTimeline) throws -> Artifact {
+        guard !units.isEmpty, units.allSatisfy({ !$0.sources.isEmpty }) else {
             throw EmberError(stage: .compile, subject: "source batch",
                              reason: "an atomic patch needs at least one generated source",
                              recovery: .editAndRetry)
@@ -45,26 +75,44 @@ public struct PatchCompiler: Sendable {
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
 
         let name = String(format: "Patch_%03llu", generation)
-        let sourceURLs = sources.indices.map { index in
-            sources.count == 1
-                ? workDirectory.appendingPathComponent("\(name).swift")
-                : workDirectory.appendingPathComponent(
-                    String(format: "%@_%03d.swift", name, index + 1))
-        }
-        let objectURL = workDirectory.appendingPathComponent("\(name).o")
+        var sourceURLs: [URL] = []
+        var objectURLs: [URL] = []
         let imageURL = workDirectory.appendingPathComponent("\(name).dylib")
-        for (source, url) in zip(sources, sourceURLs) {
-            try source.write(to: url, atomically: true, encoding: .utf8)
+        let totalSources = units.reduce(0) { $0 + $1.sources.count }
+
+        let compileStart = DispatchTime.now().uptimeNanoseconds
+        do {
+            for (unitOffset, unit) in units.enumerated() {
+                let unitName = units.count == 1
+                    ? name
+                    : String(format: "%@_%03d", name, unitOffset + 1)
+                let urls = unit.sources.indices.map { sourceOffset in
+                    totalSources == 1
+                        ? workDirectory.appendingPathComponent("\(name).swift")
+                        : workDirectory.appendingPathComponent(
+                            String(format: "%@_%03d.swift", unitName, sourceOffset + 1))
+                }
+                for (source, url) in zip(unit.sources, urls) {
+                    try source.write(to: url, atomically: true, encoding: .utf8)
+                }
+                sourceURLs.append(contentsOf: urls)
+                let object = workDirectory.appendingPathComponent("\(unitName).o")
+                objectURLs.append(object)
+                try compile(frontendArguments(
+                    sources: urls, object: object, name: unitName, flags: unit.flags),
+                    subject: unit.sources.count == 1
+                        ? "\(unit.module): \(urls[0].lastPathComponent)"
+                        : "\(unit.module): \(unit.sources.count) generated sources")
+            }
+            timeline.record(.compile, since: compileStart, success: true)
+        } catch {
+            timeline.record(.compile, since: compileStart, success: false)
+            throw error
         }
 
-        try compile(frontendArguments(sources: sourceURLs, object: objectURL, name: name,
-                                      flags: flags ?? context.extraCompilerFlags),
-                    subject: sources.count == 1 ? sourceURLs[0].lastPathComponent : "\(sources.count) generated sources",
-                    timeline: timeline)
-
-        try run(linkArguments(object: objectURL, image: imageURL, name: name),
+        try run(linkArguments(objects: objectURLs, image: imageURL, name: name),
                 stage: .link,
-                subject: sources.count == 1 ? sourceURLs[0].lastPathComponent : "\(sources.count) generated sources",
+                subject: totalSources == 1 ? sourceURLs[0].lastPathComponent : "\(totalSources) generated sources",
                 recovery: .rebuild, timeline: timeline)
 
         return Artifact(generation: generation, sourceURLs: sourceURLs, imageURL: imageURL)
@@ -91,16 +139,13 @@ public struct PatchCompiler: Sendable {
     /// to the package compile, but `-showBuildSettings` for the application
     /// does not report it. Resolve only the module the compiler asks for and
     /// retry; adding every map in DerivedData can introduce duplicate modules.
-    private func compile(_ initialArguments: [String], subject: String,
-                         timeline: StageTimeline) throws {
-        let start = DispatchTime.now().uptimeNanoseconds
+    private func compile(_ initialArguments: [String], subject: String) throws {
         var arguments = initialArguments
         var recovered: Set<String> = []
 
         while true {
             let result = try Subprocess.run(context.swiftCompilerPath, arguments: arguments)
             if result.exitCode == 0 {
-                timeline.record(.compile, since: start, success: true)
                 return
             }
 
@@ -111,7 +156,6 @@ public struct PatchCompiler: Sendable {
                 continue
             }
 
-            timeline.record(.compile, since: start, success: false)
             if let explanation = Self.explain(result.combinedOutput) {
                 throw EmberError(stage: .compile, subject: subject,
                                   reason: explanation, recovery: .rebuild)
@@ -178,15 +222,17 @@ public struct PatchCompiler: Sendable {
     private func frontendArguments(sources: [URL], object: URL, name: String,
                                    flags: [String]) -> [String] {
         let wholeModule = sources.count > 1 ? ["-whole-module-optimization"] : []
-        return common + wholeModule + ["-c", "-o", object.path, "-module-name", name]
+        return common + wholeModule + ["-parse-as-library", "-c", "-o", object.path,
+                                       "-module-name", name]
             + flags + sources.map(\.path)
     }
 
-    private func linkArguments(object: URL, image: URL, name: String) -> [String] {
+    private func linkArguments(objects: [URL], image: URL, name: String) -> [String] {
         var arguments = common + [
             "-Xclang-linker", "-isysroot", "-Xclang-linker", context.sdkPath,
-            "-emit-library", "-o", image.path, "-module-name", name, object.path,
+            "-emit-library", "-o", image.path, "-module-name", name,
         ]
+        arguments += objects.map(\.path)
         // Linking against the running binary resolves the replacement keys now
         // rather than at dlopen, so an ineligible declaration fails here with
         // "Undefined symbols" instead of inside the app.
@@ -266,10 +312,14 @@ enum Subprocess {
 
     /// For callers that must not have the two streams interleaved, such as
     /// anything parsing structured output.
-    static func runSeparated(_ executable: String, arguments: [String]) throws -> SeparatedResult {
+    static func runSeparated(
+        _ executable: String, arguments: [String],
+        environment: [String: String]? = nil
+    ) throws -> SeparatedResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = environment
         let out = Pipe()
         let err = Pipe()
         process.standardOutput = out

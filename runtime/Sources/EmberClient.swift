@@ -98,6 +98,7 @@ final class EmberClient: @unchecked Sendable {
                     moduleName: Bundle.main.bundleIdentifier ?? "unknown",
                     processId: ProcessInfo.processInfo.processIdentifier,
                     loadedGenerations: self.state.generations,
+                    expectedBuildUUIDs: session.buildUUIDs,
                     buildMatchesProcess: LoadedImages.running(oneOf: session.buildUUIDs)),
                     requestId: UUID().uuidString)
                 self.receive(on: connection)
@@ -172,6 +173,17 @@ final class EmberClient: @unchecked Sendable {
         }
 
         switch envelope.type {
+        case "helloRejected":
+            guard let log = try? envelope.decode(RuntimeLogMessage.self) else {
+                state.note("could not read a helloRejected message; the two sides' protocol types have drifted")
+                return
+            }
+            // The socket stays open deliberately. Retrying the same immutable
+            // process against the same session file cannot change its build
+            // proof; a daemon session refresh disconnects it when there is new
+            // information worth reading.
+            state.report(log)
+            state.setConnected(false)
         case "loadPatch":
             guard let request = try? envelope.decode(LoadPatchRequest.self) else {
                 // Never leave a request unanswered. The daemon is waiting on
@@ -214,7 +226,7 @@ final class EmberClient: @unchecked Sendable {
 // protocol version guards the duplication -- if these drift, the handshake
 // says so instead of misreading a payload.
 
-let ProtocolVersion = 6
+let ProtocolVersion = 7
 
 struct Envelope: Codable {
     var protocolVersion: Int
@@ -233,6 +245,7 @@ struct Hello: Codable {
     var moduleName: String
     var processId: Int32
     var loadedGenerations: [UInt64]
+    var expectedBuildUUIDs: [String]
     var buildMatchesProcess: Bool
 }
 

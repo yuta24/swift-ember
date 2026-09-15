@@ -142,7 +142,12 @@ build_package() {
     swift build -c release --package-path "$TOOL_PACKAGE"
 }
 
-run_tests() { swift test --package-path "$TOOL_PACKAGE"; }
+run_tests() {
+    # Several test targets synchronously wait for compiler, SwiftPM, and fixture
+    # processes. On hosted macOS runners, parallel execution can occupy every
+    # cooperative-executor thread and stall the suite indefinitely.
+    swift test --package-path "$TOOL_PACKAGE" --no-parallel
+}
 
 check_release_assets() {
     local output result

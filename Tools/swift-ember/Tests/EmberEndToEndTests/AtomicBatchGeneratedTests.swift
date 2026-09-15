@@ -78,3 +78,38 @@ import Testing
         Issue.record("\(error)")
     }
 }
+
+@Test func replacementsFromTwoModulesLoadFromOneImage() {
+    let edits = ["FeatureA", "FeatureB"].enumerated().map { offset, module in
+        let condition = "FEATURE_\(offset + 1)"
+        return Loop.ModuleEdit(
+            module: module,
+            baseline: """
+                public func value() -> String {
+                #if \(condition)
+                    "old-\(module)"
+                #else
+                    "wrong-flags"
+                #endif
+                }
+                """,
+            current: """
+                public func value() -> String {
+                #if \(condition)
+                    "new-\(module)"
+                #else
+                    "wrong-flags"
+                #endif
+                }
+                """,
+            flags: ["-D", condition, "-swift-version", offset == 0 ? "5" : "6"])
+    }
+
+    do {
+        let outcome = try Loop.runCrossModuleAtomic(edits)
+        #expect(outcome.before == ["g0: old-FeatureA", "g0: old-FeatureB"])
+        #expect(outcome.after.suffix(2) == ["g1: new-FeatureA", "g1: new-FeatureB"])
+    } catch {
+        Issue.record("\(error)")
+    }
+}

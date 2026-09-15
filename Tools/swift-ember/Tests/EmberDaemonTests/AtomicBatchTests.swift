@@ -905,8 +905,8 @@ private final class DeliveryProbe: @unchecked Sendable {
         }
     }
 
-    // One later poll updates a member of each unit. They cannot compile
-    // together, but both targets must observe the latest disk contents.
+    // One later poll updates a member of each unit. They compile independently
+    // into one image, and both targets must observe the latest disk contents.
     for sources in sourcesByModule {
         let current = try String(contentsOf: sources[0], encoding: .utf8)
             .replacingOccurrences(of: "pending-", with: "latest-")
@@ -918,10 +918,10 @@ private final class DeliveryProbe: @unchecked Sendable {
         to: sourcesByModule[0][2], atomically: true, encoding: .utf8)
     guard case .rejected(let refusal) = await coordinator.handle(
         changes: [sourcesByModule[0][0], sourcesByModule[0][2], sourcesByModule[1][0]]) else {
-        Issue.record("the incompatible retry was not refused")
+        Issue.record("the cross-module retry unexpectedly loaded without a runtime")
         return
     }
-    #expect(refusal.stage == .classify)
+    #expect(refusal.stage == .load)
 
     // A sibling event retries FeatureA. The generated unit must contain the
     // latest first-file body rather than the contents from its first failure.
@@ -989,35 +989,34 @@ private final class DeliveryProbe: @unchecked Sendable {
         return
     }
 
-    // This poll touches FeatureA's retained unit but introduces its first
-    // FeatureB edit. Refusing the mixed contexts must not consume either the
-    // latest first-file snapshot or FeatureA's unsaved sibling.
+    // This poll touches FeatureA's retained unit and introduces its first
+    // FeatureB edit. A failed load of the combined image must not consume
+    // either module's latest snapshot or FeatureA's unsaved sibling.
     try #"func first() -> String { "latest-a-first" }"#
         .write(to: first, atomically: true, encoding: .utf8)
     try #"func other() -> String { "latest-b-other" }"#
         .write(to: other, atomically: true, encoding: .utf8)
     guard case .rejected(let refusal) = await coordinator.handle(changes: [first, other]) else {
-        Issue.record("the mixed compiler contexts were not refused")
+        Issue.record("the mixed compiler contexts unexpectedly loaded without a runtime")
         return
     }
-    #expect(refusal.stage == .classify)
+    #expect(refusal.stage == .load)
 
     guard case .rejected(let retryError) = await coordinator.handle(change: second),
           retryError.stage == .load else {
         Issue.record("the retained FeatureA transaction did not retry as one unit")
         return
     }
-    let generated = try FileManager.default.contentsOfDirectory(
-        at: patches, includingPropertiesForKeys: nil)
-        .filter { $0.lastPathComponent.hasPrefix("Patch_001") && $0.pathExtension == "swift" }
-    #expect(generated.count == 2)
+    let generated = [
+        patches.appendingPathComponent("Patch_001_001.swift"),
+        patches.appendingPathComponent("Patch_001_002.swift"),
+    ]
     let generatedSources = try generated.map { try String(contentsOf: $0, encoding: .utf8) }
     #expect(generatedSources.contains { $0.contains("latest-a-first") })
     #expect(generatedSources.contains { $0.contains("pending-a-second") })
-    #expect(!generatedSources.contains { $0.contains("latest-b-other") })
 }
 
-@Test func aCrossModuleBatchIsRejectedBeforeAnyImageIsDelivered() async throws {
+@Test func aCrossModuleBatchProducesOneImageBeforeAnyLoadIsAttempted() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("ember-atomic-modules-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1059,13 +1058,18 @@ private final class DeliveryProbe: @unchecked Sendable {
     }
 
     guard case .rejected(let error) = await coordinator.handle(changes: sources) else {
-        Issue.record("a cross-module batch was allowed to load sequentially")
+        Issue.record("the cross-module batch unexpectedly loaded without a runtime")
         return
     }
-    #expect(error.stage == .classify)
-    #expect(error.reason.contains("one atomic image"))
-    #expect(error.recovery == .rebuild)
-    #expect(delivery.count == 0)
+    #expect(error.stage == .load)
+    #expect(delivery.count == 1)
+    let generated = try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("patches"), includingPropertiesForKeys: nil)
+        .filter { $0.lastPathComponent.hasPrefix("Patch_001") && $0.pathExtension == "swift" }
+    #expect(generated.count == 2)
+    let generatedSources = try generated.map { try String(contentsOf: $0, encoding: .utf8) }
+    #expect(generatedSources.contains { $0.contains("@testable import FeatureA") })
+    #expect(generatedSources.contains { $0.contains("@testable import FeatureB") })
 
     // This is a later watcher poll, not the second half of the rejected one.
     // It should reach LOAD on its own instead of being rejoined with FeatureB
@@ -1075,5 +1079,66 @@ private final class DeliveryProbe: @unchecked Sendable {
         return
     }
     #expect(retryError.stage == .load)
-    #expect(delivery.count == 1)
+    #expect(delivery.count == 2)
+}
+
+@Test func aLaterModuleCompileFailureDeliversNoPartialImage() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ember-atomic-module-compile-failure-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try "// swift-tools-version: 6.0".write(
+        to: root.appendingPathComponent("Package.swift"),
+        atomically: true, encoding: .utf8)
+
+    let sources = try ["FeatureA", "FeatureB"].map { module in
+        let directory = root.appendingPathComponent("Sources/\(module)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("Subject.swift")
+        try "func value() -> String { \"old-\(module)\" }"
+            .write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    let compiler = root.appendingPathComponent("compiler.sh")
+    try """
+        #!/bin/sh
+        case "$*" in
+          *Patch_001_002*) echo "intentional second-module failure" >&2; exit 1 ;;
+          *) exit 0 ;;
+        esac
+        """.write(to: compiler, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755], ofItemAtPath: compiler.path)
+
+    let server = try IPCServer()
+    defer { server.stop() }
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: compiler.path,
+        swiftCompilerVersion: "test", targetTriple: "arm64-apple-macosx26.0",
+        sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: root.appendingPathComponent("app").path,
+        moduleSearchPaths: [root.path], extraCompilerFlags: [],
+        sourceRoots: sources.map { $0.deletingLastPathComponent().path },
+        bundleIdentifier: "dev.swift-ember.atomic-module-compile-failure-tests")
+    let delivery = DeliveryProbe()
+    let coordinator = PatchCoordinator(
+        context: context, server: server,
+        workDirectory: root.appendingPathComponent("patches"),
+        deliver: { image in delivery.mark(); return image },
+        inventory: ModuleInventory(keys: ["FeatureA": 1, "FeatureB": 1]))
+    await coordinator.primeBaselines(from: sources.map { $0.deletingLastPathComponent() })
+    for source in sources {
+        let current = try String(contentsOf: source, encoding: .utf8)
+            .replacingOccurrences(of: "old-", with: "new-")
+        try current.write(to: source, atomically: true, encoding: .utf8)
+    }
+
+    guard case .rejected(let error) = await coordinator.handle(changes: sources) else {
+        Issue.record("the failed compiler batch was not rejected")
+        return
+    }
+    #expect(error.stage == .compile)
+    #expect(error.reason.contains("intentional second-module failure"))
+    #expect(delivery.count == 0)
 }

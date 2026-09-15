@@ -35,6 +35,9 @@ public struct Options {
     public var simulator: String?
     public var signingIdentity: String?
     public var startupTimeout: TimeInterval = 60
+    public var rebuildCommand: String?
+    public var rebuildDirectory: String?
+    public var rebuildTimeout: TimeInterval = 300
 
     public static let usage = """
     swift-ember <command> [options]
@@ -64,6 +67,9 @@ public struct Options {
       --simulator <Simulator-UDID>   target a specific iOS Simulator
       --signing-identity <name|SHA>  override the patch signing identity
       --startup-timeout <seconds>    wait for background startup (default 60)
+      --rebuild-command <command>    opt in to rebuilding and relaunching on Tier C changes
+      --rebuild-directory <path>     working directory for the rebuild command
+      --rebuild-timeout <seconds>    wait for a replacement app process (default 300)
 
     Pointing at a build that emits its own manifest:
 
@@ -122,6 +128,9 @@ public struct Options {
         var device = false
         var simulator = false
         var startupTimeout = false
+        var rebuildCommand = false
+        var rebuildDirectory = false
+        var rebuildTimeout = false
     }
 
     public static func parse(
@@ -188,6 +197,28 @@ public struct Options {
                 }
                 options.startupTimeout = seconds
                 explicit.startupTimeout = true
+            case "--rebuild-command":
+                let command = try value(after: argument)
+                guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ParseError.invalidValue(argument, command)
+                }
+                options.rebuildCommand = command
+                explicit.rebuildCommand = true
+            case "--rebuild-directory":
+                let path = try value(after: argument)
+                guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ParseError.invalidValue(argument, path)
+                }
+                options.rebuildDirectory = URL(
+                    fileURLWithPath: path, relativeTo: currentDirectory).standardizedFileURL.path
+                explicit.rebuildDirectory = true
+            case "--rebuild-timeout":
+                let value = try value(after: argument)
+                guard let seconds = TimeInterval(value), seconds.isFinite, seconds > 0 else {
+                    throw ParseError.invalidValue(argument, value)
+                }
+                options.rebuildTimeout = seconds
+                explicit.rebuildTimeout = true
             case "-h", "--help":
                 throw ParseError.help
             case "-V", "--version":
@@ -270,6 +301,9 @@ public struct Options {
 
         if options.device != nil && options.simulator != nil {
             throw ParseError.conflictingDestinations
+        }
+        if options.rebuildCommand != nil && options.rebuildDirectory == nil {
+            options.rebuildDirectory = currentDirectory.standardizedFileURL.path
         }
         if options.project != nil && options.workspace != nil { throw ParseError.bothContainers }
         if (options.project != nil || options.workspace != nil) && options.scheme == nil {

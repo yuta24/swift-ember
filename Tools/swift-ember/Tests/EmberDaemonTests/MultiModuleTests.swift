@@ -251,11 +251,200 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     }
 }
 
-@Test func theLanguageModeIsSubstitutedRatherThanAppended() {
-    let flags = ["-D", "DEBUG", "-swift-version", "5", "-strict-concurrency=complete"]
-    let result = PatchCoordinator.replacingLanguageMode(in: flags, with: "6")
-    #expect(result == ["-D", "DEBUG", "-strict-concurrency=complete", "-swift-version", "6"])
-    #expect(result.filter { $0 == "-swift-version" }.count == 1)
+@Test func packageTargetCompilerSettingsPreserveConditionsAndUnsafeFlags() throws {
+    let dump = #"""
+        {
+          "toolsVersion":{"_version":"6.0.0"},
+          "targets": [{
+            "name": "Feature",
+            "settings": [
+              {"tool":"swift","condition":{"config":"debug","platformNames":["ios"]},"kind":{"define":{"_0":"FEATURE_ONLY"}}},
+              {"tool":"swift","condition":{"config":"debug","platformNames":[]},"kind":{"unsafeFlags":{"_0":["-strict-concurrency=complete"]}}},
+              {"tool":"swift","condition":{"config":"release","platformNames":[]},"kind":{"define":{"_0":"RELEASE_ONLY"}}},
+              {"tool":"linker","condition":null,"kind":{"unsafeFlags":{"_0":["-bad-link-flag"]}}}
+            ]
+          }]
+        }
+        """#
+    guard case .flags(let flags) = PackageCompilerSettings.decode(
+        Data(dump.utf8), module: "Feature", platform: "ios") else {
+        Issue.record("the package target settings were not decoded")
+        return
+    }
+    #expect(flags == [
+        "-D", "SWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE", "-D", "FEATURE_ONLY",
+        "-strict-concurrency=complete", "-swift-version", "6",
+    ])
+}
+
+@Test func packageTargetCompilerSettingsUseTheTargetsLanguageMode() throws {
+    let dump = #"""
+        {
+          "toolsVersion":{"_version":"6.0.0"},
+          "swiftLanguageVersions":null,
+          "targets":[
+            {"name":"FeatureA","settings":[
+              {"tool":"swift","kind":{"swiftLanguageMode":{"_0":"5"}}}
+            ]},
+            {"name":"FeatureB","settings":[]}
+          ]
+        }
+        """#
+    guard case .flags(let first) = PackageCompilerSettings.decode(
+        Data(dump.utf8), module: "FeatureA", platform: "ios"),
+          case .flags(let second) = PackageCompilerSettings.decode(
+        Data(dump.utf8), module: "FeatureB", platform: "ios") else {
+        Issue.record("the target language modes were not decoded")
+        return
+    }
+    #expect(first == [
+        "-D", "SWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-enable-bare-slash-regex", "-swift-version", "5",
+    ])
+    #expect(second == [
+        "-D", "SWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE", "-swift-version", "6",
+    ])
+}
+
+@Test func packageTargetCompilerSettingsAreReadFromTheEvaluatedManifest() throws {
+    let work = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ember-package-settings-\(UUID().uuidString)", isDirectory: true)
+    let sources = work.appendingPathComponent("Sources/Feature", isDirectory: true)
+    let resources = work.appendingPathComponent("Sources/Feature/Resources", isDirectory: true)
+    try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature", resources: [.process("Resources")], swiftSettings: [
+                .define("ON_IOS", .when(platforms: [.iOS], configuration: .debug)),
+                .unsafeFlags(["-strict-concurrency=complete"]),
+                .swiftLanguageMode(.v5),
+            ])
+        ])
+        """.write(
+            to: work.appendingPathComponent("Package.swift"),
+            atomically: true, encoding: .utf8)
+    try "public func value() {}\n".write(
+        to: sources.appendingPathComponent("Feature.swift"),
+        atomically: true, encoding: .utf8)
+    try "fixture\n".write(
+        to: resources.appendingPathComponent("value.txt"),
+        atomically: true, encoding: .utf8)
+
+    guard case .flags(let flags) = PackageCompilerSettings.read(
+        module: "Feature", manifest: work.appendingPathComponent("Package.swift"),
+        swiftCompilerPath: "/usr/bin/swiftc", sdkName: "iphoneos",
+        cacheDirectory: work.appendingPathComponent("cache", isDirectory: true)) else {
+        Issue.record("the evaluated package settings were unavailable")
+        return
+    }
+    #expect(flags == [
+        "-D", "SWIFT_PACKAGE", "-D", "DEBUG",
+        "-D", "SWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE", "-D", "ON_IOS",
+        "-strict-concurrency=complete", "-enable-bare-slash-regex", "-swift-version", "5",
+        "-package-name", work.lastPathComponent.lowercased().replacingOccurrences(of: "-", with: "_"),
+    ])
+}
+
+@Test func swiftFivePackageDefaultsEnableBareSlashRegex() throws {
+    let dump = #"""
+        {
+          "toolsVersion":{"_version":"5.9.0"},
+          "targets":[{"name":"Feature","settings":[]}]
+        }
+        """#
+    guard case .flags(let flags) = PackageCompilerSettings.decode(
+        Data(dump.utf8), module: "Feature", platform: "ios") else {
+        Issue.record("the package defaults were not decoded")
+        return
+    }
+    #expect(flags == [
+        "-D", "SWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-enable-bare-slash-regex", "-swift-version", "5",
+    ])
+
+    let source = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ember-bare-regex-\(UUID().uuidString).swift")
+    defer { try? FileManager.default.removeItem(at: source) }
+    try "let expression = /ember/\n".write(
+        to: source, atomically: true, encoding: .utf8)
+    let result = try Subprocess.runSeparated(
+        "/usr/bin/swiftc", arguments: flags + ["-typecheck", source.path])
+    #expect(result.exitCode == 0, Comment(rawValue: result.standardError))
+}
+
+@Test func unknownPackageTargetCompilerSettingsFailClosed() {
+    let dump = #"""
+        {"targets":[{"name":"Feature","settings":[
+          {"tool":"swift","condition":null,"kind":{"futureSetting":{"_0":"value"}}}
+        ]}]}
+        """#
+    guard case .unknown(let reason) = PackageCompilerSettings.decode(
+        Data(dump.utf8), module: "Feature", platform: "ios") else {
+        Issue.record("an unknown compiler setting was accepted")
+        return
+    }
+    #expect(reason.contains("futureSetting"))
+}
+
+@Test func aTransientPackageSettingsFailureIsRetried() async throws {
+    let work = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ember-package-settings-retry-\(UUID().uuidString)")
+    let sources = work.appendingPathComponent("Sources/Feature", isDirectory: true)
+    try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+    let manifest = work.appendingPathComponent("Package.swift")
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature", swiftSettings: [)
+        ])
+        """.write(to: manifest, atomically: true, encoding: .utf8)
+    let source = sources.appendingPathComponent("Subject.swift")
+    try "public func value() -> Int { 1 }".write(
+        to: source, atomically: true, encoding: .utf8)
+
+    let server = try IPCServer()
+    defer { server.stop() }
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc",
+        swiftCompilerVersion: "test", targetTriple: "arm64-apple-macosx26.0",
+        sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: work.appendingPathComponent("app").path,
+        moduleSearchPaths: [work.path], extraCompilerFlags: [],
+        sourceRoots: [sources.path], bundleIdentifier: "dev.swift-ember.settings-retry-tests")
+    let coordinator = PatchCoordinator(
+        context: context, server: server,
+        workDirectory: work.appendingPathComponent("patches"),
+        inventory: ModuleInventory(keys: ["Feature": 1]))
+    await coordinator.primeBaselines(from: [sources])
+    try "public func value() -> Int { 2 }".write(
+        to: source, atomically: true, encoding: .utf8)
+
+    guard case .rejected(let first) = await coordinator.handle(change: source) else {
+        Issue.record("the malformed manifest was not refused")
+        return
+    }
+    #expect(first.stage == .classify)
+
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature", swiftSettings: [.define("REPAIRED")])
+        ])
+        """.write(to: manifest, atomically: true, encoding: .utf8)
+
+    guard case .rejected(let second) = await coordinator.handle(change: source) else {
+        Issue.record("the repaired manifest unexpectedly loaded without a runtime")
+        return
+    }
+    #expect(second.stage == .compile,
+            "the first settings failure was cached instead of reevaluating the manifest")
 }
 
 @Test func aFileOutsideAnyPackageHasNoManifest() {

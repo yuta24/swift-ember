@@ -32,8 +32,13 @@ public final class IPCServer: @unchecked Sendable {
     /// late teardown knows which peer it belongs to.
     private var peers: [UInt64: Peer] = [:]
     private var connectionGeneration: UInt64 = 0
-    /// The one peer that has presented the token. Only this one is sent to.
+    /// The one peer admitted as the runtime session. Only this one receives
+    /// patch requests.
     private var sessionPeer: UInt64?
+    /// Authenticated peers whose build proof was rejected. Keep their sockets
+    /// open so the runtime does not redial once a second; a session refresh
+    /// disconnects them so a process that raced publication can read it again.
+    private var rejectedPeers: Set<UInt64> = []
     /// A peer that announced a protocol version this daemon cannot read, if
     /// one did and there was no session for it to be measured against. Kept so
     /// that requests made afterwards say why there is no session, and keyed by
@@ -48,6 +53,11 @@ public final class IPCServer: @unchecked Sendable {
     public let token: String
 
     public var onEvent: (@Sendable (String) -> Void)?
+    /// An optional application-level admission check, run after token
+    /// authentication but before this peer can supersede the current session.
+    /// The daemon transport cannot decide whether a runtime is executing the
+    /// binary being watched, but the watch command can compare its build proof.
+    public var shouldAcceptHello: (@Sendable (Hello) -> Bool)?
     public var onConnect: (@Sendable (Hello) -> Void)?
     public var onDisconnect: (@Sendable () -> Void)?
 
@@ -145,8 +155,37 @@ public final class IPCServer: @unchecked Sendable {
 
         listener.cancel()
         for peer in lock.withLock({ Array(peers.values) }) { peer.connection.cancel() }
-        lock.withLock { peers.removeAll(); sessionPeer = nil; session = nil; mismatched = nil }
+        lock.withLock {
+            peers.removeAll()
+            sessionPeer = nil
+            rejectedPeers.removeAll()
+            session = nil
+            mismatched = nil
+        }
         failAllPending(IPCError.disconnected)
+    }
+
+    /// Makes the authenticated runtime read the session file and introduce
+    /// itself again. Automatic rebuild recovery updates the expected Mach-O
+    /// UUID after the replacement app may already have connected, so keeping
+    /// either an admitted or rejected socket would leave its one-time hello
+    /// permanently stale.
+    public func disconnectCurrentSession() {
+        let disconnected = lock.withLock { () -> (session: Peer?, rejected: [Peer]) in
+            let sessionID = sessionPeer
+            sessionPeer = nil
+            session = nil
+            let rejectedIDs = rejectedPeers
+            rejectedPeers.removeAll()
+            let current = sessionID.flatMap { peers.removeValue(forKey: $0) }
+            let rejected = rejectedIDs.compactMap { peers.removeValue(forKey: $0) }
+            return (current, rejected)
+        }
+        for peer in disconnected.rejected { peer.connection.cancel() }
+        guard let session = disconnected.session else { return }
+        session.connection.cancel()
+        failAllPending(IPCError.disconnected)
+        onDisconnect?()
     }
 
     // MARK: - Connection lifecycle
@@ -222,6 +261,7 @@ public final class IPCServer: @unchecked Sendable {
     private func handleDisconnect(_ id: UInt64) {
         let wasSession = lock.withLock { () -> Bool in
             peers[id] = nil
+            rejectedPeers.remove(id)
             // The explanation goes with the peer that needed explaining. Kept
             // past its own socket, it outlived the problem: with nothing
             // connected at all, saves still reported a version mismatch.
@@ -356,6 +396,20 @@ public final class IPCServer: @unchecked Sendable {
                 handleDisconnect(peer.id)
                 return
             }
+            // Authentication only proves that the process could read the app's
+            // session file. An older instance of the same app can do that too,
+            // so let the owner validate its build proof before it can evict a
+            // current, valid runtime.
+            guard shouldAcceptHello?(hello) != false else {
+                _ = lock.withLock { rejectedPeers.insert(peer.id) }
+                let warning = RuntimeLogMessage(
+                    level: .warning,
+                    message: "This process does not match the build being watched. Rebuild and relaunch the app.")
+                if let line = try? Envelope(type: "helloRejected", payload: warning).encodedLine() {
+                    peer.connection.send(content: line, completion: .contentProcessed { _ in })
+                }
+                return
+            }
             // Authenticated, so this peer becomes the session and whatever held
             // it before is superseded. The order matters: the old socket goes
             // first, then anything it was carrying is settled, and only then is
@@ -366,7 +420,10 @@ public final class IPCServer: @unchecked Sendable {
             // rebuilt and relaunched, quitting the app reported "rebuild it"
             // instead of "no app is connected" -- sending them round the loop
             // they had just escaped.
-            lock.withLock { mismatched = nil }
+            lock.withLock {
+                rejectedPeers.remove(peer.id)
+                mismatched = nil
+            }
 
             let superseded: (peer: Peer, hadSession: Bool)? = lock.withLock {
                 guard let previous = sessionPeer, previous != peer.id,

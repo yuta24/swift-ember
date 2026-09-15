@@ -126,7 +126,9 @@ Full rebuild required.
     built binary exports, and a package that has not opted in gets a
     refusal naming it rather than silence. Binary and versioned
     dependencies remain out of reach, since `unsafeFlags` is refused
-    there and their sources are not being edited anyway.
+    there and their sources are not being edited anyway. Changes in several
+    editable modules compile under their individual contexts and link into one
+    image, so the runtime never sees a successful module prefix.
 -   Persistent compiler process to reduce frontend startup cost.
 -   Replace conventional dylib linking with LLVM ORC/JITLink if
     profiling shows meaningful benefit.
@@ -257,6 +259,9 @@ and an arm64 iOS Simulator (iOS 27.0); see `DESIGN.md` Appendix A.
     after load; the modifier fixes the stored child at `AnyView`. A `Text` to
     `VStack` change in a `List` renders without an abort and preserves the
     View's existing `@State`. Both opt-ins are no-ops in Release.
+-   one watcher batch containing eligible body changes from several editable
+    modules. Each module is compiled separately with its own effective flags;
+    every object is linked into one image and crosses one runtime load boundary.
 
 ### Tier B: Potentially hot reloadable
 
@@ -411,21 +416,21 @@ not.
 The system MUST generate replacement declarations compatible with Swift
 dynamic replacement semantics.
 
-All compatible changes observed in one watcher batch for one module MUST be
-generated as one patch generation. Classification MUST finish for the complete
-batch before any part is sent to the runtime, and a refused file MUST prevent
-every file in that batch from loading. An addition in one source file MAY be
-carried with a replacement in another source file in the same module.
+All compatible changes observed in one watcher batch MUST be generated as one
+patch generation. Classification MUST finish for the complete batch before any
+part is sent to the runtime, and a refused file MUST prevent every file in that
+batch from loading. An addition in one source file MAY be carried with a
+replacement in another source file in the same module.
 
 ### FR-6 Patch compilation
 
 The patch MUST be compiled using the same effective
 toolchain/configuration as the running target.
 
-The generated contributions for one accepted multi-file batch MUST be linked
-into one loadable image. The host MUST advance every affected baseline only
-after that image is confirmed loaded. Batches requiring different module or
-language-mode contexts MAY conservatively require a rebuild.
+The generated contributions for one accepted multi-file batch MUST be compiled
+under their original module and language-mode contexts, then linked into one
+loadable image. The host MUST advance every affected baseline only after that
+image is confirmed loaded.
 
 ### FR-7 Runtime communication
 
@@ -865,6 +870,26 @@ launching `simctl` to be told the same container path as last time. It
 is cached now, which took the loop from 533 ms to 385 ms, and the same
 change fixed a bug: a reinstall moves the app to a new container, and
 the daemon had been writing its session file into the old one forever.
+
+### M6 --- Recovery and cross-module atomicity
+
+Complete on the host, with Simulator and device behavior retained behind the
+same transport boundary.
+
+-   [x] Optional rebuild-and-relaunch command for Tier C changes.
+-   [x] Require both a changed on-disk Mach-O UUID and a different process
+    running that rebuilt UUID before adopting a new baseline.
+-   [x] Rerun a rebuild when sources change while it is executing.
+-   [x] Recheck sources after relaunch, atomically adopt the proven build
+    snapshot, and terminate the complete rebuild process group on shutdown.
+-   [x] Reset deferred changes, carried declarations, module inventory, and
+    patch generations together after recovery.
+-   [x] Compile changed modules under their evaluated target-specific flags and
+    language-mode contexts, then link their objects into one atomically loaded
+    image.
+-   [x] End-to-end proof that replacements from two modules activate from one
+    image, plus a negative test that a later module compile failure delivers
+    nothing.
 
 ## 16. Open questions
 

@@ -31,6 +31,7 @@ let package = Package(
         .testTarget(name: "EmberGenTests", dependencies: ["EmberGen"]),
         .testTarget(name: "EmberDaemonTests",
                     dependencies: ["EmberCore", "EmberDaemon", "EmberCLI"]),
-        .testTarget(name: "EmberEndToEndTests", dependencies: ["EmberCore", "EmberGen"]),
+        .testTarget(name: "EmberEndToEndTests",
+                    dependencies: ["EmberCore", "EmberGen", "EmberDaemon"]),
     ]
 )

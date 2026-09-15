@@ -391,9 +391,10 @@ reports the targets of the scheme and a local package's are not among them, so
 the daemon used the application's for everything: in the example project, a
 Swift 6 package compiled under Swift 5. Measured accepting a body the project's
 own compiler rejects as a data race --- which is precisely what forwarding the
-language mode exists to prevent. A package target's mode is now read from its
-manifest, and a manifest that cannot be evaluated is refused rather than
-guessed.
+language mode exists to prevent. A package target's effective Swift settings
+are now read from SwiftPM's evaluated manifest. Conditional defines, unsafe
+flags, language mode, and upcoming or experimental features are applied per
+target; a setting that cannot be represented is refused rather than guessed.
 
 One thing the same review found *not* to be a problem is worth writing down, so
 it is not re-litigated. `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` is not
@@ -763,8 +764,9 @@ An addition-only file may remain deferred because the watcher has already
 consumed its event. A refused classification records its unsafe URLs as
 blockers on the target, and later saves in that target cannot bypass them. A
 safe event for the blocker clears it and retries the complete target without
-requiring another save of the other files. Targets from different modules are
-never pooled.
+requiring another save of the other files. Targets from different modules join
+one image only when the same watcher poll touches them; a later retry of one
+target does not silently pull in an unrelated deferred target.
 
 An addition-only save has no replacement record and cannot affect the running
 process by itself. The coordinator holds that source URL until a later
@@ -773,13 +775,21 @@ generation for the module re-emits the session contributions from all files,
 so a caller does not lose a helper merely because the next edit occurred in a
 different file.
 
-A watcher poll whose observable changes resolve to different modules is
-refused as a rebuild. Local package targets can use different Swift language
-modes and private-import contexts, so combining them into one compiler unit is
-not sound; loading one image per module would instead expose a partially
-applied save if the second image failed. A future protocol could add an
-explicit prepare/commit transaction, but sequential `dlopen` is not atomic and
-is deliberately not presented as one reload.
+A watcher poll whose observable changes resolve to different modules still has
+one commit boundary. Local package targets can use different conditional
+defines, unsafe flags, feature flags, Swift language modes, and private-import
+contexts, so each target's generated sources compile into a separate object
+under that target's effective flags and a unique patch module name. The objects
+then link into one dylib. The compiler may successfully
+produce an earlier object and fail on a later one, but no image exists to
+deliver until every compile and the final link succeed. The runtime performs
+one `dlopen`, so it cannot observe a successful module prefix.
+
+An addition may be carried across files in its own module. It is not treated as
+a new API for a different module: that other module's compiled interface does
+not contain it, and its patch compile fails before delivery. Supporting an
+actual cross-module API or layout change remains a rebuild rather than an
+attempt to synthesize new module interfaces into a running process.
 
 ### 7.4 Implementation options
 
@@ -998,9 +1008,14 @@ The session token, added later, did not help: by the time a peer's `hello` is
 examined, the app has already been evicted.
 
 So a connection now carries its own buffer and nothing else until its `hello`
-presents the token. Only then does it supersede whatever held the session, in
-that order: the old socket is cancelled, what it was carrying is settled, the
-new session is announced.
+presents the token and the watch command accepts its build proof. Only an
+accepted peer supersedes whatever held the session, in that order: the old
+socket is cancelled, what it was carrying is settled, the new session is
+announced. An authenticated peer with a stale build stays quarantined on its
+socket and receives one `helloRejected` warning instead of reconnecting and
+printing the same warning every second. Republishing a rebuilt session closes
+quarantined sockets as well, so a process that raced publication reads the new
+UUIDs and introduces itself again.
 
 Two limits belong to the same change. A peer that never completes a message is
 dropped at one megabyte, and the newline search resumes where the last one
@@ -1036,6 +1051,11 @@ again. While a device transfer is active, only the newest pending message is
 retained, and messages expire from their enqueue time so stale results cannot
 form a delayed console backlog. Consecutive identical messages are suppressed
 per process. Detailed host logs remain canonical when no application is connected.
+
+`helloRejected` carries the same user-facing log payload, but also marks the
+runtime disconnected without closing its socket. The socket is deliberately
+kept idle until the daemon publishes new session data; retrying an immutable
+process against unchanged UUIDs cannot produce a different build proof.
 
 ## 12. Dynamic replacement constraints
 
@@ -1977,7 +1997,44 @@ runtime re-dials whenever its connection drops --- a suspend and resume in
 the simulator is enough --- so `hello` carries the pid and only a
 different one clears the flag.
 
-### 17.1 REGISTER
+### 17.1 Automatic rebuild recovery
+
+`rebuildCommand` is an explicit opt-in for Tier C outcomes. It is not used for
+an edit-and-retry compiler failure, a configuration error, or an uncertain
+load: the first two need source or settings fixed, and the last one needs a
+known-new process before any command can make the previous load outcome less
+ambiguous.
+
+The watcher records the connected pid, runs the command through `zsh -lc` in a
+dedicated process group from the configuration directory, and republishes the
+session with the Mach-O UUIDs
+currently on disk. Recovery succeeds only when a different pid authenticates
+and proves that one of those UUIDs is loaded. The on-disk UUID set must itself
+have changed, so merely relaunching an old build cannot advance the source
+baseline. A Simulator runtime that connected before the new session was
+published is disconnected once so its retry reads the new UUIDs; the
+file-polled device runtime notices the changed session contents directly. The
+coordinator then clears module inventory, package settings, source indexes,
+deferred targets, session contributions, and generation state while atomically
+installing the exact snapshot proven to have produced the rebuilt process.
+
+The file watcher continues polling while the command runs. Complete source
+contents, including excluded safety sources, are compared across the command
+and once more after the replacement process connects. A changed tree reruns the
+command up to three times. This is both the debounce and the baseline-safety
+rule: adopting post-build disk contents after a build that missed a concurrent
+save would make the next patch relative to source the process never contained.
+The live watcher is not re-primed at commit, so an event racing the final
+snapshot remains observable. SIGINT or SIGTERM terminates the command's process
+group, including build descendants, before the watch loop exits.
+
+The command receives `SWIFT_EMBER_REBUILD=1`. An `xcode start` Scheme action
+that inherits it leaves the current watcher in place instead of recursively
+replacing the process that is waiting for recovery. The configured command is
+responsible for both rebuilding and relaunching; completing a build without a
+new matching process times out rather than silently advancing the baseline.
+
+### 17.2 REGISTER
 
 The stage that turns "the image loaded" into "the image replaced something".
 
@@ -2352,6 +2409,11 @@ which `fixtures/run.sh` counts separately. Xcode 26.6 and 27.0 Beta 6 have
 both been run against the current 44-case matrix. The Xcode 26.6 row is the
 newest full run and includes the current 226-test suite; the other rows report
 the matrix and suite exactly as they stood when each was measured.
+
+The M6 host-only verification on 2026-09-11 passes 330/330 tests under local
+Swift 6.3.3 and Xcode 27.0 Beta 6's Swift 6.4. The latter also passes the
+current host fixture matrix at 41/44, with only the three named Simulator-only
+UIKit cases skipped. It does not replace a full Simulator row above.
 
 Of the cases added after the 26-case rows, thirteen were also run separately
 on the host under Xcode 26.2, 26.3 and 26.5 and pass on all three --- including

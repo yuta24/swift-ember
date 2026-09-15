@@ -146,6 +146,15 @@ private func edit(_ url: URL, to body: String) throws {
     await h.coordinator.sessionDidConnect(processId: 1)
     #expect(await h.coordinator.isUncertain, "a reconnect from the same pid must not clear it")
 
+    // A different process proving UUIDs from an older session is not a valid
+    // restart either.
+    let identity = h.server.currentSession?.hello.buildIdentity ?? ""
+    await h.coordinator.sessionDidConnect(hello: Hello(
+        token: h.server.token, buildIdentity: identity, moduleName: "Fixture",
+        processId: 2, loadedGenerations: [], expectedBuildUUIDs: ["stale"],
+        buildMatchesProcess: true))
+    #expect(await h.coordinator.isUncertain, "an old-build process must not clear it")
+
     // A different pid is evidence of a new process.
     await h.coordinator.sessionDidConnect(processId: 2)
     #expect(await h.coordinator.isUncertain == false)

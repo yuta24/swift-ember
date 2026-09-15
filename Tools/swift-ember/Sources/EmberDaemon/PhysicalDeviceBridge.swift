@@ -31,6 +31,7 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
     /// pending result is retained so Xcode is not fed a stale backlog.
     private let runtimeLogQueue = DispatchQueue(label: "dev.swift-ember.device-runtime-log")
     private var sessionToken = ""
+    private var sessionBuildUUIDs: [String] = []
     private var pendingRuntimeLog: QueuedRuntimeLog?
     private var runtimeLogDeliveryActive = false
 
@@ -63,6 +64,7 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
         let buildIdentity: String
         let processId: Int32
         let loadedGenerations: [UInt64]
+        let expectedBuildUUIDs: [String]
         let buildMatchesProcess: Bool
     }
 
@@ -88,7 +90,10 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
             let buildUUIDs: [String]
         }
 
-        lock.withLock { sessionToken = token }
+        lock.withLock {
+            sessionToken = token
+            sessionBuildUUIDs = buildUUIDs
+        }
         let session = Session(protocolVersion: EmberProtocol.version, token: token,
                               buildIdentity: buildIdentity, buildUUIDs: buildUUIDs)
         let local = workDirectory.appendingPathComponent(TransportPath.session)
@@ -112,6 +117,7 @@ final class PhysicalDeviceBridge: @unchecked Sendable {
               status.protocolVersion == EmberProtocol.version,
               status.token == lock.withLock({ sessionToken }),
               status.buildIdentity == context.identity,
+              status.expectedBuildUUIDs == lock.withLock({ sessionBuildUUIDs }),
               status.buildMatchesProcess else { return nil }
         return status.processId
     }
