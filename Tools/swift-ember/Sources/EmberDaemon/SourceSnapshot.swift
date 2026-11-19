@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import EmberCore
 
 /// A complete source tree captured as text, including files excluded from
@@ -6,10 +7,11 @@ import EmberCore
 public struct SourceSnapshot: Equatable, Sendable {
     public let watched: [URL: String]
     public let excluded: [URL: String]
+    let stamps: [URL: SourceFileStamp]
+    let digests: [String: String]
 
-    public init(watched: [URL: String], excluded: [URL: String]) {
-        self.watched = watched
-        self.excluded = excluded
+    public static func == (lhs: SourceSnapshot, rhs: SourceSnapshot) -> Bool {
+        lhs.digests == rhs.digests && lhs.stamps == rhs.stamps && lhs.watched.keys == rhs.watched.keys
     }
 
     public static func capture(
@@ -18,40 +20,48 @@ public struct SourceSnapshot: Equatable, Sendable {
     ) throws -> SourceSnapshot {
         var watched: [URL: String] = [:]
         var excluded: [URL: String] = [:]
+        var digests: [String: String] = [:]
         var problems: [String] = []
-        let manager = FileManager.default
-
-        for root in roots {
-            let root = root.standardizedFileURL
-            guard let walker = manager.enumerator(
-                at: root, includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles],
-                errorHandler: { url, error in
-                    problems.append("\(url.path): \(error.localizedDescription)")
-                    return true
-                }) else {
-                problems.append("\(root.path): could not enumerate the source root")
-                continue
-            }
-
-            for case let candidate as URL in walker where candidate.pathExtension == "swift" {
-                let url = candidate.standardizedFileURL
-                do {
-                    let source = try String(contentsOf: url, encoding: .utf8)
-                    if sourceFilter.excludes(url) {
-                        excluded[url] = source
-                    } else {
-                        watched[url] = source
-                    }
-                } catch {
-                    problems.append("\(url.path): \(error.localizedDescription)")
+        let stamps = try FileWatcher.scan(roots: roots)
+        for url in stamps.keys {
+            do {
+                let data = try Data(contentsOf: url)
+                guard let source = String(data: data, encoding: .utf8) else {
+                    problems.append("\(url.path): invalid UTF-8")
+                    continue
                 }
+                if sourceFilter.excludes(url) {
+                    excluded[url] = source
+                } else {
+                    watched[url] = source
+                }
+                digests[url.path] = Data(SHA256.hash(data: data)).base64EncodedString()
+            } catch {
+                problems.append("\(url.path): \(error.localizedDescription)")
             }
         }
 
+        if problems.isEmpty {
+            let after = try FileWatcher.scan(roots: roots)
+            for url in Set(stamps.keys).union(after.keys) where stamps[url] != after[url] {
+                problems.append("\(url.path): source changed during snapshot capture")
+            }
+        }
         guard problems.isEmpty else {
             throw FileWatcher.ScanFailure(problems: problems.sorted())
         }
-        return SourceSnapshot(watched: watched, excluded: excluded)
+        return SourceSnapshot(watched: watched, excluded: excluded, stamps: stamps, digests: digests)
+    }
+
+    public static func captureForStartup(
+        from roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+    ) throws -> SourceSnapshot {
+        do {
+            return try capture(from: roots, excluding: sourceFilter)
+        } catch {
+            throw EmberError(stage: .watch, subject: "source roots",
+                             reason: "cannot take the initial source snapshot.\n\n\(error)",
+                             recovery: .configure)
+        }
     }
 }

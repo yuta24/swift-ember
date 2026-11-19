@@ -35,9 +35,21 @@ public enum Watch {
                 recovery: .rebuild)
         }
 
+        let manifest = BuildSourceManifest(context: context)
+        let snapshot = try manifest.snapshot()
+        let verifiedUUIDs = try manifest.validate(snapshot)
+        if verifiedUUIDs == nil {
+            print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
+            print("  Pre-watch source edits cannot be verified. Enable build source recording and rebuild.")
+        }
+
         let server = try IPCServer()
         defer { server.stop() }
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
+        await coordinator.primeBaselines(from: snapshot, buildUUIDs: verifiedUUIDs)
+        let watcher = FileWatcher(roots: roots, excluding: excluded)
+        watcher.prime(from: snapshot)
+        defer { watcher.stop() }
         let watchedBuildUUID = BuildUUID(binary: context.linkTarget)
 
         server.shouldAcceptHello = { hello in
@@ -83,20 +95,7 @@ public enum Watch {
         server.onEvent = { print($0) }
         let port = try await server.start()
 
-        await coordinator.primeBaselines(from: roots, excluding: sourceFilter)
         try await coordinator.announceSession()
-
-        let watcher = FileWatcher(roots: roots, excluding: excluded)
-        defer { watcher.stop() }
-        do {
-            try watcher.prime()
-        } catch let failure as FileWatcher.ScanFailure {
-            throw EmberError(
-                stage: .watch,
-                subject: "source roots",
-                reason: "cannot take the initial source snapshot.\n\n\(failure)",
-                recovery: .configure)
-        }
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         if let device = context.deviceIdentifier {
@@ -107,8 +106,6 @@ public enum Watch {
             print("listening on 127.0.0.1:\(port)")
         }
         print("")
-
-        try onReady?()
 
         // While nothing is connected, keep republishing where to dial. On a
         // physical device a slower status heartbeat notices a reinstall, which
@@ -183,6 +180,7 @@ public enum Watch {
             }
         }
         defer { termination?.cancel() }
+        try onReady?()
 
         var removalGuard = RemovalGuard()
 
@@ -256,7 +254,10 @@ public enum Watch {
                     // Commit the exact content proven stable around the build.
                     // Do not re-prime the live watcher: buffered events then
                     // remain available for an edit racing this final commit.
-                    await coordinator.resetAfterRebuild(to: built)
+                    if Set(await coordinator.currentBuildUUIDs()) != rebuiltUUIDs {
+                        throw RebuildRecoveryError.binaryDidNotChange
+                    }
+                    await coordinator.resetAfterRebuild(to: built, buildUUIDs: Array(rebuiltUUIDs))
                     print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
                     print("")
                     await coordinator.reportToRuntime(RuntimeLogMessage(

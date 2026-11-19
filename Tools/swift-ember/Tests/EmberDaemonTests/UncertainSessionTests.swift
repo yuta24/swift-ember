@@ -61,7 +61,7 @@ private func harness(answering answer: @escaping @Sendable () -> LoadPatchResult
                                        // every edit before the stages they
                                        // are about.
                                        inventory: ModuleInventory(keys: ["Fixture": 1]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
 
     let runtime = FakeRuntime(port: port)
     // Asserted, not assumed. Left unchecked, a slow connect made `request`

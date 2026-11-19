@@ -13,7 +13,7 @@ public struct Options {
     }
 
     public enum XcodeAction: String {
-        case start, stop
+        case prepare, record, start, stop
     }
 
     public var command: Command
@@ -25,6 +25,7 @@ public struct Options {
     public var workspace: String?
     public var scheme: String?
     public var configuration = "Debug"
+    public var derivedDataPath: String?
     public var sourceRoots: [String] = []
     /// Nil means an emitted context keeps its own exclusions. An explicit or
     /// project-configured empty array deliberately clears them.
@@ -51,7 +52,9 @@ public struct Options {
 
     Xcode Scheme actions:
 
-      xcode start                     restart after a successful Debug build
+      xcode prepare                   snapshot Swift sources before a Debug build
+      xcode record                    record source hashes after a successful Debug build
+      xcode start                     record source hashes and restart the watcher
       xcode stop                      stop when the app exits
 
     Pointing at an Xcode project:
@@ -61,6 +64,7 @@ public struct Options {
       --project <path.xcodeproj>     or --workspace <path.xcworkspace>
       --scheme <name>                required with either
       --configuration <name>         default Debug
+      --derived-data-path <dir>      match xcodebuild's -derivedDataPath
       --sources <dir>[,<dir>...]     default the project's SRCROOT
       --exclude <path>[,<path>...]   omit files or directories from change monitoring
       --device <CoreDevice-ID>       target a connected physical iOS device
@@ -75,8 +79,10 @@ public struct Options {
 
       --context <path>               default ./ember-context.json
 
-    Build settings are read from xcodebuild rather than guessed. See DESIGN.md
-    section 6.
+    Select the app target under "Provide build settings from" in the Scheme's
+    Build pre-action (prepare) and post-action (record or start). Terminal
+    commands query xcodebuild. Custom builds can use prepare and record with
+    --context.
     """
 
     public enum ParseError: Error, CustomStringConvertible {
@@ -90,6 +96,7 @@ public struct Options {
         case schemeRequired
         case xcodeActionRequired
         case xcodeProjectRequired
+        case derivedDataRequiresProject
         case configuration(String)
         case bothTargetModes
         case conflictingDestinations
@@ -104,9 +111,11 @@ public struct Options {
             case .unknown(let argument): "unknown argument: \(argument)\n\n\(Options.usage)"
             case .bothContainers: "pass --project or --workspace, not both"
             case .schemeRequired: "--scheme is required with --project or --workspace"
-            case .xcodeActionRequired: "xcode needs an action: start or stop"
+            case .xcodeActionRequired: "xcode needs an action: prepare, record, start, or stop"
             case .xcodeProjectRequired:
-                "xcode needs a project or workspace, either in .swift-ember.json or Xcode's environment"
+                "xcode needs a project or workspace from options, .swift-ember.json, or Xcode; prepare and record also accept --context for custom builds"
+            case .derivedDataRequiresProject:
+                "--derived-data-path requires an Xcode project or workspace and cannot be used with --context"
             case .configuration(let reason): reason
             case .bothTargetModes:
                 "pass --context or --project/--workspace, not both"
@@ -173,6 +182,13 @@ public struct Options {
             case "--configuration":
                 options.configuration = try value(after: argument)
                 explicit.configuration = true
+            case "--derived-data-path":
+                let path = try value(after: argument)
+                guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ParseError.invalidValue(argument, path)
+                }
+                options.derivedDataPath = URL(
+                    fileURLWithPath: path, relativeTo: currentDirectory).standardizedFileURL.path
             case "--sources":
                 options.sourceRoots = try value(after: argument)
                     .split(separator: ",")
@@ -268,7 +284,7 @@ public struct Options {
             throw ParseError.configuration("\(error)")
         }
 
-        if command == .xcode {
+        if command == .xcode && !explicit.context {
             if !explicit.container, options.project == nil, options.workspace == nil {
                 if let workspace = environment["WORKSPACE_PATH"], !workspace.isEmpty {
                     options.workspace = workspace
@@ -309,8 +325,13 @@ public struct Options {
         if (options.project != nil || options.workspace != nil) && options.scheme == nil {
             throw ParseError.schemeRequired
         }
+        if options.derivedDataPath != nil,
+           explicit.context || (options.project == nil && options.workspace == nil) {
+            throw ParseError.derivedDataRequiresProject
+        }
         if command == .xcode && options.project == nil && options.workspace == nil {
-            throw ParseError.xcodeProjectRequired
+            let recordsSources = options.xcodeAction == .prepare || options.xcodeAction == .record
+            guard explicit.context && recordsSources else { throw ParseError.xcodeProjectRequired }
         }
         return options
     }
@@ -323,18 +344,28 @@ public struct Options {
     }
 
     /// Resolves the Xcode project, if one was named.
-    public func resolveProject() throws -> XcodeProject.Resolved? {
+    public func resolveProject(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> XcodeProject.Resolved? {
         let container: XcodeProject.Container
         if let project { container = .project(project) }
         else if let workspace { container = .workspace(workspace) }
         else { return nil }
 
+        let isXcodeBuildAction = command == .xcode && xcodeAction != .stop
+        let hasXcodeEnvironment = ["XCODE_VERSION_ACTUAL", "PROJECT_FILE_PATH", "WORKSPACE_PATH",
+                                   "CONFIGURATION", "BUILT_PRODUCTS_DIR"]
+            .contains { environment[$0]?.isEmpty == false }
+        let schemeSettings = isXcodeBuildAction && hasXcodeEnvironment ? environment : nil
         return try XcodeProject(container: container, scheme: scheme!,
                                 configuration: configuration,
                                 deviceIdentifier: device,
-                                simulatorIdentifier: simulator)
+                                simulatorIdentifier: simulator,
+                                derivedDataPath: derivedDataPath)
             .resolve(sourceRoots: sourceRoots,
-                     excludedSourcePaths: excludedSourcePaths ?? [])
+                     excludedSourcePaths: excludedSourcePaths ?? [],
+                     schemeBuildSettings: schemeSettings,
+                     allowsMissingSchemeBinary: xcodeAction == .prepare)
     }
 
     /// The project when there is one, the manifest otherwise.

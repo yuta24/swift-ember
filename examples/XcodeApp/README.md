@@ -80,7 +80,7 @@ resolve the load command by pulling a second copy of the whole app module into
 the live process. Replacements would land in the copy, the running code would
 be untouched, and the reload would be reported as successful.
 
-**Build settings come from `xcodebuild -showBuildSettings -json`.**
+**Terminal commands query build settings with `xcodebuild -showBuildSettings -json`.**
 `DESIGN.md` section 6.2 argued for capturing the literal compile invocation
 instead. Scraping a build log for the `swift-frontend` line means requiring a
 full build, parsing output with no compatibility promise, and getting nothing
@@ -88,6 +88,15 @@ when the build is already up to date. Asking Xcode for its resolved settings
 avoids all three, and the reason 6.2 wanted the invocation -- not guessing --
 is met a different way: nothing derived is trusted on its own, and `doctor`
 reads the built binary back to check it really does export keys.
+
+For a build with `-derivedDataPath`, pass the same directory to terminal
+commands with `--derived-data-path`. To record the built sources, configure
+`swift-ember xcode prepare` as the Scheme's Build pre-action and
+`swift-ember xcode record` as its Build post-action. Use `xcode start` for
+the post-action to also restart the background watcher. Select the same app
+target under **Provide build settings from** in both actions so they receive
+the actual output paths. Include both `Sources` and `Feature/Sources` when
+watching package code.
 
 **The language mode has to travel with the patch.** Xcode reports
 `SWIFT_VERSION = 5.0`, the compiler accepts only `5`, and a body written for

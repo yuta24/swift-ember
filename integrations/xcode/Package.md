@@ -58,6 +58,9 @@ it in a local overlay rather than shipping it.
 swift-ember doctor --project App.xcodeproj --scheme App
 ```
 
+If the build used `xcodebuild -derivedDataPath`, pass the same directory to
+`doctor` and `watch` with `--derived-data-path <dir>`.
+
 ```
 Replacement keys      OK    28 exported
   Feature             3 keys
@@ -74,3 +77,17 @@ refusal naming it when you edit it, rather than silence.
 The private-imports line is asked the same way, by type-checking one import
 against the built module. Both are questions a build setting can answer wrongly:
 the setting can be right in a file nobody rebuilt since.
+
+## Recording the build's Swift sources
+
+Include the local package source roots in the same `.swift-ember.json` used
+by the build actions and the watcher. Add `swift-ember xcode prepare` to the
+Scheme's **Build > Pre-actions**. Add `swift-ember xcode record` to
+**Build > Post-actions** for a terminal-managed watcher, or use
+`swift-ember xcode start` there to also restart the background watcher.
+Use an absolute path to the CLI if Xcode cannot find it on `PATH`.
+
+Select the same app target under **Provide build settings from** in both
+actions. Xcode supplies the build's output paths, including custom DerivedData
+paths. Clean the build folder before the first recorded build. The manifest
+is written beside the app.

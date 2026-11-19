@@ -121,7 +121,7 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     let coordinator = PatchCoordinator(context: context, server: server,
                                        workDirectory: root.appendingPathComponent("p"),
                                        inventory: ModuleInventory(keys: ["App": 20]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
 
     try #"struct G { func g() -> String { "new" } }"#
         .write(to: subject, atomically: true, encoding: .utf8)
@@ -166,7 +166,7 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("p"),
         inventory: ModuleInventory(keys: ["App": 20]))
-    await coordinator.primeBaselines(
+    try await coordinator.primeBaselines(
         from: [root], excluding: SourcePathFilter(excluding: [shadow]))
 
     // The ignored file can change on disk without changing the running build.
@@ -421,7 +421,7 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
         context: context, server: server,
         workDirectory: work.appendingPathComponent("patches"),
         inventory: ModuleInventory(keys: ["Feature": 1]))
-    await coordinator.primeBaselines(from: [sources])
+    try await coordinator.primeBaselines(from: [sources])
     try "public func value() -> Int { 2 }".write(
         to: source, atomically: true, encoding: .utf8)
 

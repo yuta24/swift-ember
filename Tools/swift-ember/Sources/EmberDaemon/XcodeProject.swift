@@ -10,7 +10,9 @@ import EmberCore
 /// full build, parsing output with no compatibility promise, and getting
 /// nothing at all when the build is up to date. `-showBuildSettings -json` is a
 /// supported interface, needs no build, and reports what Xcode itself resolved
-/// rather than what this tool guessed.
+/// rather than what this tool guessed. A Scheme Build action uses the app
+/// target's exported settings directly, including overrides from the build
+/// that just ran.
 ///
 /// The reason section 6.2 wanted the invocation was to avoid guessing. That
 /// concern is met a different way: nothing derived here is trusted on its own.
@@ -27,6 +29,13 @@ public struct XcodeProject: Sendable {
             case .workspace(let path): ["-workspace", path]
             }
         }
+
+        var environmentLocation: (key: String, path: String) {
+            switch self {
+            case .project(let path): ("PROJECT_FILE_PATH", path)
+            case .workspace(let path): ("WORKSPACE_PATH", path)
+            }
+        }
     }
 
     public let container: Container
@@ -35,17 +44,20 @@ public struct XcodeProject: Sendable {
     public let destination: String
     public let deviceIdentifier: String?
     public let simulatorIdentifier: String?
+    public let derivedDataPath: String?
 
     public init(container: Container, scheme: String,
                 configuration: String = "Debug",
                 destination: String = "generic/platform=iOS Simulator",
                 deviceIdentifier: String? = nil,
-                simulatorIdentifier: String? = nil) {
+                simulatorIdentifier: String? = nil,
+                derivedDataPath: String? = nil) {
         self.container = container
         self.scheme = scheme
         self.configuration = configuration
         self.deviceIdentifier = deviceIdentifier
         self.simulatorIdentifier = simulatorIdentifier
+        self.derivedDataPath = derivedDataPath
         self.destination = (deviceIdentifier ?? simulatorIdentifier).map { "id=\($0)" } ?? destination
     }
 
@@ -66,21 +78,23 @@ public struct XcodeProject: Sendable {
         public var declaredConfigured: Bool { settings["EMBER_CONFIGURED"] == "YES" }
     }
 
-    public func resolve(sourceRoots: [String], excludedSourcePaths: [String] = []) throws -> Resolved {
-        let settings = try readSettings()
+    public func resolve(sourceRoots: [String], excludedSourcePaths: [String] = [],
+                        schemeBuildSettings: [String: String]? = nil,
+                        allowsMissingSchemeBinary: Bool = false) throws -> Resolved {
+        let settings = try buildSettings(schemeEnvironment: schemeBuildSettings, query: readSettings)
+        let isSchemeAction = schemeBuildSettings != nil
+        let products = try buildProducts(from: settings, schemeAction: isSchemeAction)
+        if isSchemeAction, !allowsMissingSchemeBinary,
+           !FileManager.default.fileExists(atPath: products.linkTarget) {
+            throw schemeError("the build post-action's binary is missing at \(products.linkTarget). Build the selected app target before recording sources or starting the watcher.",
+                              recovery: .rebuild)
+        }
 
         func require(_ key: String) throws -> String {
-            guard let value = settings[key], !value.isEmpty else {
-                throw EmberError(stage: .watch, subject: scheme,
-                                  reason: "xcodebuild did not report \(key) for scheme '\(scheme)'",
-                                  recovery: .configure)
-            }
-            return value
+            try requiredSetting(key, in: settings, schemeAction: isSchemeAction)
         }
 
         let module = try settings["PRODUCT_MODULE_NAME"] ?? require("PRODUCT_NAME")
-        let builtProducts = try require("BUILT_PRODUCTS_DIR")
-        let executablePath = try require("EXECUTABLE_PATH")
 
         // Xcode reports SDK name and version separately; the triple has to be
         // assembled from the architecture, the platform, and the deployment
@@ -146,11 +160,6 @@ public struct XcodeProject: Sendable {
                         key.replacingOccurrences(of: "SWIFT_UPCOMING_FEATURE_", with: ""))]
         }
 
-        // Authoritative, unlike the file being present: a dylib from an
-        // earlier build outlives the setting that produced it.
-        let executable = builtProducts + "/" + executablePath
-        let debugDylib = settings["ENABLE_DEBUG_DYLIB"] == "YES" ? executable + ".debug.dylib" : nil
-
         let context = BuildContext(
             moduleName: module,
             swiftCompilerPath: try which("swiftc"),
@@ -158,17 +167,17 @@ public struct XcodeProject: Sendable {
             targetTriple: triple,
             sdkPath: try require("SDKROOT"),
             sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
-            appBinaryPath: executable,
+            appBinaryPath: products.executable,
             // The application's own .swiftmodule is what a patch imports.
-            moduleSearchPaths: [builtProducts, builtProducts + "/\(module).swiftmodule"]
+            moduleSearchPaths: [products.directory, products.directory + "/\(module).swiftmodule"]
                 + Self.parseSearchPaths(settings["SWIFT_INCLUDE_PATHS"]),
             extraCompilerFlags: flags,
             sourceRoots: sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots,
             bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
-            debugDylibPath: debugDylib,
+            debugDylibPath: products.debugDylib,
             // Without these, copying an import of a framework the app finds by
             // -F turns every patch from that file into "no such module".
-            frameworkSearchPaths: [builtProducts]
+            frameworkSearchPaths: [products.directory]
                 + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
             deviceIdentifier: deviceIdentifier,
             simulatorIdentifier: simulatorIdentifier,
@@ -176,6 +185,83 @@ public struct XcodeProject: Sendable {
             excludedSourcePaths: excludedSourcePaths)
 
         return Resolved(context: context, settings: settings)
+    }
+
+    func buildSettings(schemeEnvironment: [String: String]?,
+                       query: () throws -> [String: String]) throws -> [String: String] {
+        guard let settings = schemeEnvironment else { return try query() }
+        guard settings["WRAPPER_EXTENSION"] == "app" else {
+            throw schemeError("the Scheme Build action needs settings from the app target. Select it under 'Provide build settings from' in the Build pre-action or post-action.")
+        }
+
+        let (key, configuredPath) = container.environmentLocation
+        if let actionPath = settings[key], !actionPath.isEmpty,
+           Self.canonicalPath(actionPath) != Self.canonicalPath(configuredPath) {
+            throw schemeError("\(key) from the Scheme Build action is '\(actionPath)', but the configured container is '\(configuredPath)'. Check the Scheme's app target and swift-ember's project or workspace.")
+        }
+        let platform = try requiredSetting("PLATFORM_NAME", in: settings, schemeAction: true)
+        if (deviceIdentifier != nil && platform != "iphoneos")
+            || (simulatorIdentifier != nil && platform != "iphonesimulator") {
+            throw schemeError("the requested destination disagrees with the Scheme Build action's PLATFORM_NAME (\(platform)). Check --device or --simulator.")
+        }
+
+        if let derivedDataPath {
+            let action = try buildProducts(from: settings, schemeAction: true)
+            let queried = try buildProducts(from: query(), schemeAction: false)
+            guard Self.canonicalPath(action.linkTarget) == Self.canonicalPath(queried.linkTarget),
+                  Self.canonicalPath(action.directory) == Self.canonicalPath(queried.directory) else {
+                throw schemeError("""
+                    --derived-data-path '\(derivedDataPath)' disagrees with the Scheme Build action's output.
+                    Scheme action: \(action.linkTarget) (products: \(action.directory))
+                    xcodebuild:    \(queried.linkTarget) (products: \(queried.directory))
+                    Use the path passed to the original xcodebuild or omit --derived-data-path in the Scheme Build action.
+                    """)
+            }
+        }
+        return settings
+    }
+
+    struct Products {
+        let directory: String
+        let executable: String
+        let debugDylib: String?
+        var linkTarget: String { debugDylib ?? executable }
+    }
+
+    func buildProducts(from settings: [String: String], schemeAction: Bool) throws -> Products {
+        let directory = try requiredSetting("BUILT_PRODUCTS_DIR", in: settings, schemeAction: schemeAction)
+        let executablePath = try requiredSetting("EXECUTABLE_PATH", in: settings, schemeAction: schemeAction)
+        // TARGET_BUILD_DIR contains the app itself. BUILT_PRODUCTS_DIR is
+        // still the place to search for modules and frameworks.
+        let targetDirectory = settings["TARGET_BUILD_DIR"].flatMap { $0.isEmpty ? nil : $0 } ?? directory
+        guard directory.hasPrefix("/"), targetDirectory.hasPrefix("/"),
+              !executablePath.hasPrefix("/"), !executablePath.split(separator: "/").contains("..") else {
+            throw schemeError("invalid Xcode product paths: BUILT_PRODUCTS_DIR='\(directory)', TARGET_BUILD_DIR='\(targetDirectory)', EXECUTABLE_PATH='\(executablePath)'.")
+        }
+        let executable = URL(fileURLWithPath: targetDirectory, isDirectory: true)
+            .appendingPathComponent(executablePath).standardizedFileURL.path
+        // A dylib may still exist from an earlier build that enabled it.
+        let debugDylib = settings["ENABLE_DEBUG_DYLIB"] == "YES" ? executable + ".debug.dylib" : nil
+        return Products(directory: directory, executable: executable, debugDylib: debugDylib)
+    }
+
+    private func requiredSetting(_ key: String, in settings: [String: String],
+                                 schemeAction: Bool) throws -> String {
+        guard let value = settings[key], !value.isEmpty else {
+            let reason = schemeAction
+                ? "the Scheme Build action did not provide \(key). Select the app target under 'Provide build settings from'."
+                : "xcodebuild did not report \(key) for scheme '\(scheme)'"
+            throw schemeError(reason)
+        }
+        return value
+    }
+
+    private func schemeError(_ reason: String, recovery: EmberError.Recovery = .configure) -> EmberError {
+        EmberError(stage: .watch, subject: scheme, reason: reason, recovery: recovery)
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     static func signingIdentity(from settings: [String: String]) -> String? {
@@ -267,17 +353,21 @@ public struct XcodeProject: Sendable {
 
     // MARK: - xcodebuild
 
-    private func readSettings() throws -> [String: String] {
+    var buildSettingsArguments: [String] {
         var arguments = ["xcodebuild"] + container.arguments
         arguments += ["-scheme", scheme,
                       "-configuration", configuration,
                       "-destination", destination,
                       "-showBuildSettings", "-json"]
+        if let derivedDataPath { arguments += ["-derivedDataPath", derivedDataPath] }
+        return arguments
+    }
 
+    private func readSettings() throws -> [String: String] {
         // Separate pipes. Merging them and hunting for the first bracket found
         // the one inside `2026-08-24 08:54:10.308 xcodebuild[27960:9171152]`,
         // and any stray notice on stderr made a healthy project unreadable.
-        let result = try Subprocess.runSeparated("/usr/bin/xcrun", arguments: arguments)
+        let result = try Subprocess.runSeparated("/usr/bin/xcrun", arguments: buildSettingsArguments)
         guard result.exitCode == 0 else {
             // Both streams and the status. A corrupted project file makes
             // xcodebuild die on a signal with zero bytes on either stream, and

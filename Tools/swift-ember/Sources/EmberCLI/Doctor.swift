@@ -41,7 +41,9 @@ public enum Doctor {
 
         let binary = context.linkTarget
         let built = FileManager.default.fileExists(atPath: binary)
-        check("App binary", built ? binary : "build the app first", passed: built)
+        let buildHint = project == nil ? "build the app first"
+            : "build the selected app first and pass --derived-data-path if the build used -derivedDataPath"
+        check("App binary", built ? binary : "missing at \(binary). \(buildHint)", passed: built)
 
         let watched = watchedModules(context: context)
         let watchesAppModule = watched.contains(context.moduleName)

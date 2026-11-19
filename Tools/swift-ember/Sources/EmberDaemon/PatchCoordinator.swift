@@ -90,6 +90,7 @@ public actor PatchCoordinator {
     private var lastRuntimeLog: (processId: Int32, log: RuntimeLogMessage)?
 
     private var baselines: [URL: String] = [:]
+    private var baselineBuildUUIDs: Set<String>?
     /// Build-time snapshots for sources omitted from file watching. They still
     /// participate in cross-file safety checks because their declarations are
     /// present in the running binary. Keeping their original text also avoids
@@ -146,30 +147,22 @@ public actor PatchCoordinator {
 
     private let deliverOverride: (@Sendable (URL) throws -> URL)?
 
-    /// Snapshots the sources as they were when the running binary was built.
-    /// Everything afterwards is diffed against this, and the baseline advances
-    /// only when a patch actually lands, so a rejected edit stays visible on
-    /// the next save instead of being silently absorbed.
+    /// Captures the complete source tree before adopting any baseline.
     public func primeBaselines(
         from roots: [URL],
         excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+    ) throws {
+        try primeBaselines(from: SourceSnapshot.captureForStartup(from: roots, excluding: sourceFilter))
+    }
+
+    /// Adopt the same snapshot used for startup proof and watcher priming.
+    public func primeBaselines(
+        from snapshot: SourceSnapshot, buildUUIDs: [String]? = nil
     ) {
-        for root in roots {
-            guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
-                                                              options: [.skipsHiddenFiles]) else { continue }
-            for case let url as URL in walker where url.pathExtension == "swift" {
-                // Text only. Parsing every file at startup would cost a large
-                // project seconds before the first edit, and most files are
-                // never touched in a session.
-                let url = url.standardizedFileURL
-                let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-                if sourceFilter.excludes(url) {
-                    excludedSafetyBaselines[url] = source
-                } else {
-                    baselines[url] = source
-                }
-            }
-        }
+        baselines = snapshot.watched
+        excludedSafetyBaselines = snapshot.excluded
+        baselineIndexes = [:]
+        baselineBuildUUIDs = buildUUIDs.map { Set($0) }
     }
 
     /// Starts a new source-to-process session after an explicitly configured
@@ -179,12 +172,10 @@ public actor PatchCoordinator {
     /// additions are now in the binary, removed files are no longer in it, and
     /// replacement keys may have changed. Reset all of those facts together,
     /// then adopt the exact source snapshot already proven to match the build.
-    public func resetAfterRebuild(to snapshot: SourceSnapshot) {
+    public func resetAfterRebuild(to snapshot: SourceSnapshot, buildUUIDs: [String]? = nil) {
         cachedInventory = nil
         packageFlags = [:]
-        baselines = snapshot.watched
-        excludedSafetyBaselines = snapshot.excluded
-        baselineIndexes = [:]
+        primeBaselines(from: snapshot, buildUUIDs: buildUUIDs)
         memories = [:]
         deferredTargets = [:]
         uncertain = nil
@@ -518,6 +509,12 @@ public actor PatchCoordinator {
         await handle(changes: [url])
     }
 
+    private func buildChangedError() -> EmberError {
+        EmberError(stage: .watch, subject: context.linkTarget,
+                   reason: "the link target changed after its source baseline was verified. Restart the watcher after rebuilding.",
+                   recovery: .rebuild)
+    }
+
     private func targetKey(_ resolution: ModuleResolver.Resolution) -> String {
         resolution.module + "\u{0}" + (resolution.manifest?.standardizedFileURL.path ?? "")
     }
@@ -533,6 +530,9 @@ public actor PatchCoordinator {
         let inputURLs = Set(input.map(\.standardizedFileURL))
             .sorted { $0.path < $1.path }
         guard !inputURLs.isEmpty else { return .ignored }
+        if let baselineBuildUUIDs, Set(buildUUIDs) != baselineBuildUUIDs {
+            return .rejected(buildChangedError())
+        }
 
         let inputSet = Set(inputURLs)
         let directlyTouchedTargets = Set(inputURLs.map {
@@ -846,9 +846,13 @@ public actor PatchCoordinator {
             var counted: Int?
             var refreshed: String?
             let start = DispatchTime.now().uptimeNanoseconds
+            let patchBuildUUIDs = buildUUIDs
+            if let baselineBuildUUIDs, Set(patchBuildUUIDs) != baselineBuildUUIDs {
+                throw buildChangedError()
+            }
             let request = LoadPatchRequest(generation: next, path: delivered.path,
                                            buildIdentity: context.identity,
-                                           buildUUIDs: buildUUIDs,
+                                           buildUUIDs: patchBuildUUIDs,
                                            declarations: declarations.map(\.displayName))
             let result: LoadPatchResult
             do {

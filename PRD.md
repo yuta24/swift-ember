@@ -327,11 +327,10 @@ The tool MUST discover and use the active build's Swift
 compiler/toolchain rather than shipping a separately versioned Swift
 compiler.
 
-For an Xcode project this is satisfied by
-`swift-ember --project X.xcodeproj --scheme Y`, which reads the
-resolved build settings from `xcodebuild` rather than asking the project
-to maintain a manifest. See `DESIGN.md` section 6.2 for why the settings
-rather than the literal compile invocation.
+For an Xcode project, terminal commands read the resolved settings from
+`xcodebuild` and accept `--derived-data-path` to match the build's
+`-derivedDataPath`. Scheme Build actions use the app target's exported
+settings, including the actual output paths. See `DESIGN.md` section 6.2.
 
 It SHOULD capture the original Swift compiler invocation or equivalent
 build metadata, including relevant:
@@ -402,6 +401,15 @@ Simulator binary is universal and each slice has its own -- are what the
 runtime looks for among its own loaded images. The daemon MUST re-read
 them whenever the binary changes rather than once per session: a rebuild
 with the app still running is the case this exists to catch.
+
+An integrated build MUST record the watched Swift source hashes with the
+link target's UUID set beside the built product. In Xcode, the Build
+pre-action runs `xcode prepare` and the Build post-action runs `xcode record`
+or `xcode start`. Both actions select the same app target under
+**Provide build settings from**. At startup, the daemon MUST reject an incomplete
+source scan or a mismatch with the recorded build. A legacy build without
+source proof MAY start with a visible warning. Changes after the validated
+snapshot MUST be eligible for delivery from the first watcher poll.
 
 ### FR-4 Compatibility analysis
 
