@@ -24,18 +24,22 @@ import EmberDaemon
     }
 }
 
-@Test func releaseDoctorDemanglesSubstitutedSwiftSymbols() throws {
+@Test func releaseDoctorChecksSwiftClassesWithoutObjectiveCInterop() throws {
     try withReleaseDoctorFixture { directory in
         let source = directory.appendingPathComponent("Fixture.swift")
         let image = directory.appendingPathComponent("App")
+        let stripped = directory.appendingPathComponent("App.stripped")
         try Data("""
             final class EmberClient {}
             print(EmberClient.self)
             """.utf8).write(to: source)
-        // Removing Objective-C interop exercises the symbol check on its own.
+        // Without Objective-C interop, the stripped image can only be
+        // identified through the Swift ABI's type records.
         try runFixtureTool(["swiftc", "-module-name", "EmberRuntime", "-Xfrontend", "-disable-objc-interop",
                             source.path, "-o", image.path])
+        try runFixtureTool(["strip", "-o", stripped.path, image.path])
         #expect(try ReleaseDoctor.inspect(image) == ["enabled Ember runtime"])
+        #expect(try ReleaseDoctor.inspect(stripped) == ["enabled Ember runtime"])
     }
 }
 

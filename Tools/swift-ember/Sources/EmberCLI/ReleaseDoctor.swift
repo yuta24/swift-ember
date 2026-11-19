@@ -137,7 +137,7 @@ public enum ReleaseDoctor {
     }
 
     static func inspect(_ image: URL) throws -> [String] {
-        let commands = try tool("otool", ["-arch", "all", "-l", image.path])
+        let commands = try tool("otool", ["-arch", "all", "-f", "-l", image.path])
         guard commands.contains("Load command 0") else {
             throw InspectionError("otool returned no Mach-O load commands")
         }
@@ -157,13 +157,15 @@ public enum ReleaseDoctor {
         if sections.contains("__swift5_replace") || sections.contains("__swift5_replac2") {
             findings.append("Swift dynamic replacement sections")
         }
-        if try containsEnabledRuntime(image, symbols: symbols, sections: sections) {
+        if try containsEnabledRuntime(image, symbols: symbols, sections: sections, loadCommands: commands) {
             findings.append("enabled Ember runtime")
         }
         return findings
     }
 
-    private static func containsEnabledRuntime(_ image: URL, symbols: [Substring], sections: [Substring]) throws -> Bool {
+    private static func containsEnabledRuntime(
+        _ image: URL, symbols: [Substring], sections: [Substring], loadCommands: String
+    ) throws -> Bool {
         let module = "EmberRuntime"
         let moduleIdentifier = "\(module.utf8.count)\(module)"
         // These top-level classes only compile with EMBER_ENABLED.
@@ -180,9 +182,13 @@ public enum ReleaseDoctor {
             if demangled.split(separator: "\n").contains(where: expected.contains) { return true }
         }
 
-        // Darwin keeps the Objective-C runtime names of these Swift classes
-        // in __objc_classname even after stripping. Top-level class names in
-        // this metadata use the legacy length-prefixed mangling.
+        if sections.contains("__swift5_types"),
+           try SwiftTypeMetadata.containsClass(in: image, loadCommands: loadCommands, module: module, names: runtimeTypes) {
+            return true
+        }
+
+        // Some toolchains put the classes' legacy Objective-C runtime names
+        // in a dedicated section that is also available after stripping.
         guard sections.contains("__objc_classname") else { return false }
         let expected = Set(runtimeTypes.map { "_TtC\(moduleIdentifier)\($0.utf8.count)\($0)"[...] })
         let classNames = try tool("otool", ["-arch", "all", "-v", "-s", "__TEXT", "__objc_classname", image.path])
