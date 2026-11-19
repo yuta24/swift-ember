@@ -7,13 +7,14 @@ public struct BuildSourceManifest {
     private struct Recorded: Codable, Equatable {
         let linkTarget: String
         let buildUUIDs: [String]
-        let sha256: [String: String]
+        var sha256: [String: String]
     }
 
     private struct BuildInputs: Codable {
         let linkTarget: String
         let previousUUIDs: [String]
-        let stamps: [URL: SourceFileStamp]
+        // Decode older in-progress records so record() can explain how to recover.
+        let stamps: [URL: SourceFileStamp]?
         let sha256: [String: String]
     }
 
@@ -30,11 +31,17 @@ public struct BuildSourceManifest {
     }
 
     public let url: URL
-    private let context: BuildContext
+    private let roots: [URL]
+    private let safetyExclusions: SourcePathFilter
+    private let buildOutputs: SourcePathFilter
+    private let proofExclusions: SourcePathFilter
     private let linkTarget: String
 
     public init(context: BuildContext) {
-        self.context = context
+        roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
+        safetyExclusions = SourcePathFilter(excluding: context.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
+        buildOutputs = SourcePathFilter(excluding: context.buildOutputPaths.map { URL(fileURLWithPath: $0) })
+        proofExclusions = SourcePathFilter(excluding: context.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) })
         // Keep the product path stable when the executable first appears.
         // Foundation's file URL standardization can change /private/tmp to
         // /tmp for an existing file while leaving a missing file untouched.
@@ -49,11 +56,21 @@ public struct BuildSourceManifest {
     }
 
     public func snapshot() throws -> SourceSnapshot {
-        try SourceSnapshot.captureForStartup(
-            from: context.sourceRoots.map { URL(fileURLWithPath: $0) },
-            excluding: SourcePathFilter(excluding: context.excludedSourcePaths.map {
-                URL(fileURLWithPath: $0)
-            }))
+        try SourceSnapshot.captureForStartup(from: roots, excluding: safetyExclusions, ignoring: buildOutputs)
+    }
+
+    private func captureProof() throws -> SourceSnapshot {
+        try SourceSnapshot.captureForStartup(from: roots, ignoring: proofExclusions)
+    }
+
+    private func proofDigests(_ digests: [String: String]) -> [String: String] {
+        digests.filter { !proofExclusions.excludes(URL(fileURLWithPath: $0.key)) }
+    }
+
+    private func changedKeys<Key: Hashable, Value: Equatable>(
+        from before: [Key: Value], to after: [Key: Value]
+    ) -> Set<Key> {
+        Set(before.keys).union(after.keys).filter { before[$0] != after[$0] }
     }
 
     /// Runs before compiling. Publish the in-progress state before reading
@@ -61,7 +78,7 @@ public struct BuildSourceManifest {
     public func prepare() throws {
         let previous = try read(replacingMalformed: true)?.lastBuild
         try write(.building(previous: previous, inputs: nil))
-        let sources = try snapshot()
+        let sources = try captureProof()
         let previousUUIDs = FileManager.default.fileExists(atPath: linkTarget) ? try readUUIDs() : []
         let inputs = BuildInputs(linkTarget: linkTarget, previousUUIDs: previousUUIDs,
                                  stamps: sources.stamps, sha256: sources.digests)
@@ -72,20 +89,31 @@ public struct BuildSourceManifest {
     /// proof, but it cannot attest that newly captured inputs were compiled.
     @discardableResult
     public func record(required: Bool = true) throws -> Bool {
-        guard case .building(let previous, let inputs) = try read() else {
+        guard case .building(var previous, let inputs) = try read() else {
             if required { throw failure("run `xcode prepare` before compiling and try again.") }
             return false
         }
         guard let inputs, inputs.linkTarget == linkTarget else {
-            throw failure("build preparation did not capture inputs for \(linkTarget).")
+            throw failure("build preparation did not capture inputs for \(linkTarget). Run `xcode prepare` and rebuild.")
         }
-        let sources = try snapshot()
-        let changed = Set(inputs.stamps.keys).union(sources.stamps.keys).filter { url in
-            inputs.stamps[url] != sources.stamps[url] || inputs.sha256[url.path] != sources.digests[url.path]
-        }.map(\.path)
+        guard let stamps = inputs.stamps else {
+            throw failure("build preparation did not record source metadata. Run `xcode prepare` with the current swift-ember and rebuild.")
+        }
+        let sources = try captureProof()
+        var changed = changedKeys(from: proofDigests(inputs.sha256), to: sources.digests)
+        // A source can return to its original bytes after the compiler reads it.
+        let proofStamps = stamps.filter { !proofExclusions.excludes($0.key) }
+        changed.formUnion(changedKeys(from: proofStamps, to: sources.stamps).map(\.path))
         guard changed.isEmpty else {
-            throw failure("Swift sources changed during the build:\n\(paths(changed))")
+            throw failure("""
+                Swift sources changed during the build:
+                \(paths(changed))
+
+                Rebuild after edits stop. If a build phase rewrites Swift files, even with identical contents,
+                add their paths to `--exclude` (or the project configuration) for both build actions and the watcher.
+                """)
         }
+        if let digests = previous?.sha256 { previous?.sha256 = proofDigests(digests) }
         let recorded = Recorded(linkTarget: linkTarget, buildUUIDs: try readUUIDs(), sha256: sources.digests)
         guard recorded.buildUUIDs != inputs.previousUUIDs || recorded == previous else {
             throw failure("the UUIDs at \(linkTarget) did not change and there is no matching source proof. Clean the build products before rebuilding.")
@@ -99,17 +127,15 @@ public struct BuildSourceManifest {
     public func validate(_ snapshot: SourceSnapshot) throws -> [String]? {
         guard let state = try read() else { return nil }
         guard case .built(let recorded) = state else {
-            throw failure("the build did not finish recording source hashes. Complete a build with the configured pre- and post-actions.")
+            throw failure("the build did not finish recording source hashes. Check the build's `xcode prepare` and `xcode record` diagnostics, then rebuild with both actions enabled.")
         }
         let uuids = try readUUIDs()
         guard recorded.buildUUIDs == uuids, recorded.linkTarget == linkTarget else {
             throw failure("the source manifest does not match the Mach-O UUIDs at \(linkTarget). Rebuild with source recording enabled.")
         }
-        let changed = Set(recorded.sha256.keys).union(snapshot.digests.keys).filter {
-            recorded.sha256[$0] != snapshot.digests[$0]
-        }
+        let changed = changedKeys(from: proofDigests(recorded.sha256), to: proofDigests(snapshot.digests))
         guard changed.isEmpty else {
-            throw failure("Swift sources differ from the build:\n\(paths(Array(changed)))")
+            throw failure("Swift sources differ from the build:\n\(paths(changed))")
         }
         return uuids
     }
@@ -151,7 +177,7 @@ public struct BuildSourceManifest {
         EmberError(stage: .watch, subject: url.path, reason: reason, recovery: .rebuild)
     }
 
-    private func paths(_ changed: [String]) -> String {
+    private func paths(_ changed: Set<String>) -> String {
         changed.sorted().map { "  \($0)" }.joined(separator: "\n")
     }
 }

@@ -160,6 +160,7 @@ public struct XcodeProject: Sendable {
                         key.replacingOccurrences(of: "SWIFT_UPCOMING_FEATURE_", with: ""))]
         }
 
+        let roots = sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots
         let context = BuildContext(
             moduleName: module,
             swiftCompilerPath: try which("swiftc"),
@@ -172,7 +173,7 @@ public struct XcodeProject: Sendable {
             moduleSearchPaths: [products.directory, products.directory + "/\(module).swiftmodule"]
                 + Self.parseSearchPaths(settings["SWIFT_INCLUDE_PATHS"]),
             extraCompilerFlags: flags,
-            sourceRoots: sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots,
+            sourceRoots: roots,
             bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
             debugDylibPath: products.debugDylib,
             // Without these, copying an import of a framework the app finds by
@@ -182,9 +183,52 @@ public struct XcodeProject: Sendable {
             deviceIdentifier: deviceIdentifier,
             simulatorIdentifier: simulatorIdentifier,
             codeSigningIdentity: Self.signingIdentity(from: settings),
-            excludedSourcePaths: excludedSourcePaths)
+            excludedSourcePaths: excludedSourcePaths,
+            buildOutputPaths: buildOutputPaths(from: settings, sourceRoots: roots))
 
         return Resolved(context: context, settings: settings)
+    }
+
+    func buildOutputPaths(from settings: [String: String], sourceRoots: [String]) -> [String] {
+        func directory(_ path: String?) -> URL? {
+            guard let path, path.hasPrefix("/") else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        }
+
+        let outputSettings = [
+            "BUILT_PRODUCTS_DIR", "TARGET_BUILD_DIR", "BUILD_DIR", "SYMROOT", "OBJROOT",
+            "PROJECT_TEMP_DIR", "TARGET_TEMP_DIR", "DERIVED_FILE_DIR", "DERIVED_SOURCES_DIR",
+        ]
+        var outputs = outputSettings.compactMap { directory(settings[$0]) }
+        var derivedData = [directory(derivedDataPath), directory(settings["DERIVED_DATA_DIR"])].compactMap { $0 }
+        // Older settings may expose only the standard layout's products and
+        // intermediates. Both are needed to recognize their common parent.
+        if derivedData.isEmpty, let intermediates = directory(settings["OBJROOT"]),
+           intermediates.lastPathComponent == "Intermediates.noindex" {
+            let build = intermediates.deletingLastPathComponent()
+            let products = SourcePathFilter(excluding: [build.appendingPathComponent("Products")])
+            if build.lastPathComponent == "Build",
+               let builtProducts = directory(settings["BUILT_PRODUCTS_DIR"]), products.excludes(builtProducts) {
+                derivedData.append(build.deletingLastPathComponent())
+            }
+        }
+        outputs += derivedData
+        outputs += derivedData.map { $0.appendingPathComponent("SourcePackages", isDirectory: true) }
+
+        let roots = sourceRoots.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let sourceTree = SourcePathFilter(excluding: roots)
+        let projectRoot = directory(settings["SRCROOT"])
+        var result: [URL] = []
+        for output in outputs.sorted(by: { $0.path < $1.path }) {
+            let subtree = SourcePathFilter(excluding: [output])
+            // Some custom settings put products alongside source files.
+            // Never use the project directory itself as an exclusion.
+            if let projectRoot, subtree.excludes(projectRoot) { continue }
+            guard sourceTree.excludes(output) || roots.contains(where: subtree.excludes),
+                  !SourcePathFilter(excluding: result).excludes(output) else { continue }
+            result.append(output)
+        }
+        return result.map(\.path)
     }
 
     func buildSettings(schemeEnvironment: [String: String]?,

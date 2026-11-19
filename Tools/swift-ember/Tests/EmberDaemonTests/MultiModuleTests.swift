@@ -166,8 +166,7 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("p"),
         inventory: ModuleInventory(keys: ["App": 20]))
-    try await coordinator.primeBaselines(
-        from: [root], excluding: SourcePathFilter(excluding: [shadow]))
+    try await coordinator.primeBaselines(from: BuildSourceManifest(context: context).snapshot())
 
     // The ignored file can change on disk without changing the running build.
     // Safety checks must keep using the source snapshot that produced it.

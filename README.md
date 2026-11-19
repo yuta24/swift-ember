@@ -305,14 +305,23 @@ prepare --derived-data-path .build-xcode` before the build and `swift-ember
 xcode record --derived-data-path .build-xcode` after it succeeds. These
 examples use the project, scheme, and source roots in `.swift-ember.json`.
 
-The build records SHA-256 hashes for Swift files under the configured source
-roots, including excluded files used in cross-file safety checks. It stores
-the hashes and the Mach-O UUIDs of the link target in
-`<App>.app.swift-ember-sources.json` beside the built app. Use the same source
-roots for recording and watching. If the UUIDs, files, or file contents differ
-when `watch` starts, rebuild before watching. If files change during the build,
-finish saving and build again. A startup read or UTF-8 error lists the
-affected paths and stops the watcher.
+The build records SHA-256 hashes for watched Swift files and the Mach-O UUIDs
+of the link target in `<App>.app.swift-ember-sources.json` beside the built app.
+Use the same source roots and exclusions for recording and watching. Use
+`--exclude` or the project configuration for generated sources written during
+the build. Excluded files are still read at startup for cross-file safety
+checks. In-tree Xcode build output directories are skipped automatically and
+listed by `doctor`.
+
+If the UUIDs or watched source hashes differ at startup, rebuild before
+watching. The build compares both hashes and file metadata for watched
+sources before and after compilation. It rejects a rewrite even if the
+original bytes are restored. If a build phase rewrites watched sources,
+exclude those paths before rebuilding. If a build was prepared with a
+version that did not record metadata, rerun `xcode prepare` with the current
+version and rebuild. If sources keep changing during startup, wait for
+writes to finish and retry. A startup read or UTF-8 error lists the affected
+paths and stops the watcher.
 
 Existing builds without a source manifest still start with a warning so
 existing integrations can upgrade independently. For those builds, watch

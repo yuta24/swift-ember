@@ -108,6 +108,9 @@ public enum Doctor {
 
         let sourcesExist = context.sourceRoots.allSatisfy { FileManager.default.fileExists(atPath: $0) }
         check("Sources", context.sourceRoots.joined(separator: ", "), passed: sourcesExist)
+        if !context.buildOutputPaths.isEmpty {
+            check("Ignored build outputs", context.buildOutputPaths.joined(separator: ", "), passed: true)
+        }
 
         // With a real project the settings can be checked before anything is
         // built, which turns "the patch would not have loaded" into "this
@@ -166,7 +169,7 @@ public enum Doctor {
     /// linked package, including modules no watched file can ever belong to.
     static func watchedModules(context: BuildContext) -> [String] {
         let resolver = ModuleResolver(appModule: context.moduleName)
-        let sourceFilter = SourcePathFilter(excluding: context.excludedSourcePaths.map {
+        let sourceFilter = SourcePathFilter(excluding: context.unwatchedSourcePaths.map {
             URL(fileURLWithPath: $0)
         })
         var modules = Set<String>()

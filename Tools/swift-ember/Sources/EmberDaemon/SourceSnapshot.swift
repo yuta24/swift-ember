@@ -10,19 +10,36 @@ public struct SourceSnapshot: Equatable, Sendable {
     let stamps: [URL: SourceFileStamp]
     let digests: [String: String]
 
+    private struct UnstableSources: Error, CustomStringConvertible {
+        let paths: [String]
+
+        var description: String {
+            "Swift sources changed during snapshot capture:\n"
+                + paths.map { "  \($0)" }.joined(separator: "\n")
+        }
+    }
+
     public static func == (lhs: SourceSnapshot, rhs: SourceSnapshot) -> Bool {
         lhs.digests == rhs.digests && lhs.stamps == rhs.stamps && lhs.watched.keys == rhs.watched.keys
     }
 
     public static func capture(
         from roots: [URL],
-        excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+        excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
+        ignoring ignored: SourcePathFilter = SourcePathFilter()
+    ) throws -> SourceSnapshot {
+        try capture(excluding: sourceFilter) { try FileWatcher.scan(roots: roots, excluding: ignored) }
+    }
+
+    private static func capture(
+        excluding sourceFilter: SourcePathFilter,
+        scan: () throws -> [URL: SourceFileStamp]
     ) throws -> SourceSnapshot {
         var watched: [URL: String] = [:]
         var excluded: [URL: String] = [:]
         var digests: [String: String] = [:]
         var problems: [String] = []
-        let stamps = try FileWatcher.scan(roots: roots)
+        let stamps = try scan()
         for url in stamps.keys {
             do {
                 let data = try Data(contentsOf: url)
@@ -41,27 +58,46 @@ public struct SourceSnapshot: Equatable, Sendable {
             }
         }
 
-        if problems.isEmpty {
-            let after = try FileWatcher.scan(roots: roots)
-            for url in Set(stamps.keys).union(after.keys) where stamps[url] != after[url] {
-                problems.append("\(url.path): source changed during snapshot capture")
-            }
-        }
         guard problems.isEmpty else {
             throw FileWatcher.ScanFailure(problems: problems.sorted())
         }
+        let after = try scan()
+        let changed = Set(stamps.keys).union(after.keys)
+            .filter { stamps[$0] != after[$0] }.map(\.path).sorted()
+        guard changed.isEmpty else { throw UnstableSources(paths: changed) }
         return SourceSnapshot(watched: watched, excluded: excluded, stamps: stamps, digests: digests)
     }
 
     public static func captureForStartup(
-        from roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+        from roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
+        ignoring ignored: SourcePathFilter = SourcePathFilter()
     ) throws -> SourceSnapshot {
-        do {
-            return try capture(from: roots, excluding: sourceFilter)
-        } catch {
-            throw EmberError(stage: .watch, subject: "source roots",
-                             reason: "cannot take the initial source snapshot.\n\n\(error)",
-                             recovery: .configure)
+        try captureForStartup(excluding: sourceFilter) {
+            try FileWatcher.scan(roots: roots, excluding: ignored)
+        }
+    }
+
+    static func captureForStartup(
+        excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
+        scan: () throws -> [URL: SourceFileStamp]
+    ) throws -> SourceSnapshot {
+        var retries = 2
+        while true {
+            do {
+                return try capture(excluding: sourceFilter, scan: scan)
+            } catch let unstable as UnstableSources {
+                guard retries > 0 else {
+                    throw EmberError(stage: .watch, subject: "source roots",
+                                     reason: "sources did not settle after three snapshot attempts.\n\n\(unstable)",
+                                     recovery: .retry)
+                }
+                retries -= 1
+                Thread.sleep(forTimeInterval: 0.05)
+            } catch {
+                throw EmberError(stage: .watch, subject: "source roots",
+                                 reason: "cannot take the initial source snapshot.\n\n\(error)",
+                                 recovery: .configure)
+            }
         }
     }
 }

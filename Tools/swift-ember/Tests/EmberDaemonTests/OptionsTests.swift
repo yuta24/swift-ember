@@ -653,6 +653,7 @@ private func withConfiguration(
     #expect(context.frameworkSearchPaths.isEmpty)
     #expect(context.sourceRoots == ["/r"])
     #expect(context.excludedSourcePaths.isEmpty)
+    #expect(context.buildOutputPaths.isEmpty)
     #expect(context.simulatorIdentifier == nil)
 }
 
@@ -664,7 +665,7 @@ private func withConfiguration(
         sourceRoots: ["/r"], bundleIdentifier: "id",
         debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"],
         deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING-SHA",
-        excludedSourcePaths: ["/r/Generated", "/r/Fixture.swift"])
+        excludedSourcePaths: ["/r/Generated", "/r/Fixture.swift"], buildOutputPaths: ["/r/DerivedData"])
     let decoded = try JSONDecoder().decode(
         BuildContext.self, from: try JSONEncoder().encode(original))
     #expect(decoded.identity == original.identity)
@@ -675,6 +676,7 @@ private func withConfiguration(
     #expect(decoded.simulatorIdentifier == original.simulatorIdentifier)
     #expect(decoded.codeSigningIdentity == original.codeSigningIdentity)
     #expect(decoded.excludedSourcePaths == original.excludedSourcePaths)
+    #expect(decoded.buildOutputPaths == original.buildOutputPaths)
 
     var simulator = original
     simulator.deviceIdentifier = nil

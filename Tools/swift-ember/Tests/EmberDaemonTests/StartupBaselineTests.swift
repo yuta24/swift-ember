@@ -105,18 +105,173 @@ struct StartupBaselineTests {
         #expect(failure?.reason.contains("UUIDs") == true)
     }
 
-    @Test func anEditDuringBuildCannotBeRecordedEvenIfTheOriginalBytesAreRestored() async throws {
+    @Test func anEditDuringBuildCannotBeRecorded() async throws {
         let fixture = try await StartupFixture.build(original)
         defer { fixture.stop() }
         try fixture.manifest.prepare()
         try fixture.save(original.replacingOccurrences(of: "first-v1", with: "first-v2"))
-        try fixture.save(original)
         let failure = #expect(throws: EmberError.self) { try fixture.manifest.record() }
         #expect(failure?.reason.contains(fixture.source.path) == true)
+        #expect(failure?.reason.contains("--exclude") == true)
         let startup = #expect(throws: EmberError.self) {
             try fixture.manifest.validate(fixture.manifest.snapshot())
         }
         #expect(startup?.recovery == .rebuild)
+    }
+
+    @Test func anEditDuringBuildCannotBeRecordedAfterTheOriginalBytesAreRestored() async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        let before = try fixture.manifest.snapshot()
+        try fixture.manifest.prepare()
+        try fixture.save(original.replacingOccurrences(of: "first-v1", with: "first-v2"))
+        try fixture.save(original)
+        let after = try fixture.manifest.snapshot()
+
+        #expect(before.digests == after.digests)
+        let failure = try #require(throws: EmberError.self) { try fixture.manifest.record() }
+        #expect(failure.reason.contains("Swift sources changed during the build"))
+        #expect(failure.reason.contains(fixture.source.path))
+    }
+
+    @Test(arguments: [false, true])
+    func anAtomicRewriteWithIdenticalBytesCanBeRecordedOnlyIfExcluded(excluded: Bool) async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        var context = fixture.context
+        let source: URL
+        if excluded {
+            source = fixture.sources.appendingPathComponent("Generated.swift")
+            try original.write(to: source, atomically: true, encoding: .utf8)
+            context.excludedSourcePaths = [source.path]
+        } else {
+            source = fixture.source
+        }
+        let manifest = BuildSourceManifest(context: context)
+        let before = try manifest.snapshot()
+        try manifest.prepare()
+        try original.write(to: source, atomically: true, encoding: .utf8)
+        let after = try manifest.snapshot()
+
+        #expect(before.stamps != after.stamps)
+        #expect(before.digests == after.digests)
+        if excluded {
+            #expect(try manifest.record())
+            #expect(try manifest.validate(after) != nil)
+        } else {
+            let failure = try #require(throws: EmberError.self) { try manifest.record() }
+            #expect(failure.reason.contains("Swift sources changed during the build"))
+            #expect(failure.reason.contains(source.path))
+            #expect(failure.reason.contains("--exclude"))
+        }
+    }
+
+    @Test func legacyInProgressProofWithoutStampsRequiresNewPreparation() async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        let manifest = fixture.manifest
+        try manifest.prepare()
+        let data = try Data(contentsOf: manifest.url)
+        var state = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var building = try #require(state["building"] as? [String: Any])
+        var inputs = try #require(building["inputs"] as? [String: Any])
+        #expect(inputs.removeValue(forKey: "stamps") != nil)
+        building["inputs"] = inputs
+        state["building"] = building
+        try JSONSerialization.data(withJSONObject: state).write(to: manifest.url, options: .atomic)
+
+        let failure = try #require(throws: EmberError.self) { try manifest.record() }
+        #expect(failure.recovery == .rebuild)
+        #expect(failure.reason.contains("did not record source metadata"))
+        #expect(failure.reason.contains("xcode prepare"))
+
+        try manifest.prepare()
+        #expect(try manifest.record())
+        #expect(try manifest.validate(manifest.snapshot()) != nil)
+    }
+
+    @Test func generatedSourcesAreSkippedForProofButRetainedForSafety() async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        let generated = fixture.sources.appendingPathComponent("Generated")
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: true)
+        let existing = generated.appendingPathComponent("Existing.swift").standardizedFileURL
+        let added = generated.appendingPathComponent("Added.swift").standardizedFileURL
+        try "let value = 1".write(to: existing, atomically: true, encoding: .utf8)
+
+        var context = fixture.context
+        context.excludedSourcePaths = [generated.path]
+        let manifest = BuildSourceManifest(context: context)
+        try manifest.prepare()
+        try "let value = 2".write(to: existing, atomically: true, encoding: .utf8)
+        try Data([0xFF]).write(to: added)
+        // Both the rewrite and the unreadable-as-Swift addition are out of
+        // scope for the build proof. Startup still reads safety sources.
+        #expect(try manifest.record())
+        #expect(throws: EmberError.self) { try manifest.snapshot() }
+
+        try "let another = 3".write(to: added, atomically: true, encoding: .utf8)
+        let snapshot = try manifest.snapshot()
+        #expect(try manifest.validate(snapshot) != nil)
+        #expect(snapshot.watched.keys == [fixture.source.standardizedFileURL: original].keys)
+        #expect(snapshot.excluded == [existing: "let value = 2", added: "let another = 3"])
+
+        var withoutExclusions = context
+        withoutExclusions.excludedSourcePaths = []
+        let fullManifest = BuildSourceManifest(context: withoutExclusions)
+        #expect(throws: EmberError.self) { try fullManifest.validate(fullManifest.snapshot()) }
+    }
+
+    @Test func priorProofCanOmitNewlyExcludedPathsWithoutRequiringNewUUIDs() async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        let generated = fixture.sources.appendingPathComponent("Generated.swift")
+        try "let generated = true".write(to: generated, atomically: true, encoding: .utf8)
+        // Simulate a build that included this file under the old proof scope.
+        try FileManager.default.removeItem(atPath: fixture.context.linkTarget)
+        try fixture.manifest.prepare()
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: fixture.context.linkTarget)
+        try fixture.manifest.record()
+
+        var context = fixture.context
+        context.excludedSourcePaths = [generated.path]
+        let manifest = BuildSourceManifest(context: context)
+        try "let generated = false".write(to: generated, atomically: true, encoding: .utf8)
+        #expect(try manifest.validate(manifest.snapshot()) != nil)
+        try fixture.manifest.prepare()
+        try "let generated = true".write(to: generated, atomically: true, encoding: .utf8)
+        #expect(try manifest.record())
+    }
+
+    @Test func inTreeXcodeOutputsAreSkippedEvenWhenCreatedDuringTheBuild() async throws {
+        let fixture = try await StartupFixture.build(original)
+        defer { fixture.stop() }
+        let derived = fixture.sources.appendingPathComponent("DerivedData")
+        let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App")
+        var context = fixture.context
+        context.buildOutputPaths = project.buildOutputPaths(
+            from: ["SRCROOT": fixture.sources.path, "DERIVED_DATA_DIR": derived.path],
+            sourceRoots: context.sourceRoots)
+        let manifest = BuildSourceManifest(context: context)
+        try manifest.prepare()
+        let generated = derived.appendingPathComponent("Build/Intermediates.noindex/GeneratedAssetSymbols.swift")
+        let checkout = derived.appendingPathComponent("SourcePackages/checkouts/Package/Sources/Helper.swift")
+        for output in [generated, checkout] {
+            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try Data([0xFF]).write(to: output)
+        }
+        #expect(try manifest.record())
+        let snapshot = try manifest.snapshot()
+        #expect(try manifest.validate(snapshot) != nil)
+        #expect(snapshot.watched.count == 1)
+        #expect(snapshot.excluded.isEmpty)
+        #expect(Doctor.watchedModules(context: context) == [context.moduleName])
+
+        let watcher = FileWatcher(roots: [fixture.sources], excluding: [derived])
+        watcher.prime(from: snapshot)
+        try Data([0xFE]).write(to: generated, options: .atomic)
+        #expect(try watcher.poll().isEmpty)
     }
 
     @Test func aStaleUUIDIsRejectedEvenWhenTheSourcesMatch() async throws {
@@ -143,6 +298,60 @@ struct StartupBaselineTests {
         #expect(failure?.recovery == .rebuild)
         #expect(failure?.subject == fixture.manifest.url.path)
     }
+}
+
+@Test(arguments: [false, true])
+func startupRetriesWhenAFileChangesDuringCapture(keepsChanging: Bool) throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("Subject.swift").standardizedFileURL
+    try "let value = 0".write(to: file, atomically: true, encoding: .utf8)
+
+    var scans = 0
+    func scan() throws -> [URL: SourceFileStamp] {
+        scans += 1
+        if scans == 2 || (keepsChanging && scans.isMultiple(of: 2)) {
+            try "let value = \(scans)".write(to: file, atomically: true, encoding: .utf8)
+        }
+        return try FileWatcher.scan(roots: [root])
+    }
+
+    if keepsChanging {
+        let failure = try #require(throws: EmberError.self) {
+            try SourceSnapshot.captureForStartup(scan: scan)
+        }
+        #expect(scans == 6)
+        #expect(failure.recovery == .retry)
+        #expect(failure.reason.contains(file.path))
+    } else {
+        let snapshot = try SourceSnapshot.captureForStartup(scan: scan)
+        #expect(scans == 4)
+        #expect(snapshot.watched[file] == "let value = 2")
+        #expect(snapshot.stamps == (try FileWatcher.scan(roots: [root])))
+    }
+}
+
+@Test(arguments: [false, true])
+func startupDoesNotRetryReadingFailures(invalidUTF8: Bool) throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("Subject.swift")
+    try Data([0xFF]).write(to: file)
+
+    var scans = 0
+    let failure = try #require(throws: EmberError.self) {
+        try SourceSnapshot.captureForStartup {
+            scans += 1
+            let stamps = try FileWatcher.scan(roots: [root])
+            if !invalidUTF8 { try FileManager.default.removeItem(at: file) }
+            return stamps
+        }
+    }
+    #expect(scans == 1)
+    #expect(failure.recovery == .configure)
+    #expect(failure.reason.contains(file.standardizedFileURL.path))
 }
 
 private struct StartupFixture {

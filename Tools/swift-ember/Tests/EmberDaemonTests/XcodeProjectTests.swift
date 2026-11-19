@@ -113,3 +113,31 @@ private let appSettings = [
     }
     #expect(platformError.reason.contains("PLATFORM_NAME"))
 }
+
+@Test func xcodeIgnoresInTreeOutputsUsingSchemeOrTerminalSettings() {
+    let root = "/Projects/App"
+    let derived = root + "/Local Build"
+    let settings = [
+        "SRCROOT": root,
+        "BUILT_PRODUCTS_DIR": derived + "/Build/Products/Debug-iphonesimulator",
+        "OBJROOT": derived + "/Build/Intermediates.noindex",
+        "TARGET_BUILD_DIR": root + "/Installed Products",
+        "DERIVED_FILE_DIR": root + "/Custom Generated",
+        "TARGET_TEMP_DIR": root + "/Custom Generated/Temp",
+        "SYMROOT": root,
+    ]
+    let scheme = XcodeProject(container: .project(root + "/App.xcodeproj"), scheme: "App")
+    let terminal = XcodeProject(container: scheme.container, scheme: "App", derivedDataPath: derived)
+    let expected = [root + "/Custom Generated", root + "/Installed Products", derived]
+    #expect(scheme.buildOutputPaths(from: settings, sourceRoots: [root]) == expected)
+    #expect(terminal.buildOutputPaths(from: settings, sourceRoots: [root]) == expected)
+    #expect(scheme.buildOutputPaths(from: settings, sourceRoots: [root + "/Sources"]).isEmpty)
+
+    let withProjectLocalIntermediates = [
+        "SRCROOT": root,
+        "BUILT_PRODUCTS_DIR": root + "/Products",
+        "OBJROOT": root + "/Intermediates",
+    ]
+    #expect(scheme.buildOutputPaths(from: withProjectLocalIntermediates, sourceRoots: [root])
+        == [root + "/Intermediates", root + "/Products"])
+}

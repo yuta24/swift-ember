@@ -14,8 +14,9 @@ public enum Watch {
     ) async throws {
         try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
-        let excluded = context.excludedSourcePaths.map { URL(fileURLWithPath: $0) }
-        let sourceFilter = SourcePathFilter(excluding: excluded)
+        let excluded = context.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) }
+        let sourceFilter = SourcePathFilter(excluding: context.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
+        let buildOutputs = SourcePathFilter(excluding: context.buildOutputPaths.map { URL(fileURLWithPath: $0) })
 
         // `doctor` checks this and `watch` did not, so pointing it at a
         // product that had never been built started a normal-looking session
@@ -98,6 +99,9 @@ public enum Watch {
         try await coordinator.announceSession()
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
+        if !context.buildOutputPaths.isEmpty {
+            print("ignoring Xcode build outputs: \(context.buildOutputPaths.joined(separator: ", "))")
+        }
         if let device = context.deviceIdentifier {
             print("targeting physical device \(device) through CoreDevice")
         } else if let simulator = context.simulatorIdentifier {
@@ -201,12 +205,12 @@ public enum Watch {
                     try rebuildRunner.throwIfStopping()
                     attempt += 1
                     let before = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let beforeUUIDs = Set(await coordinator.currentBuildUUIDs())
                     try await rebuildRunner.run(rebuildCommand, in: directory)
                     try rebuildRunner.throwIfStopping()
                     let built = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let rebuiltUUIDs = Set(await coordinator.currentBuildUUIDs())
                     guard !rebuiltUUIDs.isEmpty, rebuiltUUIDs != beforeUUIDs,
                           rebuiltUUIDs != previousBuildUUIDs else {
@@ -244,7 +248,7 @@ public enum Watch {
 
                     try rebuildRunner.throwIfStopping()
                     let current = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     if current != built {
                         print("sources changed while the rebuilt app was launching; rebuilding again")
                         print("")
