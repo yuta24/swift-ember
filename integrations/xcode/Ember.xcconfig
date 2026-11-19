@@ -17,6 +17,7 @@ SWIFT_OPTIMIZATION_LEVEL = -Onone
 // visibility; without testability those keys never reach the dynamic symbol
 // table and a patch cannot bind to them at all. DESIGN.md 5.4.
 SWIFT_ENABLE_TESTABILITY = YES
+ENABLE_TESTABILITY = YES
 
 // Two hidden frontend options, so both need -Xfrontend; the bare spellings are
 // rejected by the driver. Neither is a stable interface, which is why
@@ -29,7 +30,8 @@ SWIFT_ENABLE_TESTABILITY = YES
 // cannot touch anything private -- which in real code is most method bodies,
 // since most of them read private state. Measured in DESIGN.md 7.3b: 8 of 46
 // ordinary body edits reach the process without it, 31 of 46 with.
-OTHER_SWIFT_FLAGS = $(inherited) -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports
+EMBER_SWIFT_FLAGS = -Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports
+OTHER_SWIFT_FLAGS = $(inherited) $(EMBER_SWIFT_FLAGS)
 
 // Only for the app target's own code. If you link the EmberRuntime package
 // product, its dialling and loading code is enabled by the package manifest
@@ -40,7 +42,8 @@ OTHER_SWIFT_FLAGS = $(inherited) -Xfrontend -enable-implicit-dynamic -Xfrontend 
 //
 // The daemon does forward it to the patch compile, so a `#if EMBER_ENABLED`
 // inside a patched body takes the same branch it did in the app.
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) EMBER_ENABLED
+EMBER_SWIFT_CONDITIONS = EMBER_ENABLED
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(EMBER_SWIFT_CONDITIONS)
 
 // Read back by `swift-ember doctor` to tell "this project was configured" from
 // "these settings happen to be on".

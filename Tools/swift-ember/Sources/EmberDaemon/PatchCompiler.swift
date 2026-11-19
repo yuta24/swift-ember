@@ -298,21 +298,21 @@ private final class Collected: @unchecked Sendable {
     }
 }
 
-enum Subprocess {
+package enum Subprocess {
     struct Result {
         let exitCode: Int32
         let combinedOutput: String
     }
 
-    struct SeparatedResult {
-        let exitCode: Int32
-        let standardOutput: String
-        let standardError: String
+    package struct SeparatedResult {
+        package let exitCode: Int32
+        package let standardOutput: String
+        package let standardError: String
     }
 
     /// For callers that must not have the two streams interleaved, such as
     /// anything parsing structured output.
-    static func runSeparated(
+    package static func runSeparated(
         _ executable: String, arguments: [String],
         environment: [String: String]? = nil
     ) throws -> SeparatedResult {
