@@ -85,7 +85,7 @@ jobs:
     name: XcodeApp Simulator smoke test
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: macos-26
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 

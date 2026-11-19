@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SCHEME = "XcodeApp"
 BEFORE = "775 cents"
 AFTER = "Ember patched"
-STARTUP_TIMEOUT = 90
+# CI Simulators can take minutes to answer simctl right after booting.
+SIMCTL_TIMEOUT = 300
+STARTUP_TIMEOUT = 180
 
 
 class SmokeFailure(RuntimeError):
@@ -66,13 +68,13 @@ def scheme_action(action, ember, project, device, logs):
         # The watcher writes its session into the installed app's data container.
         product = Path(environment["TARGET_BUILD_DIR"]) / environment["FULL_PRODUCT_NAME"]
         step("simctl install", ("xcrun", "simctl", "install", device, product),
-             timeout=90, log="install.log")
+             timeout=SIMCTL_TIMEOUT, log="install.log")
         bundle = environment["PRODUCT_BUNDLE_IDENTIFIER"]
         for attempt in (1, 2):
             try:
                 step("simctl get_app_container",
                      ("xcrun", "simctl", "get_app_container", device, bundle, "data"),
-                     timeout=15, log=f"app-container-{attempt}.log")
+                     timeout=120, log=f"app-container-{attempt}.log")
                 break
             except SmokeFailure as error:
                 if attempt == 2:
@@ -162,7 +164,7 @@ def smoke(work, cache, logs):
     build_started = False
     cleanup_errors = []
 
-    def cleanup_command(command, *, log, timeout=15):
+    def cleanup_command(command, *, log, timeout=60):
         try:
             run(command, timeout=timeout, log=logs / log)
         except (SmokeFailure, OSError) as error:
@@ -177,7 +179,7 @@ def smoke(work, cache, logs):
         # A first boot on a fresh CI image routinely takes a few minutes.
         for attempt in (1, 2):
             try:
-                run(boot_command, timeout=240, log=logs / f"boot-{attempt}.log")
+                run(boot_command, timeout=SIMCTL_TIMEOUT, log=logs / f"boot-{attempt}.log")
                 break
             except SmokeFailure as error:
                 if attempt == 2:
@@ -191,7 +193,8 @@ def smoke(work, cache, logs):
              "-derivedDataPath", work / "DerivedData", "-clonedSourcePackagesDirPath", work / "SourcePackages",
              "-packageCachePath", work / "PackageCache", "-resultBundlePath", logs / "XcodeApp.xcresult",
              f"PRODUCT_BUNDLE_IDENTIFIER={bundle}", "build"),
-            timeout=300, log=logs / "xcodebuild.log")
+            # Includes the Scheme actions: install, app container lookup and watcher startup.
+            timeout=1200, log=logs / "xcodebuild.log")
         actions = actions_log.read_text() if actions_log.exists() else ""
         for action in ("prepare", "record", "start"):
             if f"Passed xcode {action}" not in actions.splitlines():
@@ -204,22 +207,22 @@ def smoke(work, cache, logs):
         watcher = watchers[0]
 
         launch_log = logs / "launch.log"
-        run((*simctl, "launch", device, bundle), log=launch_log)
+        run((*simctl, "launch", device, bundle), timeout=SIMCTL_TIMEOUT, log=launch_log)
         launched = re.search(rf"^{re.escape(bundle)}: (\d+)$", launch_log.read_text(), re.MULTILINE)
         if not launched:
             raise SmokeFailure(f"Could not identify the launched app process; see {launch_log}")
         pid = int(launched[1])
         connected = f"connected  pid {pid}, {bundle}"
-        wait_for(connected, 30, lambda: connected in watcher.read_text())
+        wait_for(connected, 120, lambda: connected in watcher.read_text())
 
         def rendered(label, phase):
             screenshot = logs / f"{phase}.png"
-            run((*simctl, "io", device, "screenshot", screenshot), timeout=10)
+            run((*simctl, "io", device, "screenshot", screenshot), timeout=60)
             text = run((ocr, screenshot), timeout=25)
             (logs / f"{phase}.txt").write_text(text)
             return re.search(rf"\b{re.escape(label)}\b", " ".join(text.split()), re.IGNORECASE)
 
-        wait_for(f"the original '{BEFORE}' on screen", 25, lambda: rendered(BEFORE, "before"))
+        wait_for(f"the original '{BEFORE}' on screen", 120, lambda: rendered(BEFORE, "before"))
         print("Saving a change to Cart.subtotalLabel()", flush=True)
         subject = project.parent / "Sources/Cart.swift"
         original = r'"\(subtotalCents) cents"'
@@ -230,9 +233,9 @@ def smoke(work, cache, logs):
         temporary.write_text(source.replace(original, f'"{AFTER}"'))
         temporary.replace(subject)
 
-        wait_for("the daemon's hot reload acknowledgement", 60,
+        wait_for("the daemon's hot reload acknowledgement", 180,
                  lambda: "hot reloaded" in watcher.read_text())
-        wait_for(f"'{AFTER}' on screen", 25, lambda: rendered(AFTER, "after"))
+        wait_for(f"'{AFTER}' on screen", 120, lambda: rendered(AFTER, "after"))
         os.kill(pid, 0)  # The process launched before the edit is still alive.
         print(f"Verified {BEFORE!r} → {AFTER!r} in XcodeApp (PID {pid})", flush=True)
     except (SmokeFailure, OSError, KeyboardInterrupt) as error:
@@ -251,7 +254,7 @@ def smoke(work, cache, logs):
             cleanup_command((*simctl, "io", device, "screenshot", logs / "failure.png"),
                             log="failure-screenshot.log")
             cleanup_command((*simctl, "spawn", device, "log", "show", "--last", "5m", "--style", "compact",
-                             "--predicate", 'process == "XcodeApp"'), log="simulator-app.log", timeout=20)
+                             "--predicate", 'process == "XcodeApp"'), log="simulator-app.log", timeout=60)
         if (logs / "install.log").exists():
             # Uninstall also terminates the app. Its unique ID belongs only to this run.
             cleanup_command((*simctl, "uninstall", device, bundle), log="uninstall.log")
