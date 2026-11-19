@@ -236,7 +236,9 @@ def main():
     os.environ.setdefault("CLANG_MODULE_CACHE_PATH", str(cache / "module-cache"))
     os.environ.setdefault("SWIFTPM_MODULECACHE_OVERRIDE", str(cache / "module-cache"))
     if not os.environ.get("DEVELOPER_DIR"):
-        os.environ["DEVELOPER_DIR"] = run((ROOT / "scripts/select-xcode.sh",)).strip()
+        os.environ["DEVELOPER_DIR"] = run((ROOT / "scripts/select-xcode.sh",),
+                                            # Probes every installed Xcode.
+                                            timeout=300).strip()
     with tempfile.TemporaryDirectory(prefix="project-", dir=cache) as directory:
         smoke(Path(directory), cache, logs)
 

@@ -89,6 +89,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Probing every Xcode on a fresh image is slow; choose once, as a step of
+      # its own, so a failure here reads as a toolchain problem.
+      - name: Select Xcode
+        run: |
+          developer_dir="$(scripts/select-xcode.sh)"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+
       - name: Verify save-to-screen hot reload
         run: python3 scripts/simulator-smoke.py
 
