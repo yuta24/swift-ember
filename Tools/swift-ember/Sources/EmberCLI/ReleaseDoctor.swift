@@ -136,7 +136,7 @@ public enum ReleaseDoctor {
         }
     }
 
-    private static func inspect(_ image: URL) throws -> [String] {
+    static func inspect(_ image: URL) throws -> [String] {
         let commands = try tool("otool", ["-arch", "all", "-l", image.path])
         guard commands.contains("Load command 0") else {
             throw InspectionError("otool returned no Mach-O load commands")
@@ -145,26 +145,51 @@ public enum ReleaseDoctor {
             let fields = line.split(whereSeparator: \.isWhitespace)
             return fields.count == 2 && fields[0] == "sectname" ? fields[1] : nil
         }
-        let symbols = try tool("nm", ["-arch", "all", image.path])
-        let strings = try tool("strings", ["-a", image.path])
+        let symbols = try tool("nm", ["-arch", "all", image.path]).split(separator: "\n").compactMap {
+            $0.split(whereSeparator: \.isWhitespace).last
+        }
         var findings: [String] = []
-        if symbols.split(separator: "\n").contains(where: { line in
-            guard let name = line.split(whereSeparator: \.isWhitespace).last else { return false }
-            return (name.hasPrefix("_$s") || name.hasPrefix("_$S")) && name.hasSuffix("Tx")
+        if symbols.contains(where: { name in
+            (name.hasPrefix("_$s") || name.hasPrefix("_$S")) && name.hasSuffix("Tx")
         }) {
             findings.append("Swift dynamic replacement keys")
         }
         if sections.contains("__swift5_replace") || sections.contains("__swift5_replac2") {
             findings.append("Swift dynamic replacement sections")
         }
-        // These types only compile with EMBER_ENABLED. Swift's metadata can
-        // retain their names even if the linker stripped their symbols.
-        let runtimeTypes = ["EmberClient", "EmberDeviceClient", "RuntimePatchApplier"]
-        let literals = Set(strings.split(separator: "\n"))
-        if runtimeTypes.contains(where: { symbols.contains($0) || literals.contains(Substring($0)) }) {
+        if try containsEnabledRuntime(image, symbols: symbols, sections: sections) {
             findings.append("enabled Ember runtime")
         }
         return findings
+    }
+
+    private static func containsEnabledRuntime(_ image: URL, symbols: [Substring], sections: [Substring]) throws -> Bool {
+        let module = "EmberRuntime"
+        let moduleIdentifier = "\(module.utf8.count)\(module)"
+        // These top-level classes only compile with EMBER_ENABLED.
+        let runtimeTypes = ["EmberClient", "EmberDeviceClient", "RuntimePatchApplier"]
+        let descriptors = symbols.filter { name in
+            // The first identifier in a top-level type descriptor is the
+            // module. The class name can reuse words from it via substitutions.
+            (name.hasPrefix("_$s\(moduleIdentifier)") || name.hasPrefix("_$S\(moduleIdentifier)"))
+                && name.hasSuffix("Mn")
+        }
+        if !descriptors.isEmpty {
+            let expected = Set(runtimeTypes.map { "nominal type descriptor for \(module).\($0)"[...] })
+            let demangled = try tool("swift-demangle", ["--compact"] + descriptors.map(String.init))
+            if demangled.split(separator: "\n").contains(where: expected.contains) { return true }
+        }
+
+        // Darwin keeps the Objective-C runtime names of these Swift classes
+        // in __objc_classname even after stripping. Top-level class names in
+        // this metadata use the legacy length-prefixed mangling.
+        guard sections.contains("__objc_classname") else { return false }
+        let expected = Set(runtimeTypes.map { "_TtC\(moduleIdentifier)\($0.utf8.count)\($0)"[...] })
+        let classNames = try tool("otool", ["-arch", "all", "-v", "-s", "__TEXT", "__objc_classname", image.path])
+        return classNames.split(separator: "\n").contains { line in
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            return fields.count == 2 && expected.contains(fields[1])
+        }
     }
 
     private static func tool(_ name: String, _ arguments: [String]) throws -> String {
