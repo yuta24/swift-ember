@@ -27,6 +27,25 @@ private let appSettings = [
     #expect(output.linkTarget == "\(products)/App.app/App.debug.dylib")
 }
 
+@Test func schemeBuildResolvesTheSDKDirectoryWhenSDKROOTIsAName() throws {
+    let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App")
+    let sdk = "/Xcode SDKs/iPhoneSimulator27.2.sdk"
+    var settings = appSettings
+    settings["PRODUCT_MODULE_NAME"] = "App"
+    settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.example.App"
+    settings["SDKROOT"] = "iphonesimulator27.2"
+    settings["SDK_DIR"] = sdk
+    let action = try project.resolve(sourceRoots: ["/Sources"], schemeBuildSettings: settings,
+                                     allowsMissingSchemeBinary: true)
+    #expect(action.context.sdkPath == sdk)
+
+    settings["SDKROOT"] = sdk
+    settings["SDK_DIR"] = nil
+    let absolute = try project.resolve(sourceRoots: ["/Sources"], schemeBuildSettings: settings,
+                                       allowsMissingSchemeBinary: true)
+    #expect(absolute.context.sdkPath == sdk)
+}
+
 @Test func xcodeUsesTargetBuildDirectoryForAnAppOutsideBuiltProducts() throws {
     let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App")
     var settings = appSettings

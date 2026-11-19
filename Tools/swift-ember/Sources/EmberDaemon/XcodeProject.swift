@@ -160,13 +160,20 @@ public struct XcodeProject: Sendable {
                         key.replacingOccurrences(of: "SWIFT_UPCOMING_FEATURE_", with: ""))]
         }
 
+        // Scheme actions can export an SDK name in SDKROOT and the resolved
+        // directory separately in SDK_DIR. swiftc's -sdk needs the directory.
+        let sdkRoot = try require("SDKROOT")
+        let sdkPath = if sdkRoot.hasPrefix("/") { sdkRoot } else { try require("SDK_DIR") }
+        guard sdkPath.hasPrefix("/") else {
+            throw schemeError("Xcode did not report an absolute SDK directory for SDKROOT '\(sdkRoot)'.")
+        }
         let roots = sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots
         let context = BuildContext(
             moduleName: module,
             swiftCompilerPath: try which("swiftc"),
             swiftCompilerVersion: try compilerVersion(),
             targetTriple: triple,
-            sdkPath: try require("SDKROOT"),
+            sdkPath: sdkPath,
             sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
             appBinaryPath: products.executable,
             // The application's own .swiftmodule is what a patch imports.
