@@ -127,9 +127,7 @@ public struct XcodeProject: Sendable {
         // harmless on a patch: implicit dynamic makes the patch's own
         // declarations replaceable, which nothing looks at, and private imports
         // is about the module being imported.
-        flags += (settings["OTHER_SWIFT_FLAGS"] ?? "")
-            .split(whereSeparator: \.isWhitespace)
-            .map(String.init)
+        flags += Self.parseSettingList(settings["OTHER_SWIFT_FLAGS"])
 
         // `EFFECTIVE_SWIFT_VERSION` is what Xcode resolved and is already in
         // the form the compiler accepts. `SWIFT_VERSION` is the raw setting:
@@ -324,53 +322,50 @@ public struct XcodeProject: Sendable {
         return nil
     }
 
-    /// Xcode reports search paths as one space-separated string, with any
-    /// entry containing spaces quoted.
-    ///
-    /// Scanned rather than split on parity. `String.split` drops empty pieces,
-    /// so a value beginning with a quoted path lost its leading empty piece,
-    /// every index's parity flipped, and the quoted path came back shredded on
-    /// its spaces. `swiftc` ignores a `-F` that does not exist, so the result
-    /// was "no such module" -- the symptom these paths were added to prevent,
-    /// now triggered by a space in a directory name.
-    ///
-    /// A trailing `/**` means "search recursively" to Xcode and nothing to
-    /// `swiftc`, so it is trimmed to the directory itself rather than passed
-    /// through as a path that cannot exist.
-    static func parseSearchPaths(_ value: String?) -> [String] {
-        guard let value, !value.isEmpty else { return [] }
+    /// Splits a resolved Xcode list setting. Swift Build separates on unquoted
+    /// ASCII whitespace and treats a backslash as escaping the next character
+    /// even inside single or double quotes.
+    private static func parseSettingList(_ value: String?) -> [String] {
+        guard let value else { return [] }
 
-        var paths: [String] = []
-        var current = ""
-        var quoted = false
-        var escaped = false
-        for character in value {
-            if escaped {
-                current.append(character)
-                escaped = false
+        var arguments: [String] = []
+        var argument = ""
+        var hasArgument = false
+        var quote: Unicode.Scalar?
+        var scalars = value.unicodeScalars.makeIterator()
+        while let scalar = scalars.next() {
+            if quote == nil, scalar == " " || ("\t"..."\r").contains(scalar) {
+                if hasArgument {
+                    arguments.append(argument)
+                    argument = ""
+                    hasArgument = false
+                }
                 continue
             }
-            switch character {
+
+            // Even an empty quoted string is an argument.
+            hasArgument = true
+            switch scalar {
             case "\\":
-                // Xcode escapes a quote inside a quoted path. Treating the
-                // backslash as content left `quoted` toggled by the quote after
-                // it, and the rest of the value -- every remaining path --
-                // collapsed into one string naming a directory that does not
-                // exist. `swiftc` ignores a `-F` that is not there, so the
-                // symptom was "no such module", which is what this parser was
-                // written to prevent.
-                escaped = true
-            case "\"":
-                quoted.toggle()
-            case " " where !quoted:
-                if !current.isEmpty { paths.append(current); current = "" }
+                argument.unicodeScalars.append(scalars.next() ?? scalar)
+            case "\"", "'":
+                if quote == scalar {
+                    quote = nil
+                } else if quote == nil {
+                    quote = scalar
+                } else {
+                    argument.unicodeScalars.append(scalar)
+                }
             default:
-                current.append(character)
+                argument.unicodeScalars.append(scalar)
             }
         }
-        if !current.isEmpty { paths.append(current) }
+        if hasArgument { arguments.append(argument) }
+        return arguments
+    }
 
-        return paths.flatMap(expandingRecursive)
+    static func parseSearchPaths(_ value: String?) -> [String] {
+        parseSettingList(value).filter { !$0.isEmpty }.flatMap(expandingRecursive)
     }
 
     /// `/**` means "and every directory under it" to Xcode, which enumerates

@@ -60,6 +60,33 @@ private let appSettings = [
     #expect(regular.linkTarget == "\(products)/App.app/App")
 }
 
+@Test func schemeBuildPreservesQuotedAndEscapedCompilerArguments() throws {
+    let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App")
+    var settings = appSettings
+    settings["PRODUCT_NAME"] = "App"
+    settings["PRODUCT_BUNDLE_IDENTIFIER"] = "example.App"
+    settings["SDKROOT"] = "/SDK"
+    settings["SRCROOT"] = "/Source"
+    settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = "DEBUG"
+    settings["OTHER_SWIFT_FLAGS"] =
+        #"-Xcc "-I/path with space" -D 'FLAG' -I /another\ path -F/quoted" suffix" -Xcc "-DNAME=\"some text\"""#
+        + #" -Xcc "" -I '/日本語/Owner\'s\\Headers'"#
+    settings["SWIFT_INCLUDE_PATHS"] = "'/Swift Modules'\t/More\\ Modules"
+    settings["FRAMEWORK_SEARCH_PATHS"] = #""/Frameworks \"Debug\"" '/More Frameworks'"#
+
+    let context = try project.resolve(sourceRoots: [], schemeBuildSettings: settings,
+                                      allowsMissingSchemeBinary: true).context
+    #expect(context.extraCompilerFlags == [
+        "-D", "DEBUG", "-Xcc", "-I/path with space", "-D", "FLAG",
+        "-I", "/another path", "-F/quoted suffix", "-Xcc", #"-DNAME="some text""#,
+        "-Xcc", "", "-I", #"/日本語/Owner's\Headers"#,
+    ])
+    #expect(context.moduleSearchPaths == [
+        products, "\(products)/App.swiftmodule", "/Swift Modules", "/More Modules",
+    ])
+    #expect(context.frameworkSearchPaths == [products, #"/Frameworks "Debug""#, "/More Frameworks"])
+}
+
 @Test func incompleteSchemeBuildSettingsDiagnoseTheMissingSetting() throws {
     let project = XcodeProject(container: .project("App.xcodeproj"), scheme: "App")
     let targetError = try #require(throws: EmberError.self) {
