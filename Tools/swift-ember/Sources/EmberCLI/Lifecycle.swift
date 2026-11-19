@@ -9,6 +9,22 @@ public enum Lifecycle {
     private static let recordEnvironment = "SWIFT_EMBER_SESSION_RECORD"
     private static let patchDirectoryEnvironment = "SWIFT_EMBER_PATCH_DIRECTORY"
 
+    public struct StartupProgress: Sendable {
+        fileprivate static let prefix = "[STARTUP] "
+        private let started = ContinuousClock.now
+
+        public init?() {
+            guard ProcessInfo.processInfo.environment[Lifecycle.recordEnvironment] != nil else { return nil }
+        }
+
+        public func report(_ stage: String) {
+            let elapsed = started.duration(to: .now).components
+            let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            let line = Self.prefix + String(format: "+%.3fs ", seconds) + stage
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+    }
+
     public struct Session: Sendable {
         public let name: String
         public let recordURL: URL
@@ -138,6 +154,7 @@ public enum Lifecycle {
         FileManager.default.createFile(atPath: session.logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: session.logURL)
         defer { try? log.close() }
+        try log.write(contentsOf: Data((StartupProgress.prefix + "spawning background watcher\n").utf8))
 
         var environment = backgroundEnvironment(from: ProcessInfo.processInfo.environment)
         environment[recordEnvironment] = session.recordURL.path
@@ -171,7 +188,7 @@ public enum Lifecycle {
             var status: Int32 = 0
             if waitpid(pid, &status, WNOHANG) == pid {
                 removeSessionFiles(session)
-                throw LifecycleError.startup("exited with wait status \(status)", session.logURL)
+                throw startupError("exited with wait status \(status)", log: session.logURL)
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while Date() < deadline
@@ -179,7 +196,16 @@ public enum Lifecycle {
         _ = kill(pid, SIGTERM)
         waitForChildExit(pid, timeout: 5)
         removeSessionFiles(session)
-        throw LifecycleError.startup("timed out while initializing", session.logURL)
+        throw startupError("timed out while initializing after \(options.startupTimeout)s", log: session.logURL)
+    }
+
+    private static func startupError(_ reason: String, log: URL) -> LifecycleError {
+        let latest = (try? Data(contentsOf: log)).flatMap { data in
+            String(decoding: data, as: UTF8.self).split(separator: "\n")
+                .last { $0.hasPrefix(StartupProgress.prefix) }
+        }
+        let detail = latest.map { "\nlast startup stage: \($0.dropFirst(StartupProgress.prefix.count))" } ?? ""
+        return .startup(reason + detail, log)
     }
 
     /// A daemon outlives the Xcode action that launched it. Keep only the

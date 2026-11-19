@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCHEME = "XcodeApp"
 BEFORE = "775 cents"
 AFTER = "Ember patched"
+STARTUP_TIMEOUT = 90
 
 
 class SmokeFailure(RuntimeError):
@@ -47,6 +48,45 @@ def run(args, *, timeout=30, log=None, stdin=None):
         return stdout or ""
 
 
+def scheme_action(action, ember, project, device, logs):
+    def step(label, args, *, timeout, log):
+        print(f"Running {label}", flush=True)
+        started = time.monotonic()
+        try:
+            return run(args, timeout=timeout, log=logs / log)
+        finally:
+            print(f"{label} took {time.monotonic() - started:.2f}s", flush=True)
+
+    environment = os.environ
+    destination = environment["TARGET_DEVICE_IDENTIFIER"]
+    if destination != device:
+        raise SmokeFailure(f"Scheme destination {destination} does not match Simulator {device}")
+    sources = Path(environment["SRCROOT"])
+    if action == "start":
+        # The watcher writes its session into the installed app's data container.
+        product = Path(environment["TARGET_BUILD_DIR"]) / environment["FULL_PRODUCT_NAME"]
+        step("simctl install", ("xcrun", "simctl", "install", device, product),
+             timeout=90, log="install.log")
+        bundle = environment["PRODUCT_BUNDLE_IDENTIFIER"]
+        for attempt in (1, 2):
+            try:
+                step("simctl get_app_container",
+                     ("xcrun", "simctl", "get_app_container", device, bundle, "data"),
+                     timeout=15, log=f"app-container-{attempt}.log")
+                break
+            except SmokeFailure as error:
+                if attempt == 2:
+                    raise
+                print(f"Retrying app container lookup after {error}", flush=True)
+                time.sleep(1)
+
+    step(f"xcode {action}", (ember, "xcode", action, "--no-config", "--project", project,
+                             "--scheme", SCHEME, "--sources", f"{sources / 'Sources'},{sources / 'Feature/Sources'}",
+                             "--startup-timeout", str(STARTUP_TIMEOUT)),
+         timeout=STARTUP_TIMEOUT + 20 if action == "start" else 30, log=f"xcode-{action}.log")
+    print(f"Passed xcode {action}", flush=True)
+
+
 def stage_project(work, ember, device, logs):
     # Preserve the relative local SwiftPM and xcconfig references in the project.
     shutil.copy2(ROOT / "Package.swift", work)
@@ -64,20 +104,11 @@ def stage_project(work, ember, device, logs):
         section = ET.Element(phase)
         build.insert(0 if phase == "PreActions" else 1, section)
         for action in actions:
-            command = shlex.join(map(str, (ember, "xcode", action, "--no-config",
-                                           "--project", project, "--scheme", SCHEME)))
-            install = ""
-            if action == "start":
-                # The watcher writes its session into the installed app's data container.
-                install = '''echo 'Installing XcodeApp'
-/usr/bin/xcrun simctl install "$TARGET_DEVICE_IDENTIFIER" "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME"
-'''
+            command = shlex.join(map(str, (sys.executable, Path(__file__).resolve(),
+                                           "--scheme-action", action, ember, project, device, logs)))
             script = f'''set -eu
 exec >> {shlex.quote(str(logs / 'scheme-actions.log'))} 2>&1
-echo 'Running xcode {action}'
-test "$TARGET_DEVICE_IDENTIFIER" = {shlex.quote(device)}
-{install}{command} --sources "$SRCROOT/Sources,$SRCROOT/Feature/Sources" --startup-timeout 45
-echo 'Passed xcode {action}'
+exec {command}
 '''
             execution = ET.SubElement(section, "ExecutionAction", {
                 "ActionType": "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction",
@@ -157,9 +188,10 @@ def smoke(work, cache, logs):
         build_started = True
         run(("xcodebuild", "-project", project, "-scheme", SCHEME, "-configuration", "Debug",
              "-destination", f"platform=iOS Simulator,id={device}",
-             "-derivedDataPath", work / "DerivedData", "-resultBundlePath", logs / "XcodeApp.xcresult",
+             "-derivedDataPath", work / "DerivedData", "-clonedSourcePackagesDirPath", work / "SourcePackages",
+             "-packageCachePath", work / "PackageCache", "-resultBundlePath", logs / "XcodeApp.xcresult",
              f"PRODUCT_BUNDLE_IDENTIFIER={bundle}", "build"),
-            timeout=180, log=logs / "xcodebuild.log")
+            timeout=300, log=logs / "xcodebuild.log")
         actions = actions_log.read_text() if actions_log.exists() else ""
         for action in ("prepare", "record", "start"):
             if f"Passed xcode {action}" not in actions.splitlines():
@@ -205,21 +237,26 @@ def smoke(work, cache, logs):
         print(f"Verified {BEFORE!r} → {AFTER!r} in XcodeApp (PID {pid})", flush=True)
     except (SmokeFailure, OSError, KeyboardInterrupt) as error:
         (logs / "failure.log").write_text(f"{error or 'interrupted'}\n")
-        cleanup_command((*simctl, "io", device, "screenshot", logs / "failure.png"),
-                        log="failure-screenshot.log")
-        cleanup_command((*simctl, "spawn", device, "log", "show", "--last", "5m", "--style", "compact",
-                         "--predicate", 'process == "XcodeApp"'), log="simulator-app.log", timeout=20)
         raise
     finally:
         if build_started:
             cleanup_command(stop, log="stop.log")
-        if actions_log.exists() and "Installing XcodeApp" in actions_log.read_text().splitlines():
+            watchers = list(watcher_logs.glob("*.log"))
+            if watchers:
+                shutil.copy2(watchers[0], logs / "watcher.log")
+            else:
+                (logs / "watcher.log").write_text(
+                    "No watcher log was created. See scheme-actions.log and xcode-start.log if present.\n")
+        if (logs / "failure.log").exists():
+            cleanup_command((*simctl, "io", device, "screenshot", logs / "failure.png"),
+                            log="failure-screenshot.log")
+            cleanup_command((*simctl, "spawn", device, "log", "show", "--last", "5m", "--style", "compact",
+                             "--predicate", 'process == "XcodeApp"'), log="simulator-app.log", timeout=20)
+        if (logs / "install.log").exists():
             # Uninstall also terminates the app. Its unique ID belongs only to this run.
             cleanup_command((*simctl, "uninstall", device, bundle), log="uninstall.log")
         if boot_requested:
             cleanup_command((*simctl, "shutdown", device), log="shutdown.log")
-        for log in watcher_logs.glob("*.log"):
-            shutil.copy2(log, logs / "watcher.log")
         if cleanup_errors:
             message = "\n".join(cleanup_errors)
             (logs / "cleanup-errors.log").write_text(f"{message}\n")
@@ -251,6 +288,10 @@ def interrupted(_signal, _frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        main()
+        if sys.argv[1:2] == ["--scheme-action"]:
+            action, ember, project, device, logs = sys.argv[2:]
+            scheme_action(action, Path(ember), Path(project), device, Path(logs))
+        else:
+            main()
     except (SmokeFailure, OSError, KeyboardInterrupt) as error:
         sys.exit(f"Simulator smoke test failed: {error or 'interrupted'}")

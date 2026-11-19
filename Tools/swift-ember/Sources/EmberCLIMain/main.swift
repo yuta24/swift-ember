@@ -42,7 +42,9 @@ do {
 
 let resolvedProject: XcodeProject.Resolved?
 let context: BuildContext
+let startupProgress = options.command == .watch ? Lifecycle.StartupProgress() : nil
 do {
+    startupProgress?.report("loading build context")
     resolvedProject = try options.resolveProject()
     context = try options.buildContext(project: resolvedProject)
 } catch let error as EmberError {
@@ -139,6 +141,7 @@ case .watch:
                 URL(fileURLWithPath: $0, isDirectory: true)
             },
             rebuildTimeout: options.rebuildTimeout,
+            startupProgress: startupProgress,
             onReady: { try Lifecycle.markReady() })
     } catch let error as EmberError {
         abort(error.description)

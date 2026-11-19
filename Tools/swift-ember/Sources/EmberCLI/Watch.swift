@@ -10,8 +10,10 @@ public enum Watch {
         rebuildCommand: String? = nil,
         rebuildDirectory: URL? = nil,
         rebuildTimeout: TimeInterval = 300,
+        startupProgress: Lifecycle.StartupProgress? = nil,
         onReady: (() throws -> Void)? = nil
     ) async throws {
+        startupProgress?.report("checking build product")
         try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
         let excluded = context.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) }
@@ -37,13 +39,16 @@ public enum Watch {
         }
 
         let manifest = BuildSourceManifest(context: context)
+        startupProgress?.report("capturing source snapshot")
         let snapshot = try manifest.snapshot()
+        startupProgress?.report("validating source manifest and Mach-O UUIDs")
         let verifiedUUIDs = try manifest.validate(snapshot)
         if verifiedUUIDs == nil {
             print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
             print("  Pre-watch source edits cannot be verified. Enable build source recording and rebuild.")
         }
 
+        startupProgress?.report("preparing IPC listener and source baselines")
         let server = try IPCServer()
         defer { server.stop() }
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
@@ -94,8 +99,12 @@ public enum Watch {
         }
         server.onDisconnect = { print("disconnected; waiting for the app to reconnect") }
         server.onEvent = { print($0) }
+        startupProgress?.report("starting IPC listener")
         let port = try await server.start()
 
+        startupProgress?.report(context.deviceIdentifier != nil
+            ? "publishing session through CoreDevice"
+            : "publishing Simulator session (simctl get_app_container)")
         try await coordinator.announceSession()
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
@@ -163,6 +172,7 @@ public enum Watch {
         }
         defer { reannounce.cancel() }
 
+        startupProgress?.report("starting file watcher")
         var termination: TerminationSignals?
         let rebuildRunner = RebuildCommand.Runner()
         let changes = AsyncStream<[FileWatcher.Change]> { continuation in
@@ -184,7 +194,9 @@ public enum Watch {
             }
         }
         defer { termination?.cancel() }
+        startupProgress?.report("writing readiness record")
         try onReady?()
+        startupProgress?.report("watcher ready")
 
         var removalGuard = RemovalGuard()
 
