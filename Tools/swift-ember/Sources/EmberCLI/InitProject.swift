@@ -12,9 +12,9 @@ struct InitProject {
     private let mainGroup: String
     private let projectConfigurationIDs: [String]
 
-    init(at project: URL) throws {
-        root = project.deletingLastPathComponent()
-        file = project.appendingPathComponent("project.pbxproj")
+    init(file: URL, root: URL) throws {
+        self.root = root
+        self.file = file
         data = try Data(contentsOf: file)
         guard let text = String(data: data, encoding: .utf8),
               let propertyList = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],

@@ -183,6 +183,142 @@ func initSchemeKeepsEveryOriginalLine(useCRLF: Bool) throws {
     }
 }
 
+@Test func initRejectsAnOutOfRootManifestBeforeReadingIt() throws {
+    try withInitPathFixture { root, outside, _, arguments in
+        let config = "../\(outside.lastPathComponent)/config.json"
+        try Data("invalid JSON".utf8).write(to: outside.appendingPathComponent("config.json"))
+        let error = #expect(throws: Options.ParseError.self) {
+            try Options.parse(arguments + ["--config", config], environment: [:], currentDirectory: root)
+        }
+        #expect(error?.description.contains(" is outside ") == true)
+    }
+}
+
+@Test(arguments: [
+    ".swift-ember.json",
+    "Ember.XcodeApp.Debug.xcconfig",
+    "XcodeApp.xcodeproj/project.pbxproj",
+    "XcodeApp.xcodeproj/xcshareddata/xcschemes/XcodeApp.xcscheme",
+])
+func initRejectsSymlinksFromManagedFilesToOutsideTheRoot(path: String) throws {
+    try withInitPathFixture { root, outside, _, arguments in
+        let manager = FileManager.default
+        let file = root.appendingPathComponent(path)
+        let external = outside.appendingPathComponent(file.lastPathComponent)
+        if path == ".swift-ember.json" {
+            try Data(#"{"project":"XcodeApp.xcodeproj","scheme":"XcodeApp"}"#.utf8).write(to: external)
+        } else if path.hasSuffix(".xcconfig") {
+            _ = try useLocalBaseConfiguration(in: root)
+            try Data("SWIFT_VERSION = 5.0\n".utf8).write(to: external)
+        } else {
+            try manager.moveItem(at: file, to: external)
+        }
+        try manager.createSymbolicLink(at: file, withDestinationURL: external)
+        let before = try Data(contentsOf: external)
+        let options = try Options.parse(arguments, environment: [:])
+        let error = #expect(throws: InitError.self) { try XcodeInit.run(options: options) }
+        #expect(error?.description.contains(" is outside ") == true)
+        #expect(try Data(contentsOf: external) == before)
+    }
+}
+
+@Test(arguments: [false, true])
+func initRejectsSymlinksInPathsToUncreatedFiles(danglingLeaf: Bool) throws {
+    try withInitPathFixture { root, outside, scheme, arguments in
+        let manager = FileManager.default
+        let link = root.appendingPathComponent("redirect")
+        let external = outside.appendingPathComponent("new.json")
+        try manager.createSymbolicLink(at: link, withDestinationURL: danglingLeaf ? external : outside)
+        var options = try Options.parse(arguments, environment: [:])
+        options.configPath = (danglingLeaf ? link : link.appendingPathComponent("new.json")).path
+        let before = try Data(contentsOf: scheme)
+        let error = #expect(throws: InitError.self) { try XcodeInit.run(options: options) }
+        #expect(error?.description.contains(danglingLeaf ? "cannot resolve symbolic link" : " is outside ") == true)
+        #expect(!manager.fileExists(atPath: external.path))
+        #expect(try Data(contentsOf: scheme) == before)
+    }
+}
+
+@Test func initRejectsAnUnapprovedExternalXCConfigInclude() throws {
+    try withInitPathFixture { root, outside, _, arguments in
+        let config = root.appendingPathComponent("Ember.xcconfig")
+        try FileManager.default.copyItem(at: config, to: outside.appendingPathComponent("Ember.xcconfig"))
+        try Data("#include \"../\(outside.lastPathComponent)/Ember.xcconfig\"\n".utf8).write(to: config)
+        let options = try Options.parse(arguments, environment: [:])
+        let error = #expect(throws: InitError.self) { try XcodeInit.run(options: options) }
+        #expect(error?.description.contains(" is outside ") == true)
+    }
+}
+
+@Test(arguments: [false, true])
+func initAllowsAListedExternalWorkspaceProject(workspaceOwnsScheme: Bool) throws {
+    try withInitPathFixture { root, outside, projectScheme, _ in
+        let manager = FileManager.default
+        let workspace = outside.appendingPathComponent("App.xcworkspace", isDirectory: true)
+        try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let reference = "../\(root.lastPathComponent)/XcodeApp.xcodeproj"
+        let contents = workspace.appendingPathComponent("contents.xcworkspacedata")
+        try Data("<Workspace><FileRef location=\"group:\(reference)\"/></Workspace>".utf8).write(to: contents)
+
+        let originalScheme = try String(contentsOf: projectScheme, encoding: .utf8)
+        let scheme: URL
+        if workspaceOwnsScheme {
+            scheme = workspace.appendingPathComponent("xcshareddata/xcschemes/XcodeApp.xcscheme")
+            try manager.createDirectory(at: scheme.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(originalScheme.replacingOccurrences(
+                of: "container:XcodeApp.xcodeproj", with: "container:\(reference)"
+            ).utf8).write(to: scheme)
+        } else {
+            scheme = projectScheme
+        }
+        let projectFile = try useLocalBaseConfiguration(in: root)
+        let options = try Options.parse(["init", "--workspace", workspace.path, "--scheme", "XcodeApp", "--write"],
+                                        environment: [:])
+        try XcodeInit.run(options: options)
+        let wrapperName = "Ember.XcodeApp.Debug.xcconfig"
+        let wrapper = try String(contentsOf: root.appendingPathComponent(wrapperName), encoding: .utf8)
+        #expect(wrapper.contains("#include \"Local.xcconfig\""))
+        #expect(try String(contentsOf: projectFile, encoding: .utf8).contains(wrapperName))
+        let updatedScheme = try String(contentsOf: scheme, encoding: .utf8)
+        #expect(updatedScheme.contains("swift-ember prepare"))
+        #expect(updatedScheme.contains("../\(outside.lastPathComponent)/.swift-ember.json"))
+        #expect(manager.fileExists(atPath: outside.appendingPathComponent(".swift-ember.json").path))
+        #expect(!manager.fileExists(atPath: outside.appendingPathComponent(wrapperName).path))
+        #expect(!manager.fileExists(atPath: root.appendingPathComponent(".swift-ember.json").path))
+        if workspaceOwnsScheme {
+            #expect(try String(contentsOf: projectScheme, encoding: .utf8) == originalScheme)
+        }
+        try XcodeInit.run(options: options)
+
+        if workspaceOwnsScheme {
+            try Data("<Workspace/>".utf8).write(to: contents)
+            let error = #expect(throws: InitError.self) { try XcodeInit.run(options: options) }
+            #expect(error?.description.contains(" is outside ") == true)
+        }
+    }
+}
+
+private func useLocalBaseConfiguration(in root: URL) throws -> URL {
+    let projectFile = root.appendingPathComponent("XcodeApp.xcodeproj/project.pbxproj")
+    let project = try String(contentsOf: projectFile, encoding: .utf8)
+        .replacingOccurrences(of: "path = Ember.xcconfig", with: "path = Local.xcconfig")
+    try Data(project.utf8).write(to: projectFile)
+    try Data("SWIFT_VERSION = 6.0\n".utf8).write(to: root.appendingPathComponent("Local.xcconfig"))
+    return projectFile
+}
+
+private func withInitPathFixture(_ body: (URL, URL, URL, [String]) throws -> Void) throws {
+    try withSampleScheme { scheme, arguments in
+        let root = (0..<4).reduce(scheme) { directory, _ in directory.deletingLastPathComponent() }
+        // A sibling whose path shares the entire root prefix still lies outside.
+        let outside = URL(fileURLWithPath: root.path + "-outside", isDirectory: true)
+        let manager = FileManager.default
+        try manager.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: outside) }
+        try body(root, outside, scheme, arguments)
+    }
+}
+
 private func expectOnlyAddedLines(from original: Data, to edited: Data) {
     var remaining = original.split(separator: 0x0A, omittingEmptySubsequences: false)[...]
     for line in edited.split(separator: 0x0A, omittingEmptySubsequences: false) where line == remaining.first {

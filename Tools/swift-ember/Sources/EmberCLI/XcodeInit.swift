@@ -5,12 +5,21 @@ public enum XcodeInit {
         guard let containerPath = options.project ?? options.workspace else {
             throw InitError("init requires an Xcode project or workspace")
         }
-        let container = URL(fileURLWithPath: containerPath, isDirectory: true).standardizedFileURL
-        let root = container.deletingLastPathComponent()
+        let requestedContainer = URL(fileURLWithPath: containerPath, isDirectory: true).standardizedFileURL
+        let containerPaths = try InitPaths(root: requestedContainer.deletingLastPathComponent())
+        let container = try containerPaths.validate(requestedContainer).url
+        let expectedExtension = options.project == nil ? "xcworkspace" : "xcodeproj"
+        guard container.pathExtension == expectedExtension else {
+            throw InitError("expected a .\(expectedExtension) at \(container.path)")
+        }
         guard let scheme = options.scheme, !scheme.isEmpty, scheme == (scheme as NSString).lastPathComponent else {
             throw InitError("specify a shared Xcode scheme by name")
         }
-        let schemeFile = try sharedScheme(scheme, in: container)
+        let configURL = options.configPath.map { URL(fileURLWithPath: $0).standardizedFileURL }
+            ?? containerPaths.root.appendingPathComponent(ProjectConfiguration.fileName)
+        let configFile = try containerPaths.validate(configURL)
+        let projects = options.project == nil ? try workspaceProjects(in: container, paths: containerPaths) : []
+        let (schemeFile, schemePaths) = try sharedScheme(scheme, in: container, paths: containerPaths, projects: projects)
         let schemeData = try Data(contentsOf: schemeFile)
         let document = try XMLDocument(data: schemeData, options: [.nodePreserveAll, .nodeLoadExternalEntitiesNever])
         guard let schemeElement = document.rootElement(), schemeElement.name == "Scheme",
@@ -28,14 +37,19 @@ public enum XcodeInit {
             throw InitError("the scheme's Build action must select a single app target")
         }
         // A workspace can expose a scheme owned by one of its projects.
-        let schemeRoot = schemeFile.deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let projectURL = URL(fileURLWithPath: String(referencedContainer.dropFirst("container:".count)),
-                             relativeTo: schemeRoot).standardizedFileURL
-        guard projectURL.pathExtension == "xcodeproj",
-              options.project == nil || projectURL.resolvingSymlinksInPath() == container.resolvingSymlinksInPath() else {
+        let requestedProject = URL(fileURLWithPath: String(referencedContainer.dropFirst("container:".count)),
+                                   isDirectory: true, relativeTo: schemePaths.root).standardizedFileURL
+        guard requestedProject.pathExtension == "xcodeproj" else {
             throw InitError("the app's Build action must reference the selected project or a project in the workspace")
         }
+        // Workspaces may explicitly list projects in neighboring directories.
+        let projectBoundary = projects.contains(where: { $0.path == requestedProject.path })
+            ? try InitPaths(root: requestedProject.deletingLastPathComponent()) : containerPaths
+        let projectURL = try projectBoundary.validate(requestedProject).url
+        if options.project != nil, projectURL.path != container.path {
+            throw InitError("the app's Build action must reference the selected project")
+        }
+        let projectPaths = try InitPaths(root: projectURL.deletingLastPathComponent())
         let configuration = options.configuration
         guard !configuration.isEmpty, configuration.caseInsensitiveCompare("Release") != .orderedSame,
               !schemeElement.elements(forName: "ArchiveAction").contains(where: {
@@ -44,24 +58,26 @@ public enum XcodeInit {
             throw InitError("choose the app's development configuration; init cannot enable Ember for its Archive configuration")
         }
 
-        let project = try InitProject(at: projectURL)
+        let projectFile = try projectPaths.validate(projectURL.appendingPathComponent("project.pbxproj")).url
+        let project = try InitProject(file: projectFile, root: projectPaths.root)
         let setting = try project.debugConfiguration(targetID: targetID, name: configuration)
         let base = try project.baseConfiguration(setting.object)
         var changes: [Change] = []
 
         let template = options.emberXCConfig.map { URL(fileURLWithPath: $0).standardizedFileURL }
+        let xcconfigs = XCConfigs(paths: projectPaths, template: template)
         if let template {
-            guard try containsEmber(template) else {
+            guard try xcconfigs.containsEmber(template) else {
                 throw InitError("\(template.path) must include the Debug Ember settings")
             }
         }
-        if let base, try containsEmber(base) {
+        if let base, try xcconfigs.containsEmber(base) {
             print("Keep \(base.path) (already includes the Ember settings)")
         } else if base == nil, let projectBase = try project.projectBaseConfiguration(named: configuration),
-                  try containsEmber(projectBase) {
+                  try xcconfigs.containsEmber(projectBase) {
             print("Keep the inherited Ember settings in \(projectBase.path)")
         } else {
-            let integration = try template ?? findTemplate(from: project.root)
+            let integration = try template ?? xcconfigs.findTemplate()
             let includeLines = try [base, integration].compactMap { $0 }.map { file in
                 let path = relativePath(to: file, from: project.root)
                 guard !path.contains(where: { $0.isNewline || $0 == "\"" || $0 == "\\" }) else {
@@ -74,29 +90,27 @@ public enum XcodeInit {
                   !name.contains(where: { $0.isNewline || $0.isASCII && $0 < " " }) else {
                 throw InitError("cannot use '\(name)' as the generated xcconfig filename")
             }
-            let wrapper = project.root.appendingPathComponent(name)
+            let wrapper = try projectPaths.validate(project.root.appendingPathComponent(name))
             let text = "// Generated by swift-ember init. Set as the app target's \(configuration) base configuration.\n"
                 + includeLines.joined(separator: "\n") + "\n"
-            if exists(wrapper) {
-                guard try Data(contentsOf: wrapper) == Data(text.utf8) else {
-                    throw InitError("\(wrapper.path) already exists with different contents")
+            if wrapper.exists {
+                guard try Data(contentsOf: wrapper.url) == Data(text.utf8) else {
+                    throw InitError("\(wrapper.url.path) already exists with different contents")
                 }
             } else {
-                changes.append(Change(wrapper, new: Data(text.utf8), preview: text))
+                changes.append(Change(wrapper.url, in: projectPaths, new: Data(text.utf8), preview: text))
             }
             let updated = try project.settingBaseConfiguration(name, for: setting.id, previous: setting.object)
-            changes.append(Change(project.file, old: project.data, new: Data(updated.utf8),
+            changes.append(Change(project.file, in: projectPaths, old: project.data, new: Data(updated.utf8),
                                   preview: "Set the \(setting.targetName) target's \(configuration) Base Configuration to \(name)."))
         }
 
-        let configURL = options.configPath.map { URL(fileURLWithPath: $0).standardizedFileURL }
-            ?? root.appendingPathComponent(ProjectConfiguration.fileName)
-        if exists(configURL) {
-            let existing = try ProjectConfiguration.load(from: configURL)
+        if configFile.exists {
+            let existing = try ProjectConfiguration.load(from: configFile.url)
             let path = options.project == nil ? existing.workspace : existing.project
             guard let path,
                   URL(fileURLWithPath: path, relativeTo: configURL.deletingLastPathComponent())
-                    .resolvingSymlinksInPath() == container.resolvingSymlinksInPath(),
+                    .standardizedFileURL.resolvingSymlinksInPath().path == container.path,
                   existing.scheme == scheme, (existing.configuration ?? "Debug") == configuration else {
                 throw InitError("\(configURL.path) already configures a different target; align it with this project, scheme and configuration")
             }
@@ -118,7 +132,7 @@ public enum XcodeInit {
             }
             let data = try JSONSerialization.data(withJSONObject: values, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
                 + Data("\n".utf8)
-            changes.append(Change(configURL, new: data, preview: String(decoding: data, as: UTF8.self)))
+            changes.append(Change(configFile.url, in: containerPaths, new: data, preview: String(decoding: data, as: UTF8.self)))
         }
 
         var scripts: [String] = []
@@ -133,7 +147,7 @@ public enum XcodeInit {
             }
         }
         if !scripts.isEmpty {
-            changes.append(Change(schemeFile, old: schemeData, new: try source.data(validating: schemeElement),
+            changes.append(Change(schemeFile, in: schemePaths, old: schemeData, new: try source.data(validating: schemeElement),
                                   preview: scripts.joined(separator: "\n")))
         }
 
@@ -143,7 +157,7 @@ public enum XcodeInit {
         if changes.isEmpty {
             print("Already configured.")
         } else if options.writesInit {
-            for change in changes { try change.validate() }
+            for change in changes { _ = try change.validate() }
             for change in changes { try change.apply() }
             print("Applied \(changes.count) file changes. Clean the build folder before the first recorded build.")
         } else {
@@ -239,112 +253,147 @@ public enum XcodeInit {
         "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private static func sharedScheme(_ name: String, in container: URL) throws -> URL {
+    private static func sharedScheme(_ name: String, in container: URL, paths: InitPaths,
+                                     projects: [URL]) throws -> (URL, InitPaths) {
         let suffix = "xcshareddata/xcschemes/\(name).xcscheme"
-        let owned = container.appendingPathComponent(suffix)
-        if exists(owned) { return owned }
-        if container.pathExtension == "xcworkspace" {
-            let data = try Data(contentsOf: container.appendingPathComponent("contents.xcworkspacedata"))
-            let workspace = try XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever])
-            let root = container.deletingLastPathComponent()
-            func schemes(in node: XMLElement, from directory: URL) -> [URL] {
-                node.children?.compactMap { $0 as? XMLElement }.flatMap { child -> [URL] in
-                    guard let location = child.attribute(forName: "location")?.stringValue else { return [] }
-                    let parts = location.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-                    guard parts.count == 2 else { return [] }
-                    let base: URL
-                    switch parts[0] {
-                    case "group": base = directory
-                    case "container": base = root
-                    case "absolute": base = URL(fileURLWithPath: "/")
-                    default: return []
-                    }
-                    let url = URL(fileURLWithPath: String(parts[1]), relativeTo: base).standardizedFileURL
-                    if child.name == "Group" {
-                        return schemes(in: child, from: URL(fileURLWithPath: url.path, isDirectory: true))
-                    }
-                    guard child.name == "FileRef", url.pathExtension == "xcodeproj" else { return [] }
-                    let scheme = url.appendingPathComponent(suffix)
-                    return exists(scheme) ? [scheme] : []
-                } ?? []
-            }
-            if let element = workspace.rootElement() {
-                let matches = Set(schemes(in: element, from: root))
-                if matches.count == 1, let scheme = matches.first { return scheme }
-                if matches.count > 1 {
-                    throw InitError("multiple workspace projects share a scheme named \(name); use a unique shared scheme")
-                }
-            }
+        let owned = try paths.validate(container.appendingPathComponent(suffix))
+        if owned.exists { return (owned.url, paths) }
+
+        var matches: [URL: InitPaths] = [:]
+        for project in projects {
+            let boundary = try InitPaths(root: project.deletingLastPathComponent())
+            let projectURL = try boundary.validate(project).url
+            let projectPaths = try InitPaths(root: projectURL.deletingLastPathComponent())
+            let scheme = try projectPaths.validate(projectURL.appendingPathComponent(suffix))
+            if scheme.exists { matches[scheme.url] = projectPaths }
+        }
+        if matches.count == 1, let match = matches.first { return (match.key, match.value) }
+        if matches.count > 1 {
+            throw InitError("multiple workspace projects share a scheme named \(name); use a unique shared scheme")
         }
         throw InitError("no shared scheme named \(name) in \(container.path); share it in Xcode first")
     }
 
-    private static func findTemplate(from root: URL) throws -> URL {
-        let local = root.appendingPathComponent("Ember.xcconfig")
-        if exists(local), try containsEmber(local) { return local }
-        var directory = root
-        while directory.path != "/" {
-            let integration = directory.appendingPathComponent("integrations/xcode/Ember.xcconfig")
-            if exists(integration), try containsEmber(integration) { return integration }
-            directory.deleteLastPathComponent()
+    private static func workspaceProjects(in workspace: URL, paths: InitPaths) throws -> [URL] {
+        let file = try paths.validate(workspace.appendingPathComponent("contents.xcworkspacedata")).url
+        let document = try XMLDocument(data: Data(contentsOf: file), options: [.nodeLoadExternalEntitiesNever])
+        func projects(in node: XMLElement, relativeTo directory: URL) -> [URL] {
+            node.children?.compactMap { $0 as? XMLElement }.flatMap { child -> [URL] in
+                guard let location = child.attribute(forName: "location")?.stringValue else { return [] }
+                let parts = location.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2 else { return [] }
+                let base: URL
+                switch parts[0] {
+                case "group": base = directory
+                case "container": base = paths.root
+                case "absolute": base = URL(fileURLWithPath: "/")
+                default: return []
+                }
+                let url = URL(fileURLWithPath: String(parts[1]), isDirectory: true, relativeTo: base).standardizedFileURL
+                if child.name == "Group" { return projects(in: child, relativeTo: url) }
+                return child.name == "FileRef" && url.pathExtension == "xcodeproj" ? [url] : []
+            } ?? []
         }
-        throw InitError("locate integrations/xcode/Ember.xcconfig in a swift-ember checkout and pass --ember-xcconfig <path>")
+        guard let element = document.rootElement() else { return [] }
+        return projects(in: element, relativeTo: paths.root)
     }
 
-    private static func containsEmber(_ file: URL) throws -> Bool {
-        let include = try NSRegularExpression(pattern: #"(?m)^\s*#include\??\s+"([^"\r\n]+)""#)
-        var pending = [file]
-        var visited: Set<URL> = []
-        while let next = pending.popLast() {
-            guard visited.insert(next.resolvingSymlinksInPath()).inserted else { continue }
-            guard exists(next) else { throw InitError("missing xcconfig at \(next.path)") }
-            let text = try String(contentsOf: next, encoding: .utf8)
-            if text.range(of: #"(?m)^\s*EMBER_CONFIGURED\s*=\s*YES\b"#, options: .regularExpression) != nil,
-               text.contains("-enable-implicit-dynamic"), text.contains("-enable-private-imports") {
-                return true
+    private struct XCConfigs {
+        let paths: InitPaths
+        let template: URL?
+
+        private var templateLocations: [(file: URL, root: URL)] {
+            var result: [(URL, URL)] = []
+            var directory = paths.root
+            while directory.path != "/" {
+                result.append((directory.appendingPathComponent("integrations/xcode/Ember.xcconfig"), directory))
+                directory.deleteLastPathComponent()
             }
-            for match in include.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                guard let range = Range(match.range(at: 1), in: text) else { continue }
-                let path = URL(fileURLWithPath: String(text[range]), relativeTo: next.deletingLastPathComponent())
-                    .standardizedFileURL
-                if exists(path) { pending.append(path) }
-            }
+            return result
         }
-        return false
+
+        private func validate(_ file: URL, in scope: InitPaths) throws -> (InitPaths.Entry, InitPaths) {
+            if let template, template.path == file.path {
+                let templatePaths = try InitPaths(root: template.deletingLastPathComponent())
+                return (try templatePaths.validate(file), templatePaths)
+            }
+            if let location = templateLocations.first(where: { $0.file.standardizedFileURL.path == file.path }) {
+                let directory = try InitPaths(root: location.root).validate(file.deletingLastPathComponent()).url
+                let templatePaths = try InitPaths(root: directory)
+                return (try templatePaths.validate(file), templatePaths)
+            }
+            return (try scope.validate(file), scope)
+        }
+
+        func findTemplate() throws -> URL {
+            let local = paths.root.appendingPathComponent("Ember.xcconfig")
+            for file in [local] + templateLocations.map(\.file) {
+                if try containsEmber(file, required: false) { return file }
+            }
+            throw InitError("locate integrations/xcode/Ember.xcconfig in a swift-ember checkout and pass --ember-xcconfig <path>")
+        }
+
+        func containsEmber(_ file: URL, required: Bool = true) throws -> Bool {
+            let include = try NSRegularExpression(pattern: #"(?m)^\s*#include\??\s+"([^"\r\n]+)""#)
+            var pending = [(file, paths, required)]
+            var visited: Set<URL> = []
+            while let (next, scope, required) = pending.popLast() {
+                let (entry, includeScope) = try validate(next.standardizedFileURL, in: scope)
+                if !entry.exists {
+                    if required { throw InitError("missing xcconfig at \(next.path)") }
+                    continue
+                }
+                guard visited.insert(entry.url).inserted else { continue }
+                let text = try String(contentsOf: entry.url, encoding: .utf8)
+                if text.range(of: #"(?m)^\s*EMBER_CONFIGURED\s*=\s*YES\b"#, options: .regularExpression) != nil,
+                   text.contains("-enable-implicit-dynamic"), text.contains("-enable-private-imports") {
+                    return true
+                }
+                for match in include.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                    guard let range = Range(match.range(at: 1), in: text) else { continue }
+                    let path = URL(fileURLWithPath: String(text[range]), relativeTo: next.deletingLastPathComponent())
+                        .standardizedFileURL
+                    pending.append((path, includeScope, false))
+                }
+            }
+            return false
+        }
     }
 
     private struct Change {
         let url: URL
+        let paths: InitPaths
         let old: Data?
         let new: Data
         let preview: String
 
-        init(_ url: URL, old: Data? = nil, new: Data, preview: String) {
+        init(_ url: URL, in paths: InitPaths, old: Data? = nil, new: Data, preview: String) {
             self.url = url
+            self.paths = paths
             self.old = old
             self.new = new
             self.preview = preview
         }
 
-        func validate() throws {
+        func validate() throws -> URL {
+            let checked = try paths.validate(url)
+            guard checked.url.path == url.path else {
+                throw InitError("\(url.path) changed while planning init; retry")
+            }
             if old == nil {
-                guard !exists(url) else { throw InitError("\(url.path) appeared while planning init; retry") }
+                guard !checked.exists else { throw InitError("\(url.path) appeared while planning init; retry") }
             } else {
-                guard try Data(contentsOf: url) == old else {
+                guard try Data(contentsOf: checked.url) == old else {
                     throw InitError("\(url.path) changed while planning init; retry")
                 }
             }
+            return checked.url
         }
 
         func apply() throws {
-            try validate()
-            try new.write(to: url, options: old == nil ? .withoutOverwriting : .atomic)
+            let checked = try validate()
+            try new.write(to: checked, options: old == nil ? .withoutOverwriting : .atomic)
         }
-    }
-
-    static func exists(_ url: URL) -> Bool {
-        FileManager.default.fileExists(atPath: url.path)
-            || (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
     }
 
     private static func relativePath(to file: URL, from directory: URL) -> String {

@@ -316,14 +316,27 @@ public struct Options {
             || (explicit.container && explicit.scheme)
 
         do {
-            if !options.ignoresProjectConfiguration,
-               (explicitConfigurationFile || !hasCompleteExplicitTarget),
-               let (configuration, url) = try ProjectConfiguration.discover(
-                explicitPath: options.configPath,
-                environment: environment,
-                currentDirectory: currentDirectory) {
-                options.configPath = url.path
-                configuration.applying(to: &options, from: url, explicit: explicit)
+            if !options.ignoresProjectConfiguration, explicitConfigurationFile || !hasCompleteExplicitTarget {
+                var validate: ((URL) throws -> InitPaths.Entry)?
+                if command == .initialize {
+                    let containerRoot = (options.project ?? options.workspace).map {
+                        URL(fileURLWithPath: $0, isDirectory: true, relativeTo: currentDirectory)
+                            .standardizedFileURL.deletingLastPathComponent()
+                    }
+                    validate = { candidate in
+                        // When the manifest supplies the target, its own directory
+                        // bounds this initial read. Init then checks the target root.
+                        let paths = try InitPaths(root: containerRoot ?? candidate.deletingLastPathComponent())
+                        return try paths.validate(candidate)
+                    }
+                }
+                if let (configuration, url) = try ProjectConfiguration.discover(
+                    explicitPath: options.configPath, environment: environment,
+                    currentDirectory: currentDirectory, validating: validate
+                ) {
+                    options.configPath = url.path
+                    configuration.applying(to: &options, from: url, explicit: explicit)
+                }
             }
         } catch {
             throw ParseError.configuration("\(error)")
