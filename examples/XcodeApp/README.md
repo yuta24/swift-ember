@@ -34,6 +34,25 @@ the outermost body expression. You can therefore change the body tree itself;
 the loaded generation invalidates the existing View and the explicit
 `AnyView` boundary keeps a concrete-type change safe.
 
+## Simulator smoke test
+
+Run `python3 scripts/simulator-smoke.py` from the repository root to reproduce
+the pull request job. It selects an iPhone on the iOS runtime matching the
+selected Xcode's SDK. Set `DEVELOPER_DIR` for a specific Xcode.
+
+The smoke test builds a copy of this project with `xcode prepare`,
+`xcode record`, and `xcode start` as Scheme actions. It launches the app once,
+saves an edit to `Cart.subtotalLabel()`, and checks the reload acknowledgement
+and the rendered subtotal. The job has an 18-minute budget, including a cold
+host-tool build. A repeat run can reuse the local host-tool build. Simulator
+readiness gets one retry. Connection, reload, and rendering use bounded
+polling. The build and the save sequence each run once.
+
+Build and watcher logs, before and after screenshots, and any available
+failure screenshot and Simulator app log are written to
+`.ci-results/simulator-smoke/`. The script stops its watcher, uninstalls its
+test app, and shuts down the Simulator if it booted it.
+
 ## How a project opts in
 
 Two steps.

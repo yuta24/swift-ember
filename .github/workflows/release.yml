@@ -49,7 +49,7 @@ jobs:
           echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
 
       - name: Test the host tool
-        run: swift test --package-path Tools/swift-ember
+        run: scripts/ci.sh --only tests
 
       - name: Package and verify the release assets
         run: scripts/package-release.sh "$RELEASE_TAG"
