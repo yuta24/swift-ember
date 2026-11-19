@@ -143,9 +143,10 @@ def smoke(work, cache, logs):
         if initially_shutdown:
             boot_command += ("-b",)
             boot_requested = True
+        # A first boot on a fresh CI image routinely takes a few minutes.
         for attempt in (1, 2):
             try:
-                run(boot_command, timeout=75, log=logs / f"boot-{attempt}.log")
+                run(boot_command, timeout=240, log=logs / f"boot-{attempt}.log")
                 break
             except SmokeFailure as error:
                 if attempt == 2:
