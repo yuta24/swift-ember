@@ -26,7 +26,7 @@ import EmberCore
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("patches"),
         deliver: { $0 }, inventory: ModuleInventory(keys: ["App": 1]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
 
     try rebuilt.write(to: source, atomically: true, encoding: .utf8)
     guard case .rejected(let structural) = await coordinator.handle(change: source) else {
@@ -72,7 +72,7 @@ import EmberCore
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("patches"),
         inventory: ModuleInventory(keys: ["App": 1]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
     #expect(await coordinator.hasBaseline(for: source))
 
     try FileManager.default.removeItem(at: source)
@@ -104,7 +104,7 @@ import EmberCore
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("patches"),
         deliver: { $0 }, inventory: ModuleInventory(keys: ["App": 1]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
 
     try "func transient() -> Int { 1 }".write(
         to: addition, atomically: true, encoding: .utf8)

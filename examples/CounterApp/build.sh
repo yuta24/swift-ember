@@ -51,26 +51,9 @@ else
     flags=(-O)
 fi
 
-xcrun swiftc -parse-as-library \
-    -target "$TRIPLE" -sdk "$SDK" \
-    -Xclang-linker -isysroot -Xclang-linker "$SDK" \
-    "${flags[@]}" \
-    -module-name "$MODULE" \
-    -emit-module -emit-module-path "$OUT/$MODULE.swiftmodule" \
-    -emit-executable -o "$APP/$MODULE" \
-    "${sources[@]}"
-
-cp "$ROOT/Info.plist" "$APP/Info.plist"
-
-keys=$(xcrun nm -gU "$APP/$MODULE" | grep -c 'Tx$' || true)
-echo "configuration      $CONFIG"
-echo "replacement keys   $keys exported"
-
 if [ "$CONFIG" = debug ]; then
     # What the daemon needs in order to compile a patch the running binary can
-    # actually load. Recovering this from an Xcode build instead is DESIGN.md
-    # section 6.2's problem; emitting it from the build that produced the
-    # binary is the version that cannot drift.
+    # actually load. Emit it first so source capture can bracket swiftc.
     CONTEXT="$ROOT/ember-context.json"
     cat > "$CONTEXT" <<JSON
 {
@@ -88,7 +71,29 @@ if [ "$CONFIG" = debug ]; then
 }
 JSON
     echo "build context      $CONTEXT"
+    if [ -n "${SWIFT_EMBER_CLI:-}" ]; then
+        "$SWIFT_EMBER_CLI" xcode prepare --context "$CONTEXT"
+    fi
 fi
+
+xcrun swiftc -parse-as-library \
+    -target "$TRIPLE" -sdk "$SDK" \
+    -Xclang-linker -isysroot -Xclang-linker "$SDK" \
+    "${flags[@]}" \
+    -module-name "$MODULE" \
+    -emit-module -emit-module-path "$OUT/$MODULE.swiftmodule" \
+    -emit-executable -o "$APP/$MODULE" \
+    "${sources[@]}"
+
+cp "$ROOT/Info.plist" "$APP/Info.plist"
+
+if [ "$CONFIG" = debug ] && [ -n "${SWIFT_EMBER_CLI:-}" ]; then
+    "$SWIFT_EMBER_CLI" xcode record --context "$CONTEXT"
+fi
+
+keys=$(xcrun nm -gU "$APP/$MODULE" | grep -c 'Tx$' || true)
+echo "configuration      $CONFIG"
+echo "replacement keys   $keys exported"
 
 if [ "$CONFIG" = release ]; then
     # DESIGN.md section 5.3: a Release build must not be reloadable at all.

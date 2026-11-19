@@ -1,13 +1,15 @@
+import Darwin
 import Foundation
 import EmberCore
 
 /// Watches Swift sources for additions, saves, and removals.
 ///
-/// This polls modification times rather than using FSEvents or a kqueue on
+/// This polls file metadata rather than using FSEvents or a kqueue on
 /// each file. Editors save atomically, by writing a temporary file and renaming
 /// it over the original, which invalidates any descriptor held on the old
 /// inode; a watcher built on descriptors has to notice and re-register, and
-/// misses edits while it does. Comparing mtimes has no such hole. At a 150 ms
+/// misses edits while it does. Comparing inode and change times covers atomic
+/// replacements and saves with preserved modification times. At a 150 ms
 /// interval it also lands inside the sub-100-ms-ish detection budget in PRD.md
 /// section 10 often enough for M2.
 public final class FileWatcher: @unchecked Sendable {
@@ -44,7 +46,7 @@ public final class FileWatcher: @unchecked Sendable {
     private let sourceFilter: SourcePathFilter
     private let interval: Duration
     private let lock = NSLock()
-    private var stamps: [URL: Date] = [:]
+    private var stamps: [URL: SourceFileStamp] = [:]
     private var task: Task<Void, Never>?
 
     public init(
@@ -60,8 +62,14 @@ public final class FileWatcher: @unchecked Sendable {
     /// Records the current state without reporting it, so that files already on
     /// disk when watching starts are not mistaken for edits.
     public func prime() throws {
-        let current = try scan()
+        let current = try Self.scan(roots: roots, excluding: sourceFilter)
         lock.withLock { stamps = current }
+    }
+
+    /// Use the metadata captured with the validated text. A second scan here
+    /// would acknowledge a save without letting the coordinator see it.
+    public func prime(from snapshot: SourceSnapshot) {
+        lock.withLock { stamps = snapshot.stamps.filter { snapshot.watched[$0.key] != nil } }
     }
 
     public func start(
@@ -106,13 +114,13 @@ public final class FileWatcher: @unchecked Sendable {
         // Do not compare or advance `stamps` unless every root and file was
         // scanned. An omitted entry means "removed" only in a complete
         // snapshot; during an I/O error it means "unknown".
-        let current = try scan()
+        let current = try Self.scan(roots: roots, excluding: sourceFilter)
         return lock.withLock {
-            var changed = current.compactMap { url, date -> Change? in
+            var changed = current.compactMap { url, stamp -> Change? in
                 guard let previous = stamps[url] else {
                     return Change(url: url, kind: .added)
                 }
-                return previous == date ? nil : Change(url: url, kind: .modified)
+                return previous == stamp ? nil : Change(url: url, kind: .modified)
             }
             for url in stamps.keys where current[url] == nil {
                 changed.append(Change(url: url, kind: .removed))
@@ -122,15 +130,22 @@ public final class FileWatcher: @unchecked Sendable {
         }
     }
 
-    private func scan() throws -> [URL: Date] {
-        var result: [URL: Date] = [:]
+    static func scan(
+        roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+    ) throws -> [URL: SourceFileStamp] {
+        var result: [URL: SourceFileStamp] = [:]
         var problems: [String] = []
         let manager = FileManager.default
         for root in roots {
             let root = root.standardizedFileURL
             guard !sourceFilter.excludes(root) else { continue }
+            var isDirectory: ObjCBool = false
+            guard manager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                problems.append("\(root.path): source root is missing, inaccessible, or not a directory")
+                continue
+            }
             guard let walker = manager.enumerator(at: root,
-                                                  includingPropertiesForKeys: [.contentModificationDateKey],
+                                                  includingPropertiesForKeys: [],
                                                   options: [.skipsHiddenFiles],
                                                   errorHandler: { url, error in
                                                       problems.append("\(url.path): \(error.localizedDescription)")
@@ -146,12 +161,9 @@ public final class FileWatcher: @unchecked Sendable {
                 }
                 guard url.pathExtension == "swift" else { continue }
                 do {
-                    let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
-                    guard let date = values.contentModificationDate else {
-                        problems.append("\(url.path): modification date is unavailable")
-                        continue
+                    if let stamp = try SourceFileStamp.read(from: url) {
+                        result[url.standardizedFileURL] = stamp
                     }
-                    result[url.standardizedFileURL] = date
                 } catch {
                     problems.append("\(url.path): \(error.localizedDescription)")
                 }
@@ -161,5 +173,29 @@ public final class FileWatcher: @unchecked Sendable {
             throw ScanFailure(problems: Array(Set(problems)).sorted())
         }
         return result
+    }
+}
+
+struct SourceFileStamp: Codable, Equatable, Sendable {
+    let device: Int32
+    let inode: UInt64
+    let size: Int64
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    static func read(from url: URL) throws -> SourceFileStamp? {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let type = info.st_mode & S_IFMT
+        if type == S_IFDIR { return nil }
+        guard type == S_IFREG else { throw POSIXError(.EINVAL) }
+        return SourceFileStamp(
+            device: info.st_dev, inode: info.st_ino, size: info.st_size,
+            modifiedSeconds: info.st_mtimespec.tv_sec, modifiedNanoseconds: info.st_mtimespec.tv_nsec,
+            changedSeconds: info.st_ctimespec.tv_sec, changedNanoseconds: info.st_ctimespec.tv_nsec)
     }
 }

@@ -39,7 +39,7 @@ swift build -c release --package-path "$TOOL_PACKAGE" > /dev/null
 EMBER="$(swift build -c release --package-path "$TOOL_PACKAGE" --show-bin-path)/swift-ember"
 
 echo "==> building and launching the app"
-"$ROOT/build.sh" > /dev/null
+SWIFT_EMBER_CLI="$EMBER" "$ROOT/build.sh" > /dev/null
 sleep 3
 
 echo "==> starting the daemon"

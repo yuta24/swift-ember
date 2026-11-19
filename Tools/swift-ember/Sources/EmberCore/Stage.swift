@@ -28,6 +28,8 @@ public struct EmberError: Error, Codable, Sendable, CustomStringConvertible {
         /// set up the way this tool needs. Distinct from `rebuild` because
         /// building again changes nothing until a setting does.
         case configure
+        /// Wait for in-progress source writes to finish before retrying.
+        case retry
     }
 
     public let stage: Stage
@@ -48,6 +50,7 @@ public struct EmberError: Error, Codable, Sendable, CustomStringConvertible {
         case .rebuild: "Action: full rebuild required."
         case .restart: "Action: restart the app."
         case .configure: "Action: fix the project configuration."
+        case .retry: "Action: wait for source writes to finish and retry the command."
         }
         return "[\(stage.rawValue)] \(subject)\n\(reason)\n\n\(action)"
     }

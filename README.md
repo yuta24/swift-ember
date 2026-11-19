@@ -240,12 +240,27 @@ time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
 process. Startup waits for up to 60 seconds by default; unusually large or slow
 projects can override that with `--startup-timeout <seconds>`.
 
-To tie the watcher to Xcode, add this one line to the scheme's **Build >
-Post-actions** and select the app target under **Provide build settings from**:
+To record which Swift sources went into the build and let Xcode own the
+watcher, add the following to the scheme's **Build > Pre-actions**:
+
+```sh
+"$HOME/.local/bin/swift-ember" xcode prepare
+```
+
+In **Build > Post-actions**, add:
 
 ```sh
 "$HOME/.local/bin/swift-ember" xcode start
 ```
+
+Select the same app target under **Provide build settings from** for both
+actions. Use **Product > Clean Build Folder** before the first build with
+these actions. For a terminal-managed watcher, set the Build post-action to
+`xcode record`.
+
+Both actions use the selected app target's build settings, including the
+output paths of builds run with `xcodebuild -derivedDataPath`. The pre-action
+can run before the binary exists. The post-action requires the built binary.
 
 Add the matching line to **Run > Post-actions** so the watcher exits with the
 app:
@@ -254,10 +269,10 @@ app:
 "$HOME/.local/bin/swift-ember" xcode stop
 ```
 
-`xcode start` skips configurations other than the one in the configuration
-file, replaces the old watcher after a rebuild, and returns only when the new
-watcher is ready. It automatically selects Xcode's active Simulator or physical
-device; watchers for different Simulators remain isolated. The background
+The build actions use the configuration named in the configuration file.
+`xcode start` replaces the old watcher after a rebuild and returns when the
+new watcher is ready. It automatically selects Xcode's active Simulator or
+physical device. Watchers for different Simulators remain isolated. The background
 process keeps the selected `DEVELOPER_DIR` but does not inherit transient
 build-script or debugger variables. Hot-reload successes, actionable warnings,
 and failures are mirrored into Xcode's debug console with a `[swift-ember]`
@@ -267,14 +282,64 @@ remain in `.ember/logs`, which is the canonical log if the app is disconnected.
 The executable may live inside the repository instead; use its absolute path
 derived from `SRCROOT`, for example
 `"$SRCROOT/../tools/swift-ember" xcode start`. If no configuration file is
-used, Xcode supplies the project or workspace path, but `--scheme` and any
-extra `--sources` still need to be passed. Foreground `watch` remains the
-better choice when its live output should stay in a terminal. The original
-fully explicit form remains supported:
+used, Xcode supplies the project or workspace path. Pass `--scheme` and any
+extra `--sources` to the build actions. To keep live output in a terminal,
+use `watch`, which also accepts an explicit project and scheme:
 
 ```sh
 swift-ember watch --project App.xcodeproj --scheme App --sources Sources
 ```
+
+When building with a custom DerivedData directory, use the same directory
+for terminal commands. The Scheme actions get the directory from Xcode.
+
+```sh
+xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build-xcode build
+swift-ember doctor --derived-data-path .build-xcode
+swift-ember watch --derived-data-path .build-xcode
+```
+
+For a terminal-driven build without Scheme actions, run `swift-ember xcode
+prepare --derived-data-path .build-xcode` before the build and `swift-ember
+xcode record --derived-data-path .build-xcode` after it succeeds. These
+examples use the project, scheme, and source roots in `.swift-ember.json`.
+
+The build records SHA-256 hashes for watched Swift files and the Mach-O UUIDs
+of the link target in `<App>.app.swift-ember-sources.json` beside the built app.
+Use the same source roots and exclusions for recording and watching. Use
+`--exclude` or the project configuration for generated sources written during
+the build. Excluded files are still read at startup for cross-file safety
+checks. In-tree Xcode build output directories are skipped automatically and
+listed by `doctor`.
+
+If the UUIDs or watched source hashes differ at startup, rebuild before
+watching. The build compares both hashes and file metadata for watched
+sources before and after compilation. It rejects a rewrite even if the
+original bytes are restored. If a build phase rewrites watched sources,
+exclude those paths before rebuilding. If a build was prepared with a
+version that did not record metadata, rerun `xcode prepare` with the current
+version and rebuild. If sources keep changing during startup, wait for
+writes to finish and retry. A startup read or UTF-8 error lists the affected
+paths and stops the watcher.
+
+Existing builds without a source manifest still start with a warning so
+existing integrations can upgrade independently. For those builds, watch
+cannot detect edits made between the build and startup. An incomplete,
+unreadable, or stale manifest stops startup.
+
+For a custom build using `--context`, write `ember-context.json` before
+compiling, then bracket the successful build with these commands:
+
+```sh
+swift-ember xcode prepare --context ember-context.json
+# Compile and link the binary described by ember-context.json.
+swift-ember xcode record --context ember-context.json
+```
+
+Keep both commands in the same build script and serialize builds that share
+an output product. The CounterApp example uses these commands when
+`SWIFT_EMBER_CLI` points to the CLI executable.
 
 When more than one Simulator is booted, terminal commands need the Simulator
 UDID that Xcode Scheme actions obtain automatically:

@@ -14,8 +14,9 @@ public enum Watch {
     ) async throws {
         try validatePhysicalDevice(context)
         let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
-        let excluded = context.excludedSourcePaths.map { URL(fileURLWithPath: $0) }
-        let sourceFilter = SourcePathFilter(excluding: excluded)
+        let excluded = context.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) }
+        let sourceFilter = SourcePathFilter(excluding: context.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
+        let buildOutputs = SourcePathFilter(excluding: context.buildOutputPaths.map { URL(fileURLWithPath: $0) })
 
         // `doctor` checks this and `watch` did not, so pointing it at a
         // product that had never been built started a normal-looking session
@@ -35,9 +36,21 @@ public enum Watch {
                 recovery: .rebuild)
         }
 
+        let manifest = BuildSourceManifest(context: context)
+        let snapshot = try manifest.snapshot()
+        let verifiedUUIDs = try manifest.validate(snapshot)
+        if verifiedUUIDs == nil {
+            print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
+            print("  Pre-watch source edits cannot be verified. Enable build source recording and rebuild.")
+        }
+
         let server = try IPCServer()
         defer { server.stop() }
         let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
+        await coordinator.primeBaselines(from: snapshot, buildUUIDs: verifiedUUIDs)
+        let watcher = FileWatcher(roots: roots, excluding: excluded)
+        watcher.prime(from: snapshot)
+        defer { watcher.stop() }
         let watchedBuildUUID = BuildUUID(binary: context.linkTarget)
 
         server.shouldAcceptHello = { hello in
@@ -83,22 +96,12 @@ public enum Watch {
         server.onEvent = { print($0) }
         let port = try await server.start()
 
-        await coordinator.primeBaselines(from: roots, excluding: sourceFilter)
         try await coordinator.announceSession()
 
-        let watcher = FileWatcher(roots: roots, excluding: excluded)
-        defer { watcher.stop() }
-        do {
-            try watcher.prime()
-        } catch let failure as FileWatcher.ScanFailure {
-            throw EmberError(
-                stage: .watch,
-                subject: "source roots",
-                reason: "cannot take the initial source snapshot.\n\n\(failure)",
-                recovery: .configure)
-        }
-
         print("watching \(context.sourceRoots.joined(separator: ", "))")
+        if !context.buildOutputPaths.isEmpty {
+            print("ignoring Xcode build outputs: \(context.buildOutputPaths.joined(separator: ", "))")
+        }
         if let device = context.deviceIdentifier {
             print("targeting physical device \(device) through CoreDevice")
         } else if let simulator = context.simulatorIdentifier {
@@ -107,8 +110,6 @@ public enum Watch {
             print("listening on 127.0.0.1:\(port)")
         }
         print("")
-
-        try onReady?()
 
         // While nothing is connected, keep republishing where to dial. On a
         // physical device a slower status heartbeat notices a reinstall, which
@@ -183,6 +184,7 @@ public enum Watch {
             }
         }
         defer { termination?.cancel() }
+        try onReady?()
 
         var removalGuard = RemovalGuard()
 
@@ -203,12 +205,12 @@ public enum Watch {
                     try rebuildRunner.throwIfStopping()
                     attempt += 1
                     let before = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let beforeUUIDs = Set(await coordinator.currentBuildUUIDs())
                     try await rebuildRunner.run(rebuildCommand, in: directory)
                     try rebuildRunner.throwIfStopping()
                     let built = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let rebuiltUUIDs = Set(await coordinator.currentBuildUUIDs())
                     guard !rebuiltUUIDs.isEmpty, rebuiltUUIDs != beforeUUIDs,
                           rebuiltUUIDs != previousBuildUUIDs else {
@@ -246,7 +248,7 @@ public enum Watch {
 
                     try rebuildRunner.throwIfStopping()
                     let current = try SourceSnapshot.capture(
-                        from: roots, excluding: sourceFilter)
+                        from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     if current != built {
                         print("sources changed while the rebuilt app was launching; rebuilding again")
                         print("")
@@ -256,7 +258,10 @@ public enum Watch {
                     // Commit the exact content proven stable around the build.
                     // Do not re-prime the live watcher: buffered events then
                     // remain available for an edit racing this final commit.
-                    await coordinator.resetAfterRebuild(to: built)
+                    if Set(await coordinator.currentBuildUUIDs()) != rebuiltUUIDs {
+                        throw RebuildRecoveryError.binaryDidNotChange
+                    }
+                    await coordinator.resetAfterRebuild(to: built, buildUUIDs: Array(rebuiltUUIDs))
                     print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
                     print("")
                     await coordinator.reportToRuntime(RuntimeLogMessage(

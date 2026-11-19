@@ -84,7 +84,7 @@ private func atomicHarness(
         workDirectory: root.appendingPathComponent("patches"),
         deliver: { _ in try deliveries.deliver() },
         inventory: ModuleInventory(keys: ["Fixture": sources.count]))
-    await coordinator.primeBaselines(from: [root])
+    try await coordinator.primeBaselines(from: [root])
 
     let runtime = FakeRuntime(port: port)
     #expect(await runtime.connect(), "the fake runtime never connected")
@@ -886,7 +886,7 @@ private final class DeliveryProbe: @unchecked Sendable {
         context: context, server: server, workDirectory: patches,
         deliver: { image in image },
         inventory: ModuleInventory(keys: ["FeatureA": 3, "FeatureB": 3]))
-    await coordinator.primeBaselines(
+    try await coordinator.primeBaselines(
         from: sourcesByModule.map { $0[0].deletingLastPathComponent() })
 
     // Create one failed two-file unit in each compiler context. With no
@@ -977,7 +977,7 @@ private final class DeliveryProbe: @unchecked Sendable {
         context: context, server: server, workDirectory: patches,
         deliver: { image in image },
         inventory: ModuleInventory(keys: ["FeatureA": 2, "FeatureB": 1]))
-    await coordinator.primeBaselines(from: [featureA, featureB])
+    try await coordinator.primeBaselines(from: [featureA, featureB])
 
     try #"func first() -> String { "pending-a-first" }"#
         .write(to: first, atomically: true, encoding: .utf8)
@@ -1049,7 +1049,7 @@ private final class DeliveryProbe: @unchecked Sendable {
         workDirectory: root.appendingPathComponent("patches"),
         deliver: { image in delivery.mark(); return image },
         inventory: ModuleInventory(keys: ["FeatureA": 1, "FeatureB": 1]))
-    await coordinator.primeBaselines(
+    try await coordinator.primeBaselines(
         from: sources.map { $0.deletingLastPathComponent() })
     for source in sources {
         let current = try String(contentsOf: source, encoding: .utf8)
@@ -1127,7 +1127,7 @@ private final class DeliveryProbe: @unchecked Sendable {
         workDirectory: root.appendingPathComponent("patches"),
         deliver: { image in delivery.mark(); return image },
         inventory: ModuleInventory(keys: ["FeatureA": 1, "FeatureB": 1]))
-    await coordinator.primeBaselines(from: sources.map { $0.deletingLastPathComponent() })
+    try await coordinator.primeBaselines(from: sources.map { $0.deletingLastPathComponent() })
     for source in sources {
         let current = try String(contentsOf: source, encoding: .utf8)
             .replacingOccurrences(of: "old-", with: "new-")

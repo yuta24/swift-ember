@@ -23,6 +23,11 @@ public struct BuildContext: Codable, Sendable {
     /// watcher uses the same scope as the command that created it. Sources may
     /// still be read once at startup for cross-file safety validation.
     public var excludedSourcePaths: [String] = []
+    /// Xcode build outputs are also skipped when capturing safety baselines.
+    public var buildOutputPaths: [String] = []
+
+    public var unwatchedSourcePaths: [String] { excludedSourcePaths + buildOutputPaths }
+
     /// Bundle identifier of the running application, used to find its data
     /// container on the selected simulator or physical device.
     public var bundleIdentifier: String
@@ -48,7 +53,8 @@ public struct BuildContext: Codable, Sendable {
                 sourceRoots: [String], bundleIdentifier: String,
                 debugDylibPath: String? = nil, frameworkSearchPaths: [String] = [],
                 deviceIdentifier: String? = nil, simulatorIdentifier: String? = nil,
-                codeSigningIdentity: String? = nil, excludedSourcePaths: [String] = []) {
+                codeSigningIdentity: String? = nil, excludedSourcePaths: [String] = [],
+                buildOutputPaths: [String] = []) {
         self.debugDylibPath = debugDylibPath
         self.frameworkSearchPaths = frameworkSearchPaths
         self.moduleName = moduleName
@@ -62,6 +68,7 @@ public struct BuildContext: Codable, Sendable {
         self.extraCompilerFlags = extraCompilerFlags
         self.sourceRoots = sourceRoots
         self.excludedSourcePaths = excludedSourcePaths
+        self.buildOutputPaths = buildOutputPaths
         self.bundleIdentifier = bundleIdentifier
         self.deviceIdentifier = deviceIdentifier
         self.simulatorIdentifier = simulatorIdentifier
@@ -127,6 +134,7 @@ public struct BuildContext: Codable, Sendable {
         // Added later; absent in manifests written before it existed.
         frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
         excludedSourcePaths = try container.decodeIfPresent([String].self, forKey: .excludedSourcePaths) ?? []
+        buildOutputPaths = try container.decodeIfPresent([String].self, forKey: .buildOutputPaths) ?? []
         debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
         deviceIdentifier = try container.decodeIfPresent(String.self, forKey: .deviceIdentifier)
         simulatorIdentifier = try container.decodeIfPresent(String.self, forKey: .simulatorIdentifier)

@@ -352,12 +352,20 @@ The implementation should normalize the captured invocation into
 `BuildContext`, excluding flags that are inappropriate for patch
 compilation.
 
-**Amended after implementing it.** The context comes from
-`xcodebuild -showBuildSettings -json` instead. Scraping a build log for
+**Amended after implementing it.** Terminal commands resolve the context
+with `xcodebuild -showBuildSettings -json`. Scraping a build log for
 the `swift-frontend` line means requiring a full build, parsing output
 with no compatibility promise, and getting nothing back when the build
 is already up to date. Asking Xcode for its resolved settings has none
 of those problems and is a supported interface.
+
+Terminal commands pass `--derived-data-path` through to that query as
+`-derivedDataPath`. Scheme Build actions use the app target's exported
+settings. Select the same app under **Provide build settings from** in the
+Build pre-action and post-action. `TARGET_BUILD_DIR` and `EXECUTABLE_PATH`
+locate the app, and `BUILT_PRODUCTS_DIR` anchors the module and framework
+search paths. If a Scheme action supplies `--derived-data-path`, the queried
+product paths must agree with the exported settings.
 
 The concern behind the original preference was not guessing, and that is
 met a different way: nothing derived is trusted on its own. `doctor`
@@ -503,6 +511,34 @@ date changes, not once per session: the module inventory may be cached on
 the grounds that a rebuild means a relaunch, and this check exists
 precisely because it does not.
 
+### 6.4 Startup source proof
+
+Build settings and Mach-O UUIDs identify the product. A separate build source
+manifest binds that product's link-target UUID set to SHA-256 hashes of the
+Swift files under the configured source roots. Files omitted from change
+delivery are included because their declarations still participate in
+cross-file checks. The sidecar is local to the build product and lives outside
+the signed app bundle.
+
+The Xcode Build pre-action (`xcode prepare`) captures source bytes and file
+metadata before compilation and marks the sidecar as in progress, even on a
+clean build where the link target does not yet exist. After a
+successful build, `xcode start` or `xcode record` checks the same tree again
+and atomically publishes the hashes with all UUIDs of the executable or debug
+dylib the daemon will link against. The file identity and change time also
+catch a save followed by a restoration of the original bytes. The first
+recording requires a fresh build. When UUIDs are unchanged, only an already
+recorded proof for those inputs can be carried forward. Build invocations
+sharing a product must run serially. Custom builds can use the same actions
+with `--context`.
+
+`watch` validates the entire source snapshot against the sidecar before
+publishing a session. Missing proof warns for older integrations. If proof is
+present but incomplete, unreadable, or mismatched, startup refuses and
+requires a rebuild. A verified baseline stays tied to those UUIDs while
+patching. Automatic rebuild recovery can advance that baseline after proving
+the new build and process.
+
 ## 7. Change detection and classification
 
 ### 7.1 File watcher
@@ -513,7 +549,14 @@ The watcher emits:
 SourceChanged(path, timestamp)
 ```
 
-Debounce rapid editor writes.
+Debounce rapid editor writes. Startup scans, reads, and rechecks the entire
+tree before adopting any baseline. That snapshot provides both the
+coordinator's source text and the watcher's initial file metadata. The first
+poll compares against that metadata and reports saves, additions, and
+removals that occurred after capture, including while the manifest was being
+verified or the runtime session was being published. Each poll checks inode,
+modification time, and change time to detect atomic replacements and saves
+with a preserved modification time.
 
 ### 7.2 Classifier
 

@@ -26,15 +26,7 @@ do {
 }
 
 do {
-    if options.command == .xcode && options.xcodeAction == .start
-        && ProcessInfo.processInfo.environment["SWIFT_EMBER_REBUILD"] == "1" {
-        // An automatic rebuild may execute xcodebuild, whose Scheme post-action
-        // would otherwise stop the watcher that is waiting for the new app and
-        // replace it with a nested one. The outer watcher owns this recovery.
-        print("swift-ember: keeping the current watcher during its automatic rebuild")
-        exit(0)
-    }
-    if options.command == .xcode && options.xcodeAction == .start
+    if options.command == .xcode && options.xcodeAction != .stop
         && !options.appliesToXcodeConfiguration() {
         print("swift-ember: skipping \(ProcessInfo.processInfo.environment["CONFIGURATION"] ?? "this") configuration")
         exit(0)
@@ -104,6 +96,22 @@ case .start:
 
 case .xcode:
     do {
+        let manifest = BuildSourceManifest(context: context)
+        if options.xcodeAction == .prepare {
+            try manifest.prepare()
+            exit(0)
+        }
+        if options.xcodeAction == .record {
+            try manifest.record()
+            exit(0)
+        }
+        try manifest.record(required: false)
+        // The automatic rebuild owns the existing watcher, but the Scheme
+        // still records the build for future watcher startups.
+        if ProcessInfo.processInfo.environment["SWIFT_EMBER_REBUILD"] == "1" {
+            print("swift-ember: keeping the current watcher during its automatic rebuild")
+            exit(0)
+        }
         try Watch.validatePhysicalDevice(context)
         try Lifecycle.restart(options: options, context: context)
     } catch {

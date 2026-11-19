@@ -34,9 +34,40 @@ private func withConfiguration(
     #expect(try parse("status").command == .status)
 }
 
-@Test func xcodeNeedsAStartOrStopAction() throws {
+@Test func xcodeNeedsAValidAction() throws {
     #expect(throws: Options.ParseError.self) { _ = try parse("xcode") }
     #expect(throws: Options.ParseError.self) { _ = try parse("xcode", "watch") }
+}
+
+@Test func derivedDataPathIsRelativeToTheInvocationAndRequiresAnXcodeTarget() throws {
+    let current = URL(fileURLWithPath: "/Project", isDirectory: true)
+    let options = try Options.parse([
+        "doctor", "--project", "App.xcodeproj", "--scheme", "App", "--derived-data-path", "Build Output",
+    ], environment: [:], currentDirectory: current)
+    #expect(options.derivedDataPath == "/Project/Build Output")
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("watch", "--context", "build.json", "--derived-data-path", "Build Output")
+    }
+    #expect(throws: Options.ParseError.self) {
+        _ = try parse("watch", "--project", "App.xcodeproj", "--scheme", "App", "--derived-data-path", "")
+    }
+}
+
+@Test func sourceRecordingActionsAcceptDerivedDataForXcodeProjects() throws {
+    let current = URL(fileURLWithPath: "/Project", isDirectory: true)
+    for action in ["prepare", "record"] {
+        let options = try Options.parse([
+            "xcode", action, "--project", "App.xcodeproj", "--scheme", "App",
+            "--derived-data-path", "Build Output",
+        ], environment: [:], currentDirectory: current)
+        #expect(options.derivedDataPath == "/Project/Build Output")
+        let error = try #require(throws: Options.ParseError.self) {
+            _ = try Options.parse([
+                "xcode", action, "--context", "build.json", "--derived-data-path", "Build Output",
+            ], environment: [:], currentDirectory: current)
+        }
+        #expect(error.description == Options.ParseError.derivedDataRequiresProject.description)
+    }
 }
 
 @Test func xcodeActionsReadTheNearestProjectConfiguration() throws {
@@ -175,6 +206,18 @@ private func withConfiguration(
         #expect(options.scheme == nil)
         #expect(options.configPath == nil)
     }
+}
+
+@Test func sourceRecordingActionsCanUseACustomBuildContext() throws {
+    let environment = ["PROJECT_FILE_PATH": "/Xcode/Project.xcodeproj"]
+    let before = try Options.parse(
+        ["xcode", "prepare", "--context", "custom-context.json"], environment: environment)
+    let after = try Options.parse(
+        ["xcode", "record", "--context", "custom-context.json"], environment: environment)
+    #expect(before.xcodeAction == .prepare)
+    #expect(after.xcodeAction == .record)
+    #expect(before.project == nil)
+    #expect(after.contextPath == "custom-context.json")
 }
 
 @Test func explicitContextAndXcodeContainerAreMutuallyExclusive() {
@@ -610,6 +653,7 @@ private func withConfiguration(
     #expect(context.frameworkSearchPaths.isEmpty)
     #expect(context.sourceRoots == ["/r"])
     #expect(context.excludedSourcePaths.isEmpty)
+    #expect(context.buildOutputPaths.isEmpty)
     #expect(context.simulatorIdentifier == nil)
 }
 
@@ -621,7 +665,7 @@ private func withConfiguration(
         sourceRoots: ["/r"], bundleIdentifier: "id",
         debugDylibPath: "/b.debug.dylib", frameworkSearchPaths: ["/f"],
         deviceIdentifier: "DEVICE-ID", codeSigningIdentity: "SIGNING-SHA",
-        excludedSourcePaths: ["/r/Generated", "/r/Fixture.swift"])
+        excludedSourcePaths: ["/r/Generated", "/r/Fixture.swift"], buildOutputPaths: ["/r/DerivedData"])
     let decoded = try JSONDecoder().decode(
         BuildContext.self, from: try JSONEncoder().encode(original))
     #expect(decoded.identity == original.identity)
@@ -632,6 +676,7 @@ private func withConfiguration(
     #expect(decoded.simulatorIdentifier == original.simulatorIdentifier)
     #expect(decoded.codeSigningIdentity == original.codeSigningIdentity)
     #expect(decoded.excludedSourcePaths == original.excludedSourcePaths)
+    #expect(decoded.buildOutputPaths == original.buildOutputPaths)
 
     var simulator = original
     simulator.deviceIdentifier = nil
