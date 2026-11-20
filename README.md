@@ -562,8 +562,12 @@ Swift 6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. Xcode 27.0 and
 Simulator, and all 385 tool tests. The host skips three Simulator-only UIKit
 cases, and the Simulator skips eight macOS-only cases. `DESIGN.md` section 20
 records exactly what was run on each configuration. Physical-device delivery
-is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16;
-an actual iOS 16 device has not yet been measured.
+is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16,
+and again with Xcode 27.2 on an iPhone 14 Pro running iOS 26.7.3: the
+[release checklist](docs/release-checklist.md) passed, including a second
+reload after the device dropped off CoreDevice and reconnected, with each
+reload about 1.7 s from save. An actual iOS 16 device has not yet been
+measured.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The
