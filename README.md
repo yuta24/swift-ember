@@ -67,7 +67,12 @@ unzip swift-ember.zip
 ```
 
 Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
-check the installation with `swift-ember --help`.
+check the installation with `swift-ember --help`. To update, repeat these steps
+with the new version.
+
+The binary is ad-hoc signed, not notarized. Download it with `curl` as shown.
+A browser marks the download as quarantined, and macOS then refuses to run
+the binary.
 
 With [mise](https://mise.jdx.dev), install the same `swift-ember.zip` through
 the GitHub backend. This pins the version in the project's `mise.toml`:
@@ -76,8 +81,11 @@ the GitHub backend. This pins the version in the project's `mise.toml`:
 mise use github:yuta24/swift-ember@0.5.0
 ```
 
-Skip `install.sh` in this case. mise unpacks the archive and puts `bin/` on
-`PATH` in shells where it is activated.
+Use `mise use -g github:yuta24/swift-ember` instead to install it for every
+directory, and `mise upgrade github:yuta24/swift-ember` to update it. Skip
+`install.sh` in this case. mise unpacks the archive and puts `bin/` on `PATH`
+in shells where it is activated. `swift-ember skill install` finds the skill
+bundled next to `bin/`.
 
 Each release also includes `swift-ember.artifactbundle.zip` for SwiftPM binary
 targets and build-tool plugins. Normal command-line installation should use
