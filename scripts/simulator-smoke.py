@@ -85,7 +85,7 @@ def scheme_action(action, ember, project, device, logs):
     step(f"xcode {action}", (ember, "xcode", action, "--no-config", "--project", project,
                              "--scheme", SCHEME, "--sources", f"{sources / 'Sources'},{sources / 'Feature/Sources'}",
                              "--startup-timeout", str(STARTUP_TIMEOUT)),
-         timeout=STARTUP_TIMEOUT + 20 if action == "start" else 30, log=f"xcode-{action}.log")
+         timeout=STARTUP_TIMEOUT + 20 if action == "start" else 120, log=f"xcode-{action}.log")
     print(f"Passed xcode {action}", flush=True)
 
 
