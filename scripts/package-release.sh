@@ -20,7 +20,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 64
 fi
 
-WORK_DIR="$(mktemp -d)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/swift-ember-release.XXXXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 swift build -c release --package-path "$TOOL_PACKAGE"
@@ -71,6 +71,7 @@ mkdir -p "$DIRECT_ROOT/bin"
 cp "$PAYLOAD_BINARY" "$DIRECT_ROOT/bin/swift-ember"
 cp "$ROOT/LICENSE" "$DIRECT_ROOT/LICENSE"
 cp "$ROOT/scripts/release-install.sh" "$DIRECT_ROOT/install.sh"
+cp -R "$ROOT/skills" "$DIRECT_ROOT/skills"
 chmod 755 "$DIRECT_ROOT/install.sh" "$DIRECT_ROOT/bin/swift-ember"
 
 BUNDLE_ROOT="$WORK_DIR/artifact/swift-ember.artifactbundle"
@@ -78,6 +79,7 @@ VARIANT="swift-ember-$VERSION-macosx"
 mkdir -p "$BUNDLE_ROOT/$VARIANT/bin"
 cp "$PAYLOAD_BINARY" "$BUNDLE_ROOT/$VARIANT/bin/swift-ember"
 cp "$ROOT/LICENSE" "$BUNDLE_ROOT/$VARIANT/bin/LICENSE"
+cp -R "$ROOT/skills" "$BUNDLE_ROOT/$VARIANT/skills"
 chmod 755 "$BUNDLE_ROOT/$VARIANT/bin/swift-ember"
 cat > "$BUNDLE_ROOT/info.json" <<EOF
 {
@@ -119,6 +121,8 @@ codesign --verify --strict "$DIRECT_BINARY"
 codesign --verify --strict "$BUNDLE_BINARY"
 "$DIRECT_BINARY" --help >/dev/null
 "$BUNDLE_BINARY" --help >/dev/null
+diff -r "$ROOT/skills" "$WORK_DIR/verify/direct/swift-ember/skills"
+diff -r "$ROOT/skills" "$BUNDLE_ROOT/$VARIANT/skills"
 INFO_JSON="$WORK_DIR/verify/artifact/swift-ember.artifactbundle/info.json"
 jq -e --arg version "$VERSION" --arg path "$VARIANT/bin/swift-ember" '
     .schemaVersion == "1.0" and

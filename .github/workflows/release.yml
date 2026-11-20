@@ -54,6 +54,17 @@ jobs:
       - name: Package and verify the release assets
         run: scripts/package-release.sh "$RELEASE_TAG"
 
+      - name: Verify skill installation from the release
+        run: |
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          unzip -q dist/swift-ember.zip -d "$work"
+          cd "$work"
+          ./swift-ember/install.sh "$work/prefix"
+          "$work/prefix/bin/swift-ember" skill install --dir "$work/agent-skills"
+          test -f "$work/agent-skills/swift-ember/SKILL.md"
+          test -f "$work/agent-skills/swift-ember/reference.md"
+
       # A rerun may find the draft created by an earlier attempt. Replacing
       # assets on a draft is safe; replacing an already published release is
       # not, so that case deliberately fails.
