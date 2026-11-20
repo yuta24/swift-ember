@@ -67,38 +67,74 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     #expect(Lifecycle.session(for: options).name == "ember-context-afc0674b24c56583")
 }
 
-@Test func aSelectedSimulatorCanFindAndRetireTheLegacyGenericSession() throws {
+@Test func explicitStatusAndStopOnlyMatchTheImplicitWatchersActualSimulator() throws {
     var (options, root) = temporaryOptions()
     defer { try? FileManager.default.removeItem(at: root) }
-    options.simulator = "SIMULATOR-ID"
-    let legacy = try #require(Lifecycle.legacySimulatorSession(for: options))
-    #expect(legacy.name == Lifecycle.session(for: Options(
-        command: .status, contextPath: options.contextPath)).name)
-
+    let implicit = Lifecycle.session(for: options)
     try FileManager.default.createDirectory(
-        at: legacy.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let data = Data(
-        #"{"pid":2147483647,"executablePath":"/bin/sleep","startedAtMicroseconds":0}"#.utf8)
-    try data.write(to: legacy.recordURL)
-    try Data("context".utf8).write(to: legacy.contextURL)
+        at: implicit.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let watcher = Process()
+    watcher.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    watcher.arguments = ["60"]
+    try watcher.run()
+    defer {
+        if watcher.isRunning { watcher.terminate() }
+        watcher.waitUntilExit()
+    }
+    let pid = watcher.processIdentifier
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout.size(ofValue: info))
+    try #require(proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size)
+    let record: [String: Any] = [
+        "pid": pid,
+        "executablePath": "/bin/sleep",
+        "startedAtMicroseconds": info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        "simulator": ["identifier": "SIMULATOR-A", "multipleBooted": true],
+    ]
+    try JSONSerialization.data(withJSONObject: record).write(to: implicit.recordURL)
 
+    #expect(Lifecycle.runningSession(options: options)?.simulatorIdentifier == "SIMULATOR-A")
+    #expect(Lifecycle.runningSession(options: options)?.simulatorWarning?.contains("--simulator") == true)
+    options.simulator = "SIMULATOR-B"
+    #expect(Lifecycle.runningSession(options: options) == nil)
     try Lifecycle.stop(options: options)
-    #expect(!FileManager.default.fileExists(atPath: legacy.recordURL.path))
-    #expect(!FileManager.default.fileExists(atPath: legacy.contextURL.path))
+    #expect(watcher.isRunning)
+    #expect(FileManager.default.fileExists(atPath: implicit.recordURL.path))
+
+    options.simulator = "SIMULATOR-A"
+    #expect(Lifecycle.runningSession(options: options)?.pid == pid)
+    try Lifecycle.stop(options: options)
+    #expect(!FileManager.default.fileExists(atPath: implicit.recordURL.path))
 }
 
-@Test func simulatorScopedStatusRecognisesALiveLegacyWatcher() throws {
+@Test func legacyRecordWithoutSimulatorRemainsReachableByImplicitStatus() throws {
     var (options, root) = temporaryOptions()
     defer { try? FileManager.default.removeItem(at: root) }
-    options.simulator = "SIMULATOR-ID"
-    let legacy = try #require(Lifecycle.legacySimulatorSession(for: options))
+    let legacy = Lifecycle.session(for: options)
     try FileManager.default.createDirectory(
         at: legacy.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     let environment = ["SWIFT_EMBER_SESSION_RECORD": legacy.recordURL.path]
     try Lifecycle.markReady(environment: environment)
 
-    #expect(Lifecycle.runningPID(options: options) == getpid())
+    #expect(Lifecycle.runningSession(options: options)?.pid == getpid())
+    #expect(Lifecycle.runningSession(options: options)?.simulatorIdentifier == nil)
+    options.simulator = "SIMULATOR-ID"
+    #expect(Lifecycle.runningSession(options: options) == nil)
     Lifecycle.removeOwnedRecord(environment: environment)
+}
+
+@Test func explicitWatcherKeepsItsOwnSessionKey() throws {
+    var (options, root) = temporaryOptions()
+    defer { try? FileManager.default.removeItem(at: root) }
+    options.simulator = "SIMULATOR-A"
+    let session = Lifecycle.session(for: options)
+    try FileManager.default.createDirectory(
+        at: session.recordURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Lifecycle.markReady(simulator: SimulatorSelection(identifier: "SIMULATOR-A", multipleBooted: false),
+                            environment: ["SWIFT_EMBER_SESSION_RECORD": session.recordURL.path])
+    #expect(Lifecycle.runningSession(options: options)?.pid == getpid())
+    options.simulator = nil
+    #expect(Lifecycle.runningSession(options: options) == nil)
 }
 
 @Test func watchInvocationsSelectIsolatedPatchDirectories() {
@@ -148,7 +184,7 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     try Data("context".utf8).write(to: session.contextURL)
 
     try Lifecycle.markReady(environment: environment)
-    #expect(Lifecycle.runningPID(options: options) == getpid())
+    #expect(Lifecycle.runningSession(options: options)?.pid == getpid())
 
     Lifecycle.removeOwnedRecord(environment: environment)
     #expect(!FileManager.default.fileExists(atPath: session.recordURL.path))
@@ -210,7 +246,7 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
     // Its kernel start time distinguishes that process from the recorded one.
     try rewriteRecord(at: session.recordURL, key: "startedAtMicroseconds", value: 0)
 
-    #expect(Lifecycle.runningPID(options: options) == nil)
+    #expect(Lifecycle.runningSession(options: options) == nil)
     #expect(throws: Lifecycle.LifecycleError.self) {
         try Lifecycle.stop(options: options)
     }

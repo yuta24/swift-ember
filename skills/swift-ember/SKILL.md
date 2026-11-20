@@ -44,7 +44,7 @@ swift-ember start --project App.xcodeproj --scheme App --configuration Debug \
 - Use `--workspace App.xcworkspace` for a workspace. Match
   `--derived-data-path` to the build's `-derivedDataPath` when you use one.
 - Use `--simulator <UDID>` and keep it on every command. Without it, one
-  booted Simulator is picked and `status` does not show which. For an
+  booted Simulator is picked and both `start` and `status` show its UDID. For an
   authorized physical device use `--device <CoreDevice-ID>` instead.
 - If project configuration supplies the target, keep using it consistently.
   Explicit project/workspace plus scheme bypasses automatic config discovery.

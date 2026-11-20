@@ -11,6 +11,7 @@ public enum Lifecycle {
 
     public struct StartupProgress: Sendable {
         fileprivate static let prefix = "[STARTUP] "
+        fileprivate static let errorPrefix = "[STARTUP ERROR] "
         private let started = ContinuousClock.now
 
         public init?() {
@@ -22,6 +23,12 @@ public enum Lifecycle {
             let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             let line = Self.prefix + String(format: "+%.3fs ", seconds) + stage
             FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+
+        public func reportFailure(_ description: String) {
+            let lines = description.components(separatedBy: .newlines)
+                .map { Self.errorPrefix + $0 + "\n" }.joined()
+            FileHandle.standardError.write(Data(lines.utf8))
         }
     }
 
@@ -38,9 +45,16 @@ public enum Lifecycle {
         let pid: Int32
         let executablePath: String
         let startedAtMicroseconds: UInt64
+        let simulator: SimulatorSelection?
     }
 
-    private struct ProcessIdentity {
+    public struct RunningSession {
+        public let pid: Int32
+        public let simulatorIdentifier: String?
+        public let simulatorWarning: String?
+    }
+
+    struct ProcessIdentity {
         let executablePath: String
         let startedAtMicroseconds: UInt64
     }
@@ -112,9 +126,13 @@ public enum Lifecycle {
 
     public static func start(options: Options, context: BuildContext) throws {
         let session = session(for: options)
-        let legacy = legacySimulatorSession(for: options)
-        try withSessionLocks([session, legacy].compactMap { $0 }) {
-            if let legacy { try retireLegacySessionLocked(legacy) }
+        let implicit = implicitSimulatorSession(for: options)
+        try withSessionLocks([session, implicit].compactMap { $0 }) {
+            if runningRecord(session) == nil, let implicit,
+               let record = matchingImplicitRecord(implicit, options: options) {
+                reportStart("already running", record: record, session: implicit, options: options)
+                return
+            }
             try startLocked(options: options, context: context, session: session)
         }
     }
@@ -124,9 +142,11 @@ public enum Lifecycle {
     /// concurrent Scheme action cannot slip another owner between them.
     public static func restart(options: Options, context: BuildContext) throws {
         let session = session(for: options)
-        let legacy = legacySimulatorSession(for: options)
-        try withSessionLocks([session, legacy].compactMap { $0 }) {
-            if let legacy { try retireLegacySessionLocked(legacy) }
+        let implicit = implicitSimulatorSession(for: options)
+        try withSessionLocks([session, implicit].compactMap { $0 }) {
+            if let implicit, matchingImplicitRecord(implicit, options: options) != nil {
+                try stopLocked(session: implicit)
+            }
             try stopLocked(session: session)
             try startLocked(options: options, context: context, session: session)
         }
@@ -135,8 +155,7 @@ public enum Lifecycle {
     private static func startLocked(options: Options, context: BuildContext, session: Session) throws {
         if let record = try readRecord(at: session.recordURL) {
             if processMatches(record) {
-                print("already running pid \(record.pid)")
-                print("log                \(session.logURL.path)")
+                reportStart("already running", record: record, session: session, options: options)
                 return
             }
             try? FileManager.default.removeItem(at: session.recordURL)
@@ -181,8 +200,7 @@ public enum Lifecycle {
             if let record = try readRecord(at: session.recordURL),
                record.pid == pid,
                processMatches(record) {
-                print("started            pid \(record.pid)")
-                print("log                \(session.logURL.path)")
+                reportStart("started", record: record, session: session, options: options)
                 return
             }
             var status: Int32 = 0
@@ -199,13 +217,23 @@ public enum Lifecycle {
         throw startupError("timed out while initializing after \(options.startupTimeout)s", log: session.logURL)
     }
 
-    private static func startupError(_ reason: String, log: URL) -> LifecycleError {
-        let latest = (try? Data(contentsOf: log)).flatMap { data in
-            String(decoding: data, as: UTF8.self).split(separator: "\n")
-                .last { $0.hasPrefix(StartupProgress.prefix) }
+    private static func reportStart(_ message: String, record: Record, session: Session, options: Options) {
+        let padding = String(repeating: " ", count: message == "started" ? 12 : 1)
+        print("\(message)\(padding)pid \(record.pid)")
+        print("log                \(session.logURL.path)")
+        if let identifier = simulatorIdentifier(record, session: session) ?? options.simulator {
+            print("transport          simulator \(identifier)")
         }
-        let detail = latest.map { "\nlast startup stage: \($0.dropFirst(StartupProgress.prefix.count))" } ?? ""
-        return .startup(reason + detail, log)
+        if options.simulator == nil, let warning = record.simulator?.warning { print(warning) }
+    }
+
+    private static func startupError(_ reason: String, log: URL) -> LifecycleError {
+        let lines = (try? String(contentsOf: log, encoding: .utf8))?.split(separator: "\n") ?? []
+        let latest = lines.last { $0.hasPrefix(StartupProgress.prefix) }
+        let stage = latest.map { "\nlast startup stage: \($0.dropFirst(StartupProgress.prefix.count))" } ?? ""
+        let failure = lines.filter { $0.hasPrefix(StartupProgress.errorPrefix) }
+            .map { $0.dropFirst(StartupProgress.errorPrefix.count) }.joined(separator: "\n")
+        return .startup(reason + stage + (failure.isEmpty ? "" : "\n" + failure), log)
     }
 
     /// A daemon outlives the Xcode action that launched it. Keep only the
@@ -223,21 +251,15 @@ public enum Lifecycle {
     /// not start a watcher.
     public static func stop(options: Options) throws {
         let session = session(for: options)
-        let legacy = legacySimulatorSession(for: options)
-        try withSessionLocks([session, legacy].compactMap { $0 }) {
-            try stopLocked(session: session)
-            if let legacy { try retireLegacySessionLocked(legacy) }
+        let implicit = implicitSimulatorSession(for: options)
+        try withSessionLocks([session, implicit].compactMap { $0 }) {
+            if let implicit, runningRecord(session) == nil,
+               matchingImplicitRecord(implicit, options: options) != nil {
+                try stopLocked(session: implicit)
+            } else {
+                try stopLocked(session: session)
+            }
         }
-    }
-
-    /// A simulator-scoped session supersedes the single generic simulator
-    /// session used before simulator UDIDs were tracked. That old watcher must
-    /// not remain alive: it can keep replacing the selected simulator's token.
-    private static func retireLegacySessionLocked(_ session: Session) throws {
-        guard FileManager.default.fileExists(atPath: session.recordURL.path)
-                || FileManager.default.fileExists(atPath: session.contextURL.path)
-        else { return }
-        try stopLocked(session: session)
     }
 
     private static func stopLocked(session: Session) throws {
@@ -272,12 +294,38 @@ public enum Lifecycle {
         throw LifecycleError.stopTimedOut(record.pid, session.logURL)
     }
 
-    public static func runningPID(options: Options) -> Int32? {
-        let sessions = [session(for: options), legacySimulatorSession(for: options)].compactMap { $0 }
-        for session in sessions {
-            guard let record = try? readRecord(at: session.recordURL),
-                  processMatches(record) else { continue }
-            return record.pid
+    public static func runningSession(options: Options) -> RunningSession? {
+        let session = session(for: options)
+        if let record = runningRecord(session) {
+            return RunningSession(pid: record.pid, simulatorIdentifier: simulatorIdentifier(record, session: session),
+                                  simulatorWarning: options.simulator == nil ? record.simulator?.warning : nil)
+        }
+        if let implicit = implicitSimulatorSession(for: options),
+           let record = matchingImplicitRecord(implicit, options: options) {
+            return RunningSession(pid: record.pid, simulatorIdentifier: simulatorIdentifier(record, session: implicit),
+                                  simulatorWarning: nil)
+        }
+        return nil
+    }
+
+    private static func runningRecord(_ session: Session) -> Record? {
+        guard let record = try? readRecord(at: session.recordURL), processMatches(record) else { return nil }
+        return record
+    }
+
+    private static func matchingImplicitRecord(_ session: Session, options: Options) -> Record? {
+        guard let requested = options.simulator, let record = runningRecord(session),
+              simulatorIdentifier(record, session: session)?.caseInsensitiveCompare(requested) == .orderedSame
+        else { return nil }
+        return record
+    }
+
+    private static func simulatorIdentifier(_ record: Record, session: Session) -> String? {
+        // Old records have no resolved UDID. A saved context can prove the
+        // destination only if it already contained a Simulator identifier.
+        if let identifier = record.simulator?.identifier { return identifier }
+        if let context = try? BuildContext.load(from: session.contextURL), context.deviceIdentifier == nil {
+            return context.simulatorIdentifier
         }
         return nil
     }
@@ -302,8 +350,25 @@ public enum Lifecycle {
             .appendingPathComponent("cache/package-manifests", isDirectory: true)
     }
 
+    static func watcherOwner(
+        session: Session?,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> SimulatorOwnership.Owner {
+        if let path = environment[recordEnvironment] {
+            let record = URL(fileURLWithPath: path)
+            let root = record.deletingLastPathComponent().deletingLastPathComponent()
+            let log = root.appendingPathComponent("logs/\(record.deletingPathExtension().lastPathComponent).log")
+            return SimulatorOwnership.Owner(pid: getpid(), emberRoot: root.path, log: log.path)
+        }
+        let root = session?.logURL.deletingLastPathComponent().deletingLastPathComponent()
+        return SimulatorOwnership.Owner(pid: getpid(), emberRoot: root?.path, log: nil)
+    }
+
     /// Written by a background `watch` once it is ready to accept edits.
-    public static func markReady(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+    public static func markReady(
+        simulator: SimulatorSelection? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws {
         guard let path = environment[recordEnvironment] else { return }
         guard let identity = processIdentity(getpid()) else {
             throw LifecycleError.launch("cannot inspect the background process")
@@ -311,7 +376,8 @@ public enum Lifecycle {
         let record = Record(
             pid: getpid(),
             executablePath: identity.executablePath,
-            startedAtMicroseconds: identity.startedAtMicroseconds)
+            startedAtMicroseconds: identity.startedAtMicroseconds,
+            simulator: simulator)
         let data = try JSONEncoder().encode(record)
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
@@ -362,7 +428,7 @@ public enum Lifecycle {
         return standardizedPath(String(decoding: bytes, as: UTF8.self))
     }
 
-    private static func processIdentity(_ pid: Int32) -> ProcessIdentity? {
+    static func processIdentity(_ pid: Int32) -> ProcessIdentity? {
         guard let executablePath = processPath(pid) else { return nil }
         var info = proc_bsdinfo()
         let size = MemoryLayout<proc_bsdinfo>.size
@@ -412,8 +478,8 @@ public enum Lifecycle {
     }
 
     /// Acquires more than one session lock in path order, so simultaneous
-    /// launches for two simulators cannot deadlock while both retire the legacy
-    /// generic session.
+    /// launches for two simulators cannot deadlock while inspecting the same
+    /// implicit session.
     static func withSessionLocks<T>(_ sessions: [Session], operation: () throws -> T) throws -> T {
         var seen: Set<String> = []
         let ordered = sessions.sorted { $0.lockURL.path < $1.lockURL.path }
@@ -426,11 +492,11 @@ public enum Lifecycle {
         return try acquire(0)
     }
 
-    static func legacySimulatorSession(for options: Options) -> Session? {
+    static func implicitSimulatorSession(for options: Options) -> Session? {
         guard options.device == nil, options.simulator != nil else { return nil }
-        var legacy = options
-        legacy.simulator = nil
-        return session(for: legacy)
+        var implicit = options
+        implicit.simulator = nil
+        return session(for: implicit)
     }
 
     /// Spawn directly into a new session. `Process` creates a process-group
