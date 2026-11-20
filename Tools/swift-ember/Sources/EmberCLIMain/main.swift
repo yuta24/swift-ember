@@ -26,6 +26,10 @@ do {
 }
 
 do {
+    if options.command == .initialize {
+        try XcodeInit.run(options: options)
+        exit(0)
+    }
     if options.command == .xcode && options.xcodeAction != .stop
         && !options.appliesToXcodeConfiguration() {
         print("swift-ember: skipping \(ProcessInfo.processInfo.environment["CONFIGURATION"] ?? "this") configuration")
@@ -86,6 +90,13 @@ case .status:
     print("build identity     \(context.identity)")
 
 case .doctor:
+    if options.checksRelease, let resolvedProject {
+        do {
+            exit(try ReleaseDoctor.run(project: resolvedProject, appPath: options.releaseApp) ? 0 : 1)
+        } catch {
+            abort("\(error)")
+        }
+    }
     exit(Doctor.run(context: context, project: resolvedProject) ? 0 : 1)
 
 case .start:
@@ -120,7 +131,7 @@ case .xcode:
         abort("\(error)")
     }
 
-case .stop:
+case .initialize, .stop:
     // Handled before resolving the project, so stopping does not depend on a
     // successful build or on xcodebuild still being available.
     fatalError("unreachable")

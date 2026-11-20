@@ -9,6 +9,7 @@ import EmberDaemon
 /// has to be justified. A value type has neither problem.
 public struct Options {
     public enum Command: String {
+        case initialize = "init"
         case doctor, watch, start, stop, status, xcode
     }
 
@@ -26,6 +27,12 @@ public struct Options {
     public var scheme: String?
     public var configuration = "Debug"
     public var derivedDataPath: String?
+    public var writesInit = false
+    public var emberXCConfig: String?
+    public var initPostAction: XcodeAction?
+    public var checksRelease = false
+    public var releaseApp: String?
+    public var destination: String?
     public var sourceRoots: [String] = []
     /// Nil means an emitted context keeps its own exclusions. An explicit or
     /// project-configured empty array deliberately clears them.
@@ -43,12 +50,26 @@ public struct Options {
     public static let usage = """
     swift-ember <command> [options]
 
+      init      plan Debug setup for a shared Xcode scheme
       doctor    check the project, the toolchain, and the running app
       watch     watch sources and patch the running app on save
       start     run watch in the background
       stop      stop the background watcher
       status    show what the daemon would use, without starting it
       xcode     own the watcher from Xcode Scheme actions
+
+    Installing the integration:
+
+      init --project <path> --scheme <name> [--ember-xcconfig <path>]
+      --write                        apply the init plan (default: preview)
+      --post-action <record|start>   choose the Build post-action (default: record)
+
+    Checking a shipping build:
+
+      doctor --release               check Release settings and the built app
+      --configuration <name>         override Release for a custom shipping configuration
+      --app <path.app>                inspect an archived or exported app
+      --destination <specifier>     match the build (e.g. generic/platform=iOS)
 
     Xcode Scheme actions:
 
@@ -182,6 +203,17 @@ public struct Options {
             case "--configuration":
                 options.configuration = try value(after: argument)
                 explicit.configuration = true
+            case "--write": options.writesInit = true
+            case "--ember-xcconfig": options.emberXCConfig = try value(after: argument)
+            case "--post-action":
+                let action = try value(after: argument)
+                guard let parsed = XcodeAction(rawValue: action), parsed == .record || parsed == .start else {
+                    throw ParseError.invalidValue(argument, action)
+                }
+                options.initPostAction = parsed
+            case "--release": options.checksRelease = true
+            case "--app": options.releaseApp = try value(after: argument)
+            case "--destination": options.destination = try value(after: argument)
             case "--derived-data-path":
                 let path = try value(after: argument)
                 guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -263,6 +295,19 @@ public struct Options {
         if explicitConfigurationFile && options.ignoresProjectConfiguration {
             throw ParseError.conflictingConfigurationFlags
         }
+        if command != .initialize, options.writesInit || options.emberXCConfig != nil || options.initPostAction != nil {
+            throw ParseError.configuration("--write, --ember-xcconfig and --post-action require init")
+        }
+        if options.checksRelease && command != .doctor {
+            throw ParseError.configuration("--release requires doctor")
+        }
+        if !options.checksRelease, options.releaseApp != nil || options.destination != nil {
+            throw ParseError.configuration("--app and --destination require doctor --release")
+        }
+        if options.checksRelease && !explicit.configuration {
+            options.configuration = "Release"
+            explicit.configuration = true
+        }
 
         // A complete command-line target is self-contained and must remain a
         // recovery path when a nearby configuration is malformed. An explicit
@@ -271,14 +316,27 @@ public struct Options {
             || (explicit.container && explicit.scheme)
 
         do {
-            if !options.ignoresProjectConfiguration,
-               (explicitConfigurationFile || !hasCompleteExplicitTarget),
-               let (configuration, url) = try ProjectConfiguration.discover(
-                explicitPath: options.configPath,
-                environment: environment,
-                currentDirectory: currentDirectory) {
-                options.configPath = url.path
-                configuration.applying(to: &options, from: url, explicit: explicit)
+            if !options.ignoresProjectConfiguration, explicitConfigurationFile || !hasCompleteExplicitTarget {
+                var validate: ((URL) throws -> InitPaths.Entry)?
+                if command == .initialize {
+                    let containerRoot = (options.project ?? options.workspace).map {
+                        URL(fileURLWithPath: $0, isDirectory: true, relativeTo: currentDirectory)
+                            .standardizedFileURL.deletingLastPathComponent()
+                    }
+                    validate = { candidate in
+                        // When the manifest supplies the target, its own directory
+                        // bounds this initial read. Init then checks the target root.
+                        let paths = try InitPaths(root: containerRoot ?? candidate.deletingLastPathComponent())
+                        return try paths.validate(candidate)
+                    }
+                }
+                if let (configuration, url) = try ProjectConfiguration.discover(
+                    explicitPath: options.configPath, environment: environment,
+                    currentDirectory: currentDirectory, validating: validate
+                ) {
+                    options.configPath = url.path
+                    configuration.applying(to: &options, from: url, explicit: explicit)
+                }
             }
         } catch {
             throw ParseError.configuration("\(error)")
@@ -325,6 +383,14 @@ public struct Options {
         if (options.project != nil || options.workspace != nil) && options.scheme == nil {
             throw ParseError.schemeRequired
         }
+        if command == .initialize || options.checksRelease {
+            guard !explicit.context, options.project != nil || options.workspace != nil else {
+                throw ParseError.configuration("pass --project or --workspace with --scheme, or use .swift-ember.json")
+            }
+        }
+        if options.destination != nil && (options.device != nil || options.simulator != nil) {
+            throw ParseError.configuration("pass --destination or --device/--simulator, not both")
+        }
         if options.derivedDataPath != nil,
            explicit.context || (options.project == nil && options.workspace == nil) {
             throw ParseError.derivedDataRequiresProject
@@ -359,6 +425,7 @@ public struct Options {
         let schemeSettings = isXcodeBuildAction && hasXcodeEnvironment ? environment : nil
         return try XcodeProject(container: container, scheme: scheme!,
                                 configuration: configuration,
+                                destination: destination ?? "generic/platform=iOS Simulator",
                                 deviceIdentifier: device,
                                 simulatorIdentifier: simulator,
                                 derivedDataPath: derivedDataPath)

@@ -325,7 +325,7 @@ public struct XcodeProject: Sendable {
     /// Splits a resolved Xcode list setting. Swift Build separates on unquoted
     /// ASCII whitespace and treats a backslash as escaping the next character
     /// even inside single or double quotes.
-    private static func parseSettingList(_ value: String?) -> [String] {
+    package static func parseSettingList(_ value: String?) -> [String] {
         guard let value else { return [] }
 
         var arguments: [String] = []

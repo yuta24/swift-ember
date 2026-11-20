@@ -120,15 +120,26 @@ before and after. `examples/CounterApp/README.md` walks through what happened.
 
 ## Configuring your project
 
-Two steps, both in Xcode — plus one line per local package, since Xcode does
-not pass the app's compiler flags into package targets. See
-`integrations/xcode/Package.md`.
+Share your app's scheme in Xcode and copy `integrations/xcode/Ember.xcconfig`
+from the checked-out release beside your project. Preview the Debug setup,
+then apply it with `--write`.
 
-Copy `integrations/xcode/Ember.xcconfig` from the checked-out release into your
-project, then base your Debug configuration on it (or include it from the
-Debug `.xcconfig` you already use). Call `Ember.start()` once at launch; it
-needs no `#if` around it, because both products compile their active code only
-for Debug.
+```sh
+swift-ember init --project App.xcodeproj --scheme App --sources Sources
+swift-ember init --project App.xcodeproj --scheme App --sources Sources --write
+```
+
+Use `--workspace App.xcworkspace` for a workspace, or `--ember-xcconfig <path>`
+to use a template elsewhere. `init` creates `.swift-ember.json`, configures the
+app target's Debug xcconfig, and adds the scheme actions for source recording.
+If Debug already has a Base Configuration, the new xcconfig includes it first
+and then includes Ember. See [Xcode integration](integrations/xcode/README.md)
+for CocoaPods, existing project settings, and manual setup.
+
+Add the Ember package product and call `Ember.start()` once at launch.
+The package compiles its active runtime only for Debug and provides an inert
+entry point in Release. For local packages you want to reload, configure their
+flags separately as shown in [Making a Swift package patchable](integrations/xcode/Package.md).
 
 A SwiftUI View whose `body` should reload adds two explicit boundaries:
 
@@ -157,9 +168,7 @@ default it invalidates layout and reloads lists, which is what makes the edit
 visible; `Ember.start(refresh: .none)` turns that off if the app would rather
 do it itself.
 
-Then check the setup and start watching:
-
-Create `.swift-ember.json` beside the project or workspace. Paths in this file
+Review the generated `.swift-ember.json` beside the project or workspace. Paths in this file
 are relative to the configuration file, so the same file works for every
 checkout:
 
@@ -240,8 +249,9 @@ time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
 process. Startup waits for up to 60 seconds by default; unusually large or slow
 projects can override that with `--startup-timeout <seconds>`.
 
-To record which Swift sources went into the build and let Xcode own the
-watcher, add the following to the scheme's **Build > Pre-actions**:
+Pass `--post-action start` to `init` if Xcode should also restart the background
+watcher after a successful Debug build. For manual setup, add the following
+to the scheme's **Build > Pre-actions**.
 
 ```sh
 "$HOME/.local/bin/swift-ember" xcode prepare
@@ -385,6 +395,26 @@ this way.
 
 Before publishing a release, run the [physical iPhone release checklist](docs/release-checklist.md).
 
+### Checking a shipping build
+
+Build the shipping configuration first. Use the same scheme, destination and
+DerivedData path in the build and the check.
+
+```sh
+xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+  -destination 'generic/platform=iOS' -derivedDataPath .build-xcode build
+swift-ember doctor --release --project App.xcodeproj --scheme App \
+  --destination 'generic/platform=iOS' --derived-data-path .build-xcode
+```
+
+`doctor --release` defaults to `Release` even when `.swift-ember.json` selects
+`Debug`. Pass `--configuration Shipping` for a custom name. To check an
+archived or exported product, pass `--app <path.app>` with the settings of
+the build that produced it. A missing product, failed inspection, or detected
+instrumentation gives a nonzero exit status. See
+[Release isolation](integrations/xcode/README.md#release-isolation) for the
+checks and optional guard.
+
 ## How it works
 
 ```
@@ -478,7 +508,7 @@ Tools/swift-ember/    host-only package; owns the SwiftSyntax dependency
   Sources/EmberCore   shared types: build context, wire protocol, diagnostics
   Sources/EmberGen    SwiftSyntax: what changed, and what to generate for it
   Sources/EmberDaemon watching, compiling, talking to the app
-  Sources/EmberCLI    swift-ember doctor | watch | start | stop | status
+  Sources/EmberCLI    swift-ember init | doctor | watch | start | stop | status
   Tests/               classifier, generated-patch, and daemon tests
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary

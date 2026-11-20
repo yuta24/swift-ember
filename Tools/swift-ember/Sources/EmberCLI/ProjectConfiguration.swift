@@ -96,11 +96,13 @@ struct ProjectConfiguration: Decodable {
     static func discover(
         explicitPath: String?,
         environment: [String: String],
-        currentDirectory: URL
+        currentDirectory: URL,
+        validating validate: ((URL) throws -> InitPaths.Entry)? = nil
     ) throws -> (ProjectConfiguration, URL)? {
         if let explicitPath {
-            let url = absoluteURL(explicitPath, relativeTo: currentDirectory)
-            return (try load(from: url), url)
+            let candidate = absoluteURL(explicitPath, relativeTo: currentDirectory)
+            let file = try validate?(candidate).url ?? candidate
+            return (try load(from: file), candidate)
         }
 
         var starts: [URL] = []
@@ -115,7 +117,9 @@ struct ProjectConfiguration: Decodable {
             while visited.insert(directoryPath).inserted {
                 let directory = URL(fileURLWithPath: directoryPath, isDirectory: true)
                 let candidate = directory.appendingPathComponent(fileName)
-                if FileManager.default.fileExists(atPath: candidate.path) {
+                if let checked = try validate?(candidate) {
+                    if checked.exists { return (try load(from: checked.url), candidate) }
+                } else if FileManager.default.fileExists(atPath: candidate.path) {
                     return (try load(from: candidate), candidate)
                 }
                 if directoryPath == "/" { break }
