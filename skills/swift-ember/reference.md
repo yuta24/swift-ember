@@ -2,7 +2,7 @@
 
 This supplements [SKILL.md](SKILL.md). Open the topic needed for the current step.
 
-- [Sessions](references/sessions.md) covers Debug preflight, destination and build selection, startup, and cleanup.
+- [Sessions](references/sessions.md) covers Debug preflight, destination and build selection, startup, cleanup, and parallel worktrees or agents.
 - [Logs](references/logs.md) covers polling from a save boundary, diagnostics, and automatic rebuild messages.
 - [Reloadability](references/reloadability.md) covers supported edits, SwiftUI opt-in, and recovery.
 - [Screen checks](references/screen-checks.md) covers device-relay and Simulator captures.
