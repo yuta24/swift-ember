@@ -83,3 +83,70 @@ swift-ember stop --project App.xcodeproj --scheme App --configuration Debug \
 swift-ember status --project App.xcodeproj --scheme App --configuration Debug \
   --sources Sources --simulator 'SIMULATOR_UDID' --derived-data-path .build-xcode
 ```
+
+## Parallel worktrees and agents
+
+Each worktree keeps its own `.ember/` beside its project, with separate
+session records, logs, locks, and patches. `status` and `stop` see only the
+current worktree's sessions. Two worktrees can hot reload the same bundle ID
+at the same time when each uses its own Simulator. Stopping one leaves the
+other running.
+
+- Use one Simulator or device per worktree or agent. Give each worktree its
+  own DerivedData. Install each build only on its own Simulator.
+- Pass `--simulator 'SIMULATOR_UDID'` to every `doctor`, `status`, `start`,
+  and `stop`, even when only one Simulator is booted. Do not mix it with
+  implicit selection.
+- Choose a Simulator that no other session is using. If you cannot tell,
+  ask the user which one to use.
+- Before editing, compare the PID in the watcher log's
+  `connected  pid <app-pid>, <bundle-id>` line with the PID that your
+  `simctl launch` printed. `started` and `daemon running` only describe the
+  watcher.
+- Stop only the watcher you started. Run `stop` from the same worktree and
+  check that it prints the watcher PID that your `start` printed.
+- Do not shut down a Simulator that you did not boot.
+- Before installing, check whether the app is already on the Simulator.
+  `simctl uninstall` deletes the app's data container, so uninstall at the
+  end only if the app was absent before you installed it. If it was already
+  there, leave it installed, or ask the user before removing it and its data.
+  A previous run's app can remain on the Simulator.
+
+```sh
+xcrun simctl get_app_container 'SIMULATOR_UDID' 'com.example.App' data
+# Exit status 0 means it was already installed. Record that before installing.
+```
+
+```sh
+xcrun simctl uninstall 'SIMULATOR_UDID' 'com.example.App'
+```
+
+### Implicit selection
+
+Without `--simulator`, `start` picks one booted Simulator even when several
+are booted. `status` then shows `transport simulator` without the UDID, so
+you cannot tell which one was picked. A `status` or `stop` with a different
+explicit UDID can still find that implicit session. It can show it as
+running or stop it, for example `not running` followed by
+`stopped            pid …`. An implicit `status` does not see a session
+started with an explicit UDID.
+
+### Shared Simulator and bundle ID
+
+Two watchers on the same Simulator and bundle ID both start with exit code 0
+and no warning, and both show as running in `status`. They overwrite the
+port in the app container's `Documents/splice-session.json`, so the app
+connects to only one of them. Symptoms:
+
+- Edits from the other watcher end with `no app is connected` and
+  `Action: restart the app.`
+- A watcher can reject the other worktree's app with
+  `connected  pid …, but this is not the build being watched`.
+- Installing the other worktree's build on the same Simulator terminates
+  the running app.
+
+To recover, stop one of the watchers from its own worktree and confirm
+`not running` with `status`. Install and launch the remaining worktree's
+build again, then wait for its `connected  pid …` line and compare the PID.
+To keep both running, move one worktree to its own Simulator. Install its
+build there, and restart its watcher with that `--simulator`.

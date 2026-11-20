@@ -43,7 +43,8 @@ swift-ember start --project App.xcodeproj --scheme App --configuration Debug \
 
 - Use `--workspace App.xcworkspace` for a workspace. Match
   `--derived-data-path` to the build's `-derivedDataPath` when you use one.
-- Use `--simulator <UDID>` when multiple Simulators are booted. For an
+- Use `--simulator <UDID>` and keep it on every command. Without it, one
+  booted Simulator is picked and `status` does not show which. For an
   authorized physical device use `--device <CoreDevice-ID>` instead.
 - If project configuration supplies the target, keep using it consistently.
   Explicit project/workspace plus scheme bypasses automatic config discovery.
@@ -53,6 +54,10 @@ swift-ember start --project App.xcodeproj --scheme App --configuration Debug \
   Save the PID and log path printed by `start`. Wait for the successful
   `connected  pid <app-pid>, <app-identifier>` line before editing. Read
   [sessions](references/sessions.md) for startup and target selection.
+- With several worktrees or agents, use one Simulator or device per
+  worktree. Pick one that no other session uses, or ask the user. Read
+  [parallel sessions](references/sessions.md#parallel-worktrees-and-agents)
+  before starting.
 - If an error names a denied localhost socket, `.ember` path, or app container,
   give the exact error to the user. See [sandbox](references/sandbox.md).
 
@@ -85,5 +90,7 @@ swift-ember start --project App.xcodeproj --scheme App --configuration Debug \
   `.emberable()`. If missing, use the normal build workflow.
 - When done, check the watcher PID against the one you started, run
   `swift-ember stop` with the same target arguments, and confirm
-  `daemon             not running` with `status`.
+  `daemon             not running` with `status`. Uninstall an app only if
+  it was absent before you installed it, since that deletes its data. Do not
+  shut down a Simulator you did not boot.
 - Keep `.ember/` and generated captures out of commits.
