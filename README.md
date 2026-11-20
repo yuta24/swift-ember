@@ -51,10 +51,10 @@ configuring the project.
 
 ### Host CLI
 
-Download the `0.4.0` binary and install it in `$HOME/.local/bin`:
+Download the `0.5.0` binary and install it in `$HOME/.local/bin`:
 
 ```sh
-version=0.4.0
+version=0.5.0
 curl -fL \
   "https://github.com/yuta24/swift-ember/releases/download/$version/swift-ember.zip" \
   -o swift-ember.zip
@@ -67,7 +67,27 @@ unzip swift-ember.zip
 ```
 
 Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
-check the installation with `swift-ember --help`.
+check the installation with `swift-ember --help`. To update, repeat these steps
+with the new version.
+
+The binary is ad-hoc signed, not notarized. Download it with `curl` as shown.
+A browser marks the download as quarantined, and macOS then refuses to run
+the binary.
+
+With [mise](https://mise.jdx.dev), install the same `swift-ember.zip` through
+the GitHub backend. This pins the version in the project's `mise.toml`:
+
+```sh
+mise use github:yuta24/swift-ember@0.5.0
+```
+
+To update the pinned version, run
+`mise upgrade --bump github:yuta24/swift-ember`. Use
+`mise use -g github:yuta24/swift-ember` instead to install the latest release
+for every directory, and `mise upgrade github:yuta24/swift-ember` to update it. Skip
+`install.sh` in this case. mise unpacks the archive and puts `bin/` on `PATH`
+in shells where it is activated. `swift-ember skill install` finds the skill
+bundled next to `bin/`.
 
 Each release also includes `swift-ember.artifactbundle.zip` for SwiftPM binary
 targets and build-tool plugins. Normal command-line installation should use
@@ -76,7 +96,7 @@ targets and build-tool plugins. Normal command-line installation should use
 To build the host CLI from source instead:
 
 ```sh
-git clone --branch 0.4.0 --depth 1 https://github.com/yuta24/swift-ember.git
+git clone --branch 0.5.0 --depth 1 https://github.com/yuta24/swift-ember.git
 cd swift-ember
 swift build -c release --package-path Tools/swift-ember
 mkdir -p "$HOME/.local/bin"
@@ -94,7 +114,7 @@ the root package resolve no SwiftSyntax dependency.
 
 In Xcode, choose **File > Add Package Dependencies**, enter
 `https://github.com/yuta24/swift-ember.git`, and select **Up to Next Minor
-Version** starting at `0.4.0`. Add `EmberRuntime` to a UIKit target, or
+Version** starting at `0.5.0`. Add `EmberRuntime` to a UIKit target, or
 `EmberSwiftUI` to a SwiftUI target; `EmberSwiftUI` brings and re-exports the
 runtime.
 
@@ -103,7 +123,7 @@ In another Swift package, declare the same dependency as:
 ```swift
 .package(
     url: "https://github.com/yuta24/swift-ember.git",
-    .upToNextMinor(from: "0.4.0")
+    .upToNextMinor(from: "0.5.0")
 )
 ```
 
@@ -365,6 +385,10 @@ For a terminal-managed watcher with a manifest, set the Build post-action to
 `xcode record` and run `swift-ember watch` after launching the app. Select the
 same app target under **Provide build settings from** for both build actions.
 Use **Product > Clean Build Folder** before the first build with these actions.
+
+The examples use the `$HOME/.local/bin` installation. Scheme actions do not
+run in a shell where mise is activated, so with mise use the absolute path
+that `mise which swift-ember` prints, and update it when you change versions.
 
 Both actions use the selected app target's build settings, including the
 output paths of builds run with `xcodebuild -derivedDataPath`. The pre-action
