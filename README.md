@@ -540,7 +540,7 @@ Tools/swift-ember/    host-only package; owns the SwiftSyntax dependency
 runtime/Sources        the in-app half: connect, load, report
 runtime/SwiftUI        optional observation and AnyView boundary
 integrations/xcode/    the xcconfig a project bases its Debug config on
-fixtures/              44 cases pinning what Swift dynamic replacement does,
+fixtures/              52 cases pinning what Swift dynamic replacement does,
                        and 4 more under ui/ that need a rendering process
 examples/CounterApp    a Simulator app built by script, flags in plain sight
 examples/XcodeApp      the same thing as a real .xcodeproj, in SwiftUI
@@ -557,7 +557,9 @@ through 6.4 across eight configurations, six locally and two on CI. The newest
 full run passes all 44 fixtures on the Simulator, 41 on the host with the three
 Simulator-only UIKit cases skipped, and the then-current 226 tests on local
 Swift 6.3.3. The current M6 host verification passes all 330 tests on Swift
-6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. `DESIGN.md` section 20
+6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. The newest host run, on
+Xcode 27.2 / Swift 6.4.2, passes 49 of the 52 fixtures with the three
+Simulator-only UIKit cases skipped, and all 385 tests. `DESIGN.md` section 20
 records exactly what was run on each configuration. Physical-device delivery
 is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16;
 an actual iOS 16 device has not yet been measured.
