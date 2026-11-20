@@ -51,6 +51,24 @@ esac
 SDKROOT="$(xcrun --sdk "$SDK" --show-sdk-path)" || exit 1
 SWIFT_VERSION="$(xcrun swiftc --version 2>/dev/null | head -1)"
 XCODE_PATH="$(xcode-select -p)"
+target_flags=(-target "$TRIPLE" -sdk "$SDKROOT")
+if [ -n "${SWIFT_MODULE_CACHE_PATH:-}" ]; then
+    target_flags+=(-module-cache-path "$SWIFT_MODULE_CACHE_PATH")
+fi
+
+# The app imports a separate Swift module, as it would for a local package.
+# A dylib also lets a macOS case run the identical app against a rebuilt library.
+build_dependency() {
+    local source="$1" output="$2"
+    mkdir -p "$output"
+    xcrun swiftc -parse-as-library -Onone "${target_flags[@]}" \
+        -enable-testing -Xfrontend -enable-implicit-dynamic \
+        -module-name FixtureDependency \
+        -emit-module -emit-module-path "$output/FixtureDependency.swiftmodule" \
+        -emit-library -o "$output/libFixtureDependency.dylib" \
+        -Xlinker -install_name -Xlinker @rpath/libFixtureDependency.dylib \
+        "$source" > "$output/dependency-build.log" 2>&1
+}
 
 # Every case's configuration is checked before any case is built.
 #
@@ -64,9 +82,13 @@ for dir in "$ROOT"/Cases/*/; do
     [ -f "$dir/case.conf" ] || continue
     (
         id="$(basename "$dir")"
+        KIND=replace
         PLATFORMS="macos simulator"
         EXTRA_SOURCES=""
         HARNESS_SOURCE="Harness/Harness.swift"
+        APP_OPTIMIZATION=-Onone
+        DEPENDENCY_SOURCE=""
+        UPDATED_DEPENDENCY_SOURCE=""
         # shellcheck disable=SC1090
         . "$dir/case.conf"
         [ -n "$PLATFORMS" ] || { echo "$id: PLATFORMS is empty" >&2; exit 64; }
@@ -86,6 +108,21 @@ for dir in "$ROOT"/Cases/*/; do
             echo "$id: HARNESS_SOURCE names a file that does not exist: $HARNESS_SOURCE" >&2
             exit 64
         }
+        case "$APP_OPTIMIZATION" in
+            -Onone|-O) ;;
+            *) echo "$id: unknown APP_OPTIMIZATION: $APP_OPTIMIZATION" >&2; exit 64 ;;
+        esac
+        for source in "$DEPENDENCY_SOURCE" "$UPDATED_DEPENDENCY_SOURCE"; do
+            [ -z "$source" ] || [ -f "$dir/$source" ] || {
+                echo "$id: dependency source does not exist: $source" >&2
+                exit 64
+            }
+        done
+        if [ -n "$UPDATED_DEPENDENCY_SOURCE" ] &&
+            { [ -z "$DEPENDENCY_SOURCE" ] || [ "$PLATFORMS" != macos ] || [ "$KIND" != replace ]; }; then
+            echo "$id: UPDATED_DEPENDENCY_SOURCE requires a macOS-only replace case with DEPENDENCY_SOURCE" >&2
+            exit 64
+        fi
     ) || exit 64
 done
 
@@ -112,6 +149,9 @@ for dir in "$ROOT"/Cases/*/; do
     # Most cases use the generation-at-a-time driver. A concurrency fixture
     # can replace it when the event under test has to straddle patch loading.
     HARNESS_SOURCE="Harness/Harness.swift"
+    APP_OPTIMIZATION=-Onone
+    DEPENDENCY_SOURCE=""
+    UPDATED_DEPENDENCY_SOURCE=""
     APP_TESTABILITY=yes
     APP_PRIVATE_IMPORTS=yes
     STATE_PRESERVED=no
@@ -159,11 +199,22 @@ for dir in "$ROOT"/Cases/*/; do
         for source in $EXTRA_SOURCES; do extra+=("$ROOT/../$source"); done
     fi
 
-    if ! xcrun swiftc -parse-as-library -Onone \
-            -target "$TRIPLE" -sdk "$SDKROOT" \
+    dependency_flags=()
+    if [ -n "$DEPENDENCY_SOURCE" ]; then
+        if build_dependency "$dir/$DEPENDENCY_SOURCE" "$out"; then
+            dependency_flags=(-I "$out" -L "$out" -lFixtureDependency
+                              -Xlinker -rpath -Xlinker @executable_path)
+        else
+            verdict=FAIL; detail="dependency build failed; see $out/dependency-build.log"
+        fi
+    fi
+
+    if [ -z "$verdict" ] && ! xcrun swiftc -parse-as-library "$APP_OPTIMIZATION" \
+            "${target_flags[@]}" \
             ${testflag[@]+"${testflag[@]}"} \
             ${privflag[@]+"${privflag[@]}"} \
             ${extra[@]+"${extra[@]}"} \
+            ${dependency_flags[@]+"${dependency_flags[@]}"} \
             -Xfrontend -enable-implicit-dynamic \
             -module-name "$MODULE" \
             -emit-module -emit-module-path "$out/$MODULE.swiftmodule" \
@@ -178,8 +229,7 @@ for dir in "$ROOT"/Cases/*/; do
         for patch in $PATCHES; do
             n=$((n + 1))
             lib="$out/patch$n.dylib"
-            if xcrun swiftc -Onone \
-                    -target "$TRIPLE" -sdk "$SDKROOT" \
+            if xcrun swiftc -Onone "${target_flags[@]}" \
                     -emit-library -o "$lib" \
                     -module-name "Patch$n" -I "$out" "$dir/$patch" \
                     -Xlinker -undefined -Xlinker dynamic_lookup \
@@ -193,7 +243,7 @@ for dir in "$ROOT"/Cases/*/; do
                 if [ "$KIND" = reject-compile ]; then
                     if grep -qF "$EXPECT_COMPILE_ERROR" "$out/patch$n-build.log"; then
                         verdict=PASS
-                        detail="rejected at COMPILE: $(grep -m1 -o "error:.*" "$out/patch$n-build.log")"
+                        detail="$(grep -m1 -F "$EXPECT_COMPILE_ERROR" "$out/patch$n-build.log" | sed 's/^[[:space:]]*//')"
                     else
                         verdict=FAIL
                         detail="rejected, but not with the expected diagnostic '$EXPECT_COMPILE_ERROR'"
@@ -209,6 +259,19 @@ for dir in "$ROOT"/Cases/*/; do
     if [ -z "$verdict" ]; then
         spawn "$out/app" ${dylibs[@]+"${dylibs[@]}"} > "$out/actual.txt" 2> "$out/stderr.txt"
         status=$?
+        if [ "$status" -eq 0 ] && [ -n "$UPDATED_DEPENDENCY_SOURCE" ]; then
+            variant="$out/dependency-v2"
+            if ! build_dependency "$dir/$UPDATED_DEPENDENCY_SOURCE" "$variant"; then
+                verdict=FAIL; detail="updated dependency build failed; see $variant/dependency-build.log"
+            elif DYLD_LIBRARY_PATH="$variant" "$out/app" > "$variant/actual.txt" 2> "$variant/stderr.txt"; then
+                sed 's/^/dependency-v2: /' "$variant/actual.txt" >> "$out/actual.txt"
+            else
+                verdict=FAIL; detail="application with updated dependency failed; see $variant/stderr.txt"
+            fi
+        fi
+    fi
+
+    if [ -z "$verdict" ]; then
         sed -i '' "s|$out|@BUILD@|g" "$out/actual.txt"
 
         signal=""
@@ -245,6 +308,7 @@ for dir in "$ROOT"/Cases/*/; do
 
     if [ "$verdict" = PASS ]; then
         pass=$((pass + 1)); printf '  \033[32mPASS\033[0m  %s\n' "$id"
+        [ "$KIND" = reject-compile ] && printf '        %s\n' "$detail"
     else
         fail=$((fail + 1)); printf '  \033[31mFAIL\033[0m  %s -- %s\n' "$id" "$detail"
         [ -f "$out/diff.txt" ] && sed 's/^/        /' "$out/diff.txt"

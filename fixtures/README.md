@@ -23,10 +23,9 @@ that `DESIGN.md` section 20 asks for, generated from actual runs rather than
 maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
-Both checked-in result files come from Xcode 27.0 Beta 6; the Simulator run
-used an iPhone 17 Pro on iOS 27.0. All 44 cases pass on the Simulator; the
-three UIKit cases have nothing to say on the host and are skipped there,
-leaving 41.
+The macOS result file comes from Xcode 27.2 and records 49 passes and three
+Simulator-only UIKit skips. The Simulator result file still records 44 passes
+on an iPhone 17 Pro running iOS 27.0 with Xcode 27.0 Beta 6.
 
 ## Case layout
 
@@ -34,7 +33,7 @@ leaving 41.
 Cases/<id>/
 ├── App.swift       defines `probe()`, or the entry points a custom harness uses
 ├── Patch.swift     the replacement (or Patch1.swift, Patch2.swift, ...)
-├── expected.txt    exact stdout, one line per generation
+├── expected.txt    exact stdout for a runnable case
 └── case.conf       optional overrides
 ```
 
@@ -59,6 +58,9 @@ so the value predates the patch.
 | `PATCHES` | `Patch.swift` | patch sources, loaded in order |
 | `APP_TESTABILITY` | `yes` | build the application with `-enable-testing` |
 | `APP_PRIVATE_IMPORTS` | `yes` | build the application with `-enable-private-imports` |
+| `APP_OPTIMIZATION` | `-Onone` | optimization level for the app, `-Onone` or `-O` |
+| `DEPENDENCY_SOURCE` | | case-relative source for a separate `FixtureDependency` module and dylib, built at `-Onone` |
+| `UPDATED_DEPENDENCY_SOURCE` | | case-relative source for a rebuilt dependency. On macOS the runner starts the same app binary with the rebuilt dylib and prefixes its output with `dependency-v2:` |
 | `STATE_PRESERVED` | `no` | recorded in `results.yaml` |
 | `EXPECT_COMPILE_ERROR` | | substring the patch build must emit, for `reject-compile` |
 | `EXPECT_SIGNAL` | | signal number, for `crash` |
@@ -119,11 +121,15 @@ behaviour, which is what `EXTRA_SOURCES` exists for.
 
 ## What the negative cases establish
 
-Four cases exist to prove the pipeline fails closed:
+The rejection cases pin distinct failure points:
 
 - `inlinable-rejected` and `transparent-rejected` --- implicit dynamic skips
   these declarations, and the patch is rejected at COMPILE with
   `replaced function ... is not marked dynamic`.
+- `cross-module-inlinable-rejected` gets the same compiler diagnostic for
+  the separate library. `always-emit-into-client-rejected` reaches the link
+  step of the fixture's `swiftc` invocation, where the local replacement key
+  has no address visible to the patch. Ember refuses both edits at CLASSIFY.
 - `private-rejected` --- rejected at COMPILE with
   `replaced function ... could not be found`.
 - `no-testability-rejected` --- without `-enable-testing` the patch cannot
@@ -146,6 +152,20 @@ Because the outcome is undefined, that case records what happened instead of
 asserting a specific result. Pinning an expectation to undefined behavior would
 only make the suite flaky. What is not undefined is the conclusion: the
 classifier must reject the edit before it ever reaches a process.
+
+## Reproducing client inlining on macOS
+
+```sh
+./fixtures/run.sh --case cross-module-generics-optimized
+```
+
+In `cross-module-generics-optimized/actual.txt` under the build directory,
+`g1` shows that the generic function and the `@usableFromInline` helper
+reload. The `dependency-v2:` lines come from a fresh process using the same
+app executable and a rebuilt dylib. Compare the direct app call, which still
+contains `old-body`, with the call made inside the library, which returns
+`new-body`. The corresponding `cross-module-generics` case tests the same
+dylib swap with a `-Onone` app and returns `new-body` on both paths.
 
 ## What the capability cases establish, and what they do not
 

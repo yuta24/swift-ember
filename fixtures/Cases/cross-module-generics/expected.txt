@@ -1,0 +1,9 @@
+g0: generic: old(7)
+g0: inlinable from app: old-body/old-helper
+g0: inlinable from library: old-body/old-helper
+g1: generic: new(7)
+g1: inlinable from app: old-body/new-helper
+g1: inlinable from library: old-body/new-helper
+dependency-v2: g0: generic: old(7)
+dependency-v2: g0: inlinable from app: new-body/old-helper
+dependency-v2: g0: inlinable from library: new-body/old-helper
