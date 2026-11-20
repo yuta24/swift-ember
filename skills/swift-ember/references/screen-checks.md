@@ -25,5 +25,5 @@ for the running app, then open the PNG. Substitute the literal UDID and
 an output path in an existing directory.
 
 ```sh
-xcrun simctl io 'SIMULATOR_UDID' '.ember/after.png'
+xcrun simctl io 'SIMULATOR_UDID' screenshot '.ember/after.png'
 ```
