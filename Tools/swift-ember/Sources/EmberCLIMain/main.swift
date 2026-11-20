@@ -67,16 +67,20 @@ do {
     startupProgress?.report("loading build context")
     resolvedProject = try options.resolveProject()
     context = try options.buildContext(project: resolvedProject)
-} catch let error as EmberError {
-    abort(error.description)
 } catch {
+    // A background `start` reads these lines back into its own error.
+    if let startupProgress {
+        startupProgress.reportFailure(String(describing: error))
+        exit(1)
+    }
     abort("\(error)")
 }
 
 switch options.command {
 case .status:
-    if let pid = Lifecycle.runningPID(options: options) {
-        print("daemon             running (pid \(pid))")
+    let running = Lifecycle.runningSession(options: options)
+    if let running {
+        print("daemon             running (pid \(running.pid))")
     } else {
         print("daemon             not running")
     }
@@ -85,10 +89,20 @@ case .status:
     print("sdk                \(context.sdkName)")
     print("compiler           \(context.swiftCompilerVersion)")
     print("bundle id          \(context.bundleIdentifier)")
-    let transport = context.deviceIdentifier.map { "physical device \($0)" }
-        ?? context.simulatorIdentifier.map { "simulator \($0)" }
-        ?? "simulator"
+    // Split up: one `??` chain of optional maps took too long to type-check
+    // on Xcode 16 and 26.2.
+    let transport: String
+    if let identifier = running?.simulatorIdentifier {
+        transport = "simulator \(identifier)"
+    } else if let identifier = context.deviceIdentifier {
+        transport = "physical device \(identifier)"
+    } else if let identifier = context.simulatorIdentifier {
+        transport = "simulator \(identifier)"
+    } else {
+        transport = "simulator"
+    }
     print("transport          \(transport)")
+    if let warning = running?.simulatorWarning { print(warning) }
     if let identity = context.codeSigningIdentity {
         print("signing identity   \(identity)")
     }
@@ -164,16 +178,19 @@ case .watch:
         try await Watch.run(
             context: context,
             workDirectory: Lifecycle.patchDirectory(for: options),
+            session: Lifecycle.session(for: options),
             rebuildCommand: options.rebuildCommand,
             rebuildDirectory: options.rebuildDirectory.map {
                 URL(fileURLWithPath: $0, isDirectory: true)
             },
             rebuildTimeout: options.rebuildTimeout,
             startupProgress: startupProgress,
-            onReady: { try Lifecycle.markReady() })
-    } catch let error as EmberError {
-        abort(error.description)
+            onReady: { try Lifecycle.markReady(simulator: $0) })
     } catch {
+        if let startupProgress {
+            startupProgress.reportFailure(String(describing: error))
+            exit(1)
+        }
         abort("\(error)")
     }
 }

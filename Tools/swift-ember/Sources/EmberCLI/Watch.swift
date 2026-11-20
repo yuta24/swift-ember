@@ -5,34 +5,31 @@ import EmberGen
 
 public enum Watch {
     public static func run(
-        context: BuildContext,
+        context originalContext: BuildContext,
         workDirectory: URL,
+        session: Lifecycle.Session? = nil,
         rebuildCommand: String? = nil,
         rebuildDirectory: URL? = nil,
         rebuildTimeout: TimeInterval = 300,
         startupProgress: Lifecycle.StartupProgress? = nil,
-        onReady: (() throws -> Void)? = nil
+        onReady: ((SimulatorSelection?) throws -> Void)? = nil
     ) async throws {
         startupProgress?.report("checking build product")
-        try validatePhysicalDevice(context)
-        let roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
-        let excluded = context.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) }
-        let sourceFilter = SourcePathFilter(excluding: context.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
-        let buildOutputs = SourcePathFilter(excluding: context.buildOutputPaths.map { URL(fileURLWithPath: $0) })
+        try validatePhysicalDevice(originalContext)
 
         // `doctor` checks this and `watch` did not, so pointing it at a
         // product that had never been built started a normal-looking session
         // against a binary that does not exist -- and the first save blamed the
         // *package* setting, because the inventory cannot tell "file missing"
         // from "file exports nothing".
-        guard FileManager.default.fileExists(atPath: context.linkTarget) else {
-            let hint = context.xcodeSourceTargets != nil
+        guard FileManager.default.fileExists(atPath: originalContext.linkTarget) else {
+            let hint = originalContext.xcodeSourceTargets != nil
                 ? "\n\n\(XcodeProject.derivedDataPathHint)"
                 : ""
             throw EmberError(
-                stage: .watch, subject: (context.linkTarget as NSString).lastPathComponent,
+                stage: .watch, subject: (originalContext.linkTarget as NSString).lastPathComponent,
                 reason: """
-                    there is no binary at \(context.linkTarget).
+                    there is no binary at \(originalContext.linkTarget).
 
                     A patch is compiled and linked against the built product, so the app \
                     has to have been built for this configuration before it can be \
@@ -41,11 +38,17 @@ public enum Watch {
                 recovery: .rebuild)
         }
 
+        // Validate the build before claiming the destination. Use the resolved
+        // UDID for every publication and patch, even if the booted set changes.
+        let roots = originalContext.sourceRoots.map { URL(fileURLWithPath: $0) }
+        let excluded = originalContext.unwatchedSourcePaths.map { URL(fileURLWithPath: $0) }
+        let sourceFilter = SourcePathFilter(excluding: originalContext.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
+        let buildOutputs = SourcePathFilter(excluding: originalContext.buildOutputPaths.map { URL(fileURLWithPath: $0) })
         var resolver = ModuleResolver(
-            context: context,
+            context: originalContext,
             cacheDirectory: workDirectory.appendingPathComponent("package-manifest-cache", isDirectory: true))
         var testSources: Set<URL> = []
-        let manifest = BuildSourceManifest(context: context)
+        let manifest = BuildSourceManifest(context: originalContext)
         startupProgress?.report("capturing source snapshot")
         let snapshot = try await manifest.snapshot { url in
             guard resolver.isTestSource(url) else { return false }
@@ -59,6 +62,19 @@ public enum Watch {
             print("  Edits between the build and watcher startup cannot be verified.")
             print("  For optional source recording, see \"Scheme actions (optional)\" in README.md.")
         }
+
+        startupProgress?.report("selecting destination")
+        let selection = try SimulatorSelection.resolve(context: originalContext)
+        if let warning = selection?.warning { print(warning) }
+        var selectedContext = originalContext
+        selectedContext.simulatorIdentifier = selection?.identifier
+        let context = selectedContext
+        let ownership = try selection.map {
+            try SimulatorOwnership.acquire(simulator: $0.identifier, bundle: context.bundleIdentifier,
+                                           owner: Lifecycle.watcherOwner(session: session))
+        }
+        if let warning = ownership?.warning { print(warning) }
+        defer { withExtendedLifetime(ownership) {} }
 
         startupProgress?.report("preparing IPC listener and source baselines")
         let server = try IPCServer()
@@ -124,7 +140,12 @@ public enum Watch {
         startupProgress?.report(context.deviceIdentifier != nil
             ? "publishing session through CoreDevice"
             : "publishing Simulator session (simctl get_app_container)")
-        try await coordinator.announceSession()
+        try await coordinator.announceSession { url in
+            if let selection, let owner = SimulatorOwnership.previousOwner(at: url) {
+                throw SimulatorOwnership.Conflict(simulator: selection.identifier,
+                                                  bundle: context.bundleIdentifier, owner: owner)
+            }
+        }
 
         print("watching \(context.sourceRoots.joined(separator: ", "))")
         if !context.buildOutputPaths.isEmpty {
@@ -143,6 +164,7 @@ public enum Watch {
         // physical device a slower status heartbeat notices a reinstall, which
         // moves the app to a new container, before republishing there.
         let reannounce = Task.detached {
+            defer { withExtendedLifetime(ownership) {} }
             // Detached so the wait between attempts is not held on the caller.
             // It does not keep `simctl` off the coordinator: `announceSession`
             // is actor-isolated, so a save landing in that 94 ms window queues
@@ -156,6 +178,7 @@ public enum Watch {
                 let normalDelay = context.deviceIdentifier != nil && physicalConnected ? 10 : 2
                 try? await Task.sleep(for: .seconds(
                     consecutiveFailures == 0 ? normalDelay : backoff))
+                guard !Task.isCancelled else { break }
 
                 if context.deviceIdentifier != nil {
                     do {
@@ -214,7 +237,7 @@ public enum Watch {
         }
         defer { termination?.cancel() }
         startupProgress?.report("writing readiness record")
-        try onReady?()
+        try onReady?(selection)
         startupProgress?.report("watcher ready")
 
         var removalGuard = RemovalGuard()

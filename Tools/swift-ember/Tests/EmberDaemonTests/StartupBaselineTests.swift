@@ -22,7 +22,7 @@ struct StartupBaselineTests {
 
         let failure = await #expect(throws: EmberError.self) {
             try await Watch.run(context: fixture.context, workDirectory: fixture.patch.deletingLastPathComponent(),
-                                onReady: { Issue.record("watcher accepted sources that differ from the build") })
+                                onReady: { _ in Issue.record("watcher accepted sources that differ from the build") })
         }
         #expect(failure?.stage == .watch)
         #expect(failure?.recovery == .rebuild)

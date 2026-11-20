@@ -304,7 +304,9 @@ swift-ember watch --project App.xcodeproj --scheme App --sources Sources \
   --derived-data-path .build-xcode
 ```
 
-When more than one Simulator is booted, select one by UDID.
+When more than one Simulator is booted, select one by UDID. Without
+`--simulator`, the watcher chooses one booted Simulator and warns when there
+are several. It keeps using the selected UDID for the life of the watcher.
 
 ```sh
 xcrun simctl list devices booted
@@ -441,14 +443,22 @@ swift-ember status
 swift-ember stop
 ```
 
-`start` returns only after the watcher is ready. A second `start` is harmless,
-and `stop` is idempotent. Session records, logs, and isolated patch output live
+`start` returns only after the watcher is ready. Repeating `start` for the same
+session reports the existing watcher, and `stop` is idempotent. Session records,
+logs, and isolated patch output live
 under `.ember/sessions`, `.ember/logs`, and `.ember/patches` beside the project
 or context file. `stop` verifies the PID, executable path, and process start
 time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
 process. Startup waits for up to 60 seconds by default. Override it with
-`--startup-timeout <seconds>`. When selecting a Simulator by UDID, pass the
-same `--simulator` value to `start`, `status`, and `stop`.
+`--startup-timeout <seconds>`. Both `start` and `status` report the selected
+Simulator UDID for a running watcher. For a session started with
+`--simulator`, pass the same UDID to `status` and `stop`. Those commands can
+also find an implicitly started session if its recorded UDID matches.
+
+Only one watcher can use a given Simulator and bundle ID at a time, including
+across projects and worktrees. A conflicting start fails before it can replace
+the app's session file. Use the owner PID and log path in the error to find the
+existing watcher, or use a different Simulator.
 
 ### Using init and Ember.xcconfig (optional)
 

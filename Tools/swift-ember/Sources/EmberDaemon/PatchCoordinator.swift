@@ -292,7 +292,7 @@ public actor PatchCoordinator {
     /// somewhere else. Without that, a reinstall left the session file in the
     /// old container, the app never found it, and the daemon waited for a
     /// connection that could not happen.
-    public func announceSession() throws {
+    public func announceSession(checkSimulatorSession: (@Sendable (URL) throws -> Void)? = nil) throws {
         if let physicalDevice {
             // A status cached from the preceding build must not survive the
             // publication of a new expected UUID set.
@@ -307,7 +307,8 @@ public actor PatchCoordinator {
         } else if let simulatorContainer {
             simulatorContainer.invalidate()
             try simulatorContainer.writeSession(port: server.port, token: server.token,
-                                                buildIdentity: context.identity, buildUUIDs: buildUUIDs)
+                                                buildIdentity: context.identity, buildUUIDs: buildUUIDs,
+                                                beforeWriting: checkSimulatorSession)
         }
     }
 
@@ -1089,15 +1090,16 @@ final class SimulatorContainer: @unchecked Sendable {
     /// directory. That is a path the runtime can always read, which a
     /// well-known host path is not.
     func writeSession(port: UInt16, token: String, buildIdentity: String,
-                      buildUUIDs: [String]) throws {
+                      buildUUIDs: [String], beforeWriting: ((URL) throws -> Void)? = nil) throws {
         let documents = try dataContainer().appendingPathComponent("Documents", isDirectory: true)
+        // Stable protocol identifier for existing runtimes.
+        let session = documents.appendingPathComponent("splice-session.json")
+        try beforeWriting?(session)
         try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
         let payload: [String: Any] = ["port": Int(port), "token": token,
                                       "buildIdentity": buildIdentity, "buildUUIDs": buildUUIDs]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        // Stable protocol identifier: existing runtimes still discover this
-        // pre-Ember filename, so branding must not change it within protocol v6.
-        try data.write(to: documents.appendingPathComponent("splice-session.json"))
+        try data.write(to: session, options: .atomic)
     }
 
     func deliver(_ image: URL) throws -> URL {
