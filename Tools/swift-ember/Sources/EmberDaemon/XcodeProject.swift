@@ -81,7 +81,11 @@ public struct XcodeProject: Sendable {
     public func resolve(sourceRoots: [String], excludedSourcePaths: [String] = [],
                         schemeBuildSettings: [String: String]? = nil,
                         allowsMissingSchemeBinary: Bool = false) throws -> Resolved {
-        let settings = try buildSettings(schemeEnvironment: schemeBuildSettings, query: readSettings)
+        var queriedTargets: [[String: String]] = []
+        let settings = try buildSettings(schemeEnvironment: schemeBuildSettings) {
+            queriedTargets = try readSettings()
+            return try applicationSettings(in: queriedTargets)
+        }
         let isSchemeAction = schemeBuildSettings != nil
         let products = try buildProducts(from: settings, schemeAction: isSchemeAction)
         if isSchemeAction, !allowsMissingSchemeBinary,
@@ -102,6 +106,47 @@ public struct XcodeProject: Sendable {
         // rather than a lookup.
         let triple = try Self.targetTriple(from: settings)
 
+        // Scheme actions can export an SDK name in SDKROOT and the resolved
+        // directory separately in SDK_DIR. swiftc's -sdk needs the directory.
+        let sdkRoot = try require("SDKROOT")
+        let sdkPath = if sdkRoot.hasPrefix("/") { sdkRoot } else { try require("SDK_DIR") }
+        guard sdkPath.hasPrefix("/") else {
+            throw schemeError("Xcode did not report an absolute SDK directory for SDKROOT '\(sdkRoot)'.")
+        }
+        let roots = sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots
+        var context = BuildContext(
+            moduleName: module,
+            swiftCompilerPath: try which("swiftc"),
+            swiftCompilerVersion: try compilerVersion(),
+            targetTriple: triple,
+            sdkPath: sdkPath,
+            sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
+            appBinaryPath: products.executable,
+            // The application's own .swiftmodule is what a patch imports.
+            moduleSearchPaths: [products.directory, products.directory + "/\(module).swiftmodule"]
+                + Self.parseSearchPaths(settings["SWIFT_INCLUDE_PATHS"]),
+            extraCompilerFlags: Self.compilerFlags(from: settings),
+            sourceRoots: roots,
+            bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
+            debugDylibPath: products.debugDylib,
+            // Without these, copying an import of a framework the app finds by
+            // -F turns every patch from that file into "no such module".
+            frameworkSearchPaths: [products.directory]
+                + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
+            deviceIdentifier: deviceIdentifier,
+            simulatorIdentifier: simulatorIdentifier,
+            codeSigningIdentity: Self.signingIdentity(from: settings),
+            excludedSourcePaths: excludedSourcePaths,
+            buildOutputPaths: buildOutputPaths(from: settings, sourceRoots: roots),
+            xcodeSourceTargets: Self.sourceTargets(appSettings: settings, queriedTargets: queriedTargets))
+
+        let membership = Self.projectSources(in: [settings] + queriedTargets)
+        context.xcodeTestSources = membership.test
+        context.xcodeNonTestSources = membership.other
+        return Resolved(context: context, settings: settings)
+    }
+
+    static func compilerFlags(from settings: [String: String]) -> [String] {
         // Everything that changes how the patched body is *interpreted* has to
         // reach the patch compile. A `#if` taking the other branch is the
         // obvious one; the language mode is the dangerous one, because a body
@@ -157,41 +202,7 @@ public struct XcodeProject: Sendable {
                       Self.featureName(fromSettingSuffix:
                         key.replacingOccurrences(of: "SWIFT_UPCOMING_FEATURE_", with: ""))]
         }
-
-        // Scheme actions can export an SDK name in SDKROOT and the resolved
-        // directory separately in SDK_DIR. swiftc's -sdk needs the directory.
-        let sdkRoot = try require("SDKROOT")
-        let sdkPath = if sdkRoot.hasPrefix("/") { sdkRoot } else { try require("SDK_DIR") }
-        guard sdkPath.hasPrefix("/") else {
-            throw schemeError("Xcode did not report an absolute SDK directory for SDKROOT '\(sdkRoot)'.")
-        }
-        let roots = sourceRoots.isEmpty ? [try require("SRCROOT")] : sourceRoots
-        let context = BuildContext(
-            moduleName: module,
-            swiftCompilerPath: try which("swiftc"),
-            swiftCompilerVersion: try compilerVersion(),
-            targetTriple: triple,
-            sdkPath: sdkPath,
-            sdkName: settings["PLATFORM_NAME"] ?? "iphonesimulator",
-            appBinaryPath: products.executable,
-            // The application's own .swiftmodule is what a patch imports.
-            moduleSearchPaths: [products.directory, products.directory + "/\(module).swiftmodule"]
-                + Self.parseSearchPaths(settings["SWIFT_INCLUDE_PATHS"]),
-            extraCompilerFlags: flags,
-            sourceRoots: roots,
-            bundleIdentifier: try require("PRODUCT_BUNDLE_IDENTIFIER"),
-            debugDylibPath: products.debugDylib,
-            // Without these, copying an import of a framework the app finds by
-            // -F turns every patch from that file into "no such module".
-            frameworkSearchPaths: [products.directory]
-                + Self.parseSearchPaths(settings["FRAMEWORK_SEARCH_PATHS"]),
-            deviceIdentifier: deviceIdentifier,
-            simulatorIdentifier: simulatorIdentifier,
-            codeSigningIdentity: Self.signingIdentity(from: settings),
-            excludedSourcePaths: excludedSourcePaths,
-            buildOutputPaths: buildOutputPaths(from: settings, sourceRoots: roots))
-
-        return Resolved(context: context, settings: settings)
+        return flags
     }
 
     func buildOutputPaths(from settings: [String: String], sourceRoots: [String]) -> [String] {
@@ -409,7 +420,7 @@ public struct XcodeProject: Sendable {
         return arguments
     }
 
-    private func readSettings() throws -> [String: String] {
+    private func readSettings() throws -> [[String: String]] {
         // Separate pipes. Merging them and hunting for the first bracket found
         // the one inside `2026-08-24 08:54:10.308 xcodebuild[27960:9171152]`,
         // and any stray notice on stderr made a healthy project unreadable.
@@ -442,13 +453,18 @@ public struct XcodeProject: Sendable {
                               recovery: .rebuild)
         }
 
+        return entries.compactMap { entry in
+            (entry["buildSettings"] as? [String: Any])?.compactMapValues { $0 as? String }
+        }
+    }
+
+    private func applicationSettings(in targets: [[String: String]]) throws -> [String: String] {
         // With several targets in the scheme the application is the one that
         // produces an app wrapper. Falling back to "whatever came first" meant
         // a framework-only scheme yielded that framework's module name and
         // bundle identifier, and the mistake surfaced much later as an
         // unrelated container or link failure.
-        let applications = entries.compactMap { $0["buildSettings"] as? [String: Any] }
-            .filter { ($0["WRAPPER_EXTENSION"] as? String) == "app" }
+        let applications = targets.filter { $0["WRAPPER_EXTENSION"] == "app" }
 
         guard !applications.isEmpty else {
             throw EmberError(stage: .watch, subject: scheme,
@@ -456,7 +472,7 @@ public struct XcodeProject: Sendable {
                               recovery: .rebuild)
         }
         guard applications.count == 1 else {
-            let names = applications.compactMap { $0["PRODUCT_NAME"] as? String }.sorted()
+            let names = applications.compactMap { $0["PRODUCT_NAME"] }.sorted()
             throw EmberError(
                 stage: .watch, subject: scheme,
                 reason: """
@@ -470,7 +486,7 @@ public struct XcodeProject: Sendable {
                     """,
                 recovery: .configure)
         }
-        return applications[0].compactMapValues { $0 as? String }
+        return applications[0]
     }
 
     static func targetTriple(from settings: [String: String]) throws -> String {

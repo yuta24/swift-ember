@@ -97,7 +97,8 @@ case .doctor:
             abort("\(error)")
         }
     }
-    exit(Doctor.run(context: context, project: resolvedProject) ? 0 : 1)
+    exit(Doctor.run(context: context, project: resolvedProject,
+                    manifestCacheDirectory: Lifecycle.manifestCacheDirectory(for: options)) ? 0 : 1)
 
 case .start:
     do {

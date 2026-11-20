@@ -853,9 +853,11 @@ private final class DeliveryProbe: @unchecked Sendable {
         .appendingPathComponent("ember-atomic-pending-contexts-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try "// swift-tools-version: 6.0".write(
-        to: root.appendingPathComponent("Package.swift"),
-        atomically: true, encoding: .utf8)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "FeatureA"), .target(name: "FeatureB")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
 
     var sourcesByModule: [[URL]] = []
     for module in ["FeatureA", "FeatureB"] {
@@ -943,8 +945,11 @@ private final class DeliveryProbe: @unchecked Sendable {
         .appendingPathComponent("ember-atomic-new-context-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try "// swift-tools-version: 6.0".write(
-        to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "FeatureA"), .target(name: "FeatureB")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
 
     let featureA = root.appendingPathComponent("Sources/FeatureA", isDirectory: true)
     let featureB = root.appendingPathComponent("Sources/FeatureB", isDirectory: true)
@@ -1021,9 +1026,11 @@ private final class DeliveryProbe: @unchecked Sendable {
         .appendingPathComponent("ember-atomic-modules-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try "// swift-tools-version: 6.0".write(
-        to: root.appendingPathComponent("Package.swift"),
-        atomically: true, encoding: .utf8)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "FeatureA"), .target(name: "FeatureB")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
     let sources = try ["FeatureA", "FeatureB"].map { module in
         let directory = root.appendingPathComponent("Sources/\(module)", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -1087,9 +1094,11 @@ private final class DeliveryProbe: @unchecked Sendable {
         .appendingPathComponent("ember-atomic-module-compile-failure-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try "// swift-tools-version: 6.0".write(
-        to: root.appendingPathComponent("Package.swift"),
-        atomically: true, encoding: .utf8)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "FeatureA"), .target(name: "FeatureB")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
 
     let sources = try ["FeatureA", "FeatureB"].map { module in
         let directory = root.appendingPathComponent("Sources/\(module)", isDirectory: true)
@@ -1110,6 +1119,8 @@ private final class DeliveryProbe: @unchecked Sendable {
         """.write(to: compiler, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes(
         [.posixPermissions: 0o755], ofItemAtPath: compiler.path)
+    try FileManager.default.createSymbolicLink(
+        at: root.appendingPathComponent("swift"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/swift"))
 
     let server = try IPCServer()
     defer { server.stop() }

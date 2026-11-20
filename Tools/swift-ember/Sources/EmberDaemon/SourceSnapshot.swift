@@ -26,9 +26,12 @@ public struct SourceSnapshot: Equatable, Sendable {
     public static func capture(
         from roots: [URL],
         excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
-        ignoring ignored: SourcePathFilter = SourcePathFilter()
+        ignoring ignored: SourcePathFilter = SourcePathFilter(),
+        skippingSource: (URL) -> Bool = { _ in false }
     ) throws -> SourceSnapshot {
-        try capture(excluding: sourceFilter) { try FileWatcher.scan(roots: roots, excluding: ignored) }
+        try capture(excluding: sourceFilter) {
+            try FileWatcher.scan(roots: roots, excluding: ignored, skippingSource: skippingSource)
+        }
     }
 
     private static func capture(
@@ -70,10 +73,11 @@ public struct SourceSnapshot: Equatable, Sendable {
 
     public static func captureForStartup(
         from roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
-        ignoring ignored: SourcePathFilter = SourcePathFilter()
+        ignoring ignored: SourcePathFilter = SourcePathFilter(),
+        skippingSource: (URL) -> Bool = { _ in false }
     ) throws -> SourceSnapshot {
         try captureForStartup(excluding: sourceFilter) {
-            try FileWatcher.scan(roots: roots, excluding: ignored)
+            try FileWatcher.scan(roots: roots, excluding: ignored, skippingSource: skippingSource)
         }
     }
 

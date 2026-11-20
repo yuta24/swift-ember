@@ -25,6 +25,52 @@ public struct BuildContext: Codable, Sendable {
     public var excludedSourcePaths: [String] = []
     /// Xcode build outputs are also skipped when capturing safety baselines.
     public var buildOutputPaths: [String] = []
+    /// Explicit source file or directory paths keyed by path, with the Swift
+    /// module name as the value. These take precedence over build metadata.
+    public var sourceModules: [String: String] = [:]
+
+    public struct XcodeSourceTarget: Codable, Sendable {
+        public let directory: String
+        public let productName: String?
+        public let module: String?
+        public let compilerFlags: [String]?
+        public let isTest: Bool?
+
+        public init(directory: String, productName: String? = nil, module: String? = nil,
+                    compilerFlags: [String]? = nil, isTest: Bool? = nil) {
+            self.directory = directory
+            self.productName = productName
+            self.module = module
+            self.compilerFlags = compilerFlags
+            self.isTest = isTest
+        }
+    }
+
+    /// Nil for custom build manifests. An empty Xcode list means ownership
+    /// could not be established and must not default to the app target.
+    public var xcodeSourceTargets: [XcodeSourceTarget]?
+
+    public struct XcodeProjectSources: Codable, Sendable {
+        public struct Directory: Codable, Sendable {
+            public let path: String
+            public let excludedPaths: [String]
+
+            public init(path: String, excludedPaths: [String]) {
+                self.path = path
+                self.excludedPaths = excludedPaths
+            }
+        }
+
+        public var files: [String] = []
+        public var directories: [Directory] = []
+
+        public init() {}
+    }
+
+    /// Source membership Xcode declares in its project, including test targets
+    /// that have never been built and have no SwiftFileList.
+    public var xcodeTestSources: XcodeProjectSources?
+    public var xcodeNonTestSources: XcodeProjectSources?
 
     public var unwatchedSourcePaths: [String] { excludedSourcePaths + buildOutputPaths }
 
@@ -54,7 +100,8 @@ public struct BuildContext: Codable, Sendable {
                 debugDylibPath: String? = nil, frameworkSearchPaths: [String] = [],
                 deviceIdentifier: String? = nil, simulatorIdentifier: String? = nil,
                 codeSigningIdentity: String? = nil, excludedSourcePaths: [String] = [],
-                buildOutputPaths: [String] = []) {
+                buildOutputPaths: [String] = [], sourceModules: [String: String] = [:],
+                xcodeSourceTargets: [XcodeSourceTarget]? = nil) {
         self.debugDylibPath = debugDylibPath
         self.frameworkSearchPaths = frameworkSearchPaths
         self.moduleName = moduleName
@@ -69,6 +116,8 @@ public struct BuildContext: Codable, Sendable {
         self.sourceRoots = sourceRoots
         self.excludedSourcePaths = excludedSourcePaths
         self.buildOutputPaths = buildOutputPaths
+        self.sourceModules = sourceModules
+        self.xcodeSourceTargets = xcodeSourceTargets
         self.bundleIdentifier = bundleIdentifier
         self.deviceIdentifier = deviceIdentifier
         self.simulatorIdentifier = simulatorIdentifier
@@ -135,6 +184,10 @@ public struct BuildContext: Codable, Sendable {
         frameworkSearchPaths = try container.decodeIfPresent([String].self, forKey: .frameworkSearchPaths) ?? []
         excludedSourcePaths = try container.decodeIfPresent([String].self, forKey: .excludedSourcePaths) ?? []
         buildOutputPaths = try container.decodeIfPresent([String].self, forKey: .buildOutputPaths) ?? []
+        sourceModules = try container.decodeIfPresent([String: String].self, forKey: .sourceModules) ?? [:]
+        xcodeSourceTargets = try container.decodeIfPresent([XcodeSourceTarget].self, forKey: .xcodeSourceTargets)
+        xcodeTestSources = try container.decodeIfPresent(XcodeProjectSources.self, forKey: .xcodeTestSources)
+        xcodeNonTestSources = try container.decodeIfPresent(XcodeProjectSources.self, forKey: .xcodeNonTestSources)
         debugDylibPath = try container.decodeIfPresent(String.self, forKey: .debugDylibPath)
         deviceIdentifier = try container.decodeIfPresent(String.self, forKey: .deviceIdentifier)
         simulatorIdentifier = try container.decodeIfPresent(String.self, forKey: .simulatorIdentifier)

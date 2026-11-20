@@ -183,7 +183,10 @@ checkout:
   "exclude": [
     "Sources/Generated",
     "Sources/Legacy/DoNotWatch.swift"
-  ]
+  ],
+  "sourceModules": {
+    "Frameworks/Checkout/Sources": "CheckoutKit"
+  }
 }
 ```
 
@@ -197,6 +200,26 @@ are relative to `.swift-ember.json`, just like `sources`. Command-line options
 override the file, including `--exclude` for an explicit comma-separated list.
 Unknown keys are rejected so a misspelled `sources` or `exclude` cannot silently
 change what is watched.
+
+`sourceModules` optionally maps paths relative to the configuration file to
+Swift module names. A file or directory entry overrides automatic target
+membership, and the most specific path wins. The mapping uses the Swift module
+name (Xcode's `PRODUCT_MODULE_NAME`) and applies within the watched source roots.
+
+For SwiftPM sources, Ember uses the files listed by `swift package describe`,
+including custom target paths, source lists, and exclusions. For Xcode, it
+uses the selected build's Swift compilation file lists. Build the watched
+targets before running `doctor` or `watch`, and pass `--derived-data-path` if
+the build used a custom DerivedData directory. Xcode dependencies in another
+project can be listed in the scheme's Build action or mapped with
+`sourceModules`. SwiftPM test targets and Xcode unit and UI test targets are
+excluded from watching. Files with unknown or ambiguous membership produce a
+warning in `doctor`. `doctor` still requires at least one watched module and
+checks that each resolved module is patchable. Use `exclude` for other files
+you do not intend to patch, such as package manifests. When a new file has
+no entry in the build's source list, `watch` asks you to rebuild. `watch`
+evaluates watched packages at startup, and `doctor` reuses the project's
+SwiftPM manifest cache under `.ember/cache`.
 
 `rebuildCommand` is optional and explicitly opts into automatic recovery for a
 change that cannot be patched, such as adding a stored property. It runs through

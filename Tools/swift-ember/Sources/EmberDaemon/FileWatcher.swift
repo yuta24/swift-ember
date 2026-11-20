@@ -52,10 +52,11 @@ public final class FileWatcher: @unchecked Sendable {
     public init(
         roots: [URL],
         excluding excluded: [URL] = [],
+        excludingFiles files: [URL] = [],
         interval: Duration = .milliseconds(150)
     ) {
         self.roots = roots
-        self.sourceFilter = SourcePathFilter(excluding: excluded)
+        self.sourceFilter = SourcePathFilter(excluding: excluded, excludingFiles: files)
         self.interval = interval
     }
 
@@ -69,7 +70,11 @@ public final class FileWatcher: @unchecked Sendable {
     /// Use the metadata captured with the validated text. A second scan here
     /// would acknowledge a save without letting the coordinator see it.
     public func prime(from snapshot: SourceSnapshot) {
-        lock.withLock { stamps = snapshot.stamps.filter { snapshot.watched[$0.key] != nil } }
+        lock.withLock {
+            stamps = snapshot.stamps.filter {
+                snapshot.watched[$0.key] != nil && !sourceFilter.excludes(standardizedPath: $0.key.path)
+            }
+        }
     }
 
     public func start(
@@ -131,17 +136,19 @@ public final class FileWatcher: @unchecked Sendable {
     }
 
     static func scan(
-        roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter()
+        roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
+        skippingSource: (URL) -> Bool = { _ in false }
     ) throws -> [URL: SourceFileStamp] {
         var result: [URL: SourceFileStamp] = [:]
         var problems: [String] = []
         let manager = FileManager.default
         for root in roots {
             let root = root.standardizedFileURL
-            guard !sourceFilter.excludes(root) else { continue }
+            let rootPath = root.path
+            guard !sourceFilter.excludes(standardizedPath: rootPath) else { continue }
             var isDirectory: ObjCBool = false
-            guard manager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                problems.append("\(root.path): source root is missing, inaccessible, or not a directory")
+            guard manager.fileExists(atPath: rootPath, isDirectory: &isDirectory), isDirectory.boolValue else {
+                problems.append("\(rootPath): source root is missing, inaccessible, or not a directory")
                 continue
             }
             guard let walker = manager.enumerator(at: root,
@@ -151,18 +158,19 @@ public final class FileWatcher: @unchecked Sendable {
                                                       problems.append("\(url.path): \(error.localizedDescription)")
                                                       return true
                                                   }) else {
-                problems.append("\(root.path): could not enumerate the source root")
+                problems.append("\(rootPath): could not enumerate the source root")
                 continue
             }
             for case let url as URL in walker {
-                if sourceFilter.excludes(url) {
+                let standardized = url.standardizedFileURL
+                if sourceFilter.excludes(standardizedPath: standardized.path) {
                     walker.skipDescendants()
                     continue
                 }
-                guard url.pathExtension == "swift" else { continue }
+                guard url.pathExtension == "swift", !skippingSource(url) else { continue }
                 do {
                     if let stamp = try SourceFileStamp.read(from: url) {
-                        result[url.standardizedFileURL] = stamp
+                        result[standardized] = stamp
                     }
                 } catch {
                     problems.append("\(url.path): \(error.localizedDescription)")

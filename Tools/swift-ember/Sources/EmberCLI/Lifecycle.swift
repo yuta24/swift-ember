@@ -297,6 +297,11 @@ public enum Lifecycle {
         return session(for: options).patchURL.appendingPathComponent(owner, isDirectory: true)
     }
 
+    public static func manifestCacheDirectory(for options: Options) -> URL {
+        session(for: options).patchURL.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("cache/package-manifests", isDirectory: true)
+    }
+
     /// Written by a background `watch` once it is ready to accept edits.
     public static func markReady(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
         guard let path = environment[recordEnvironment] else { return }

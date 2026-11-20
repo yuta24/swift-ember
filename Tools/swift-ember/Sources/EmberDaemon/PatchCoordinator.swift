@@ -51,11 +51,11 @@ public actor PatchCoordinator {
     private let compiler: PatchCompiler
     private let simulatorContainer: SimulatorContainer?
     private let physicalDevice: PhysicalDeviceBridge?
-    private let resolver: ModuleResolver
+    private var resolver: ModuleResolver
     /// Read once per running-build epoch. A proven automatic rebuild clears
     /// the cache before the next patch inspects the replacement keys.
     private var cachedInventory: ModuleInventory?
-    private var packageFlags: [String: [String]] = [:]
+    private var unbuiltSources: Set<URL> = []
     private var inventory: ModuleInventory {
         if let inventoryOverride { return inventoryOverride }
         if let cachedInventory { return cachedInventory }
@@ -125,7 +125,8 @@ public actor PatchCoordinator {
     public init(context: BuildContext, server: IPCServer, workDirectory: URL,
                 deliver: (@Sendable (URL) throws -> URL)? = nil,
                 inventory: ModuleInventory? = nil,
-                buildUUIDs: [String]? = nil) {
+                buildUUIDs: [String]? = nil,
+                sourceResolver: ModuleResolver? = nil) {
         self.context = context
         self.server = server
         self.compiler = PatchCompiler(context: context, workDirectory: workDirectory)
@@ -138,7 +139,9 @@ public actor PatchCoordinator {
             self.simulatorContainer = nil
             self.physicalDevice = PhysicalDeviceBridge(context: context, workDirectory: workDirectory)
         }
-        self.resolver = ModuleResolver(appModule: context.moduleName)
+        self.resolver = sourceResolver ?? ModuleResolver(
+            context: context,
+            cacheDirectory: workDirectory.appendingPathComponent("package-manifest-cache", isDirectory: true))
         self.deliverOverride = deliver
         self.inventoryOverride = inventory
         self.buildUUIDOverride = buildUUIDs
@@ -147,35 +150,58 @@ public actor PatchCoordinator {
 
     private let deliverOverride: (@Sendable (URL) throws -> URL)?
 
+    public struct SourcePreparation: Sendable {
+        public let diagnostics: [String]
+        public let testSources: Set<URL>
+    }
+
     /// Captures the complete source tree before adopting any baseline.
+    @discardableResult
     public func primeBaselines(
         from roots: [URL],
         excluding sourceFilter: SourcePathFilter = SourcePathFilter()
-    ) throws {
-        try primeBaselines(from: SourceSnapshot.captureForStartup(from: roots, excluding: sourceFilter))
+    ) throws -> SourcePreparation {
+        let snapshot = try SourceSnapshot.captureForStartup(from: roots, excluding: sourceFilter)
+        return primeBaselines(from: snapshot)
     }
 
-    /// Adopt the same snapshot used for startup proof and watcher priming.
+    /// Index package membership and compiler settings before the first save.
+    /// Keep unknown sources in the baseline so existing files get the right
+    /// diagnostic, and drop tests even from the cross-file safety checks.
+    @discardableResult
     public func primeBaselines(
         from snapshot: SourceSnapshot, buildUUIDs: [String]? = nil
-    ) {
-        baselines = snapshot.watched
-        excludedSafetyBaselines = snapshot.excluded
+    ) -> SourcePreparation {
+        var tests: Set<URL> = []
+        var diagnostics: [String] = []
+        var targets: Set<ModuleResolver.Resolution> = []
+        for url in Array(snapshot.watched.keys).sorted(by: { $0.path < $1.path }) {
+            switch resolver.membership(of: url) {
+            case .patchable(let target):
+                if let manifest = target.manifest, targets.insert(target).inserted,
+                   case .unknown(let reason) = resolver.compilerSettings(for: target) {
+                    diagnostics.append("\(manifest.path): \(target.module)'s compiler settings are unavailable: \(reason)")
+                }
+            case .test: tests.insert(url)
+            case .unresolved(let failure): diagnostics.append(failure.description)
+            }
+        }
+        for url in snapshot.excluded.keys where resolver.isTestSource(url) { tests.insert(url) }
+        baselines = snapshot.watched.filter { !tests.contains($0.key) }
+        excludedSafetyBaselines = snapshot.excluded.filter { !tests.contains($0.key) }
         baselineIndexes = [:]
         baselineBuildUUIDs = buildUUIDs.map { Set($0) }
+        return SourcePreparation(diagnostics: diagnostics, testSources: tests)
     }
 
     /// Starts a new source-to-process session after an explicitly configured
     /// rebuild command has produced and launched a different process.
-    ///
-    /// A rebuild makes every in-memory fact about the previous process stale:
-    /// additions are now in the binary, removed files are no longer in it, and
-    /// replacement keys may have changed. Reset all of those facts together,
-    /// then adopt the exact source snapshot already proven to match the build.
-    public func resetAfterRebuild(to snapshot: SourceSnapshot, buildUUIDs: [String]? = nil) {
+    @discardableResult
+    public func resetAfterRebuild(to snapshot: SourceSnapshot, buildUUIDs: [String]? = nil) -> SourcePreparation {
         cachedInventory = nil
-        packageFlags = [:]
-        primeBaselines(from: snapshot, buildUUIDs: buildUUIDs)
+        unbuiltSources.removeAll()
+        resolver.reset()
+        let preparation = primeBaselines(from: snapshot, buildUUIDs: buildUUIDs)
         memories = [:]
         deferredTargets = [:]
         uncertain = nil
@@ -183,6 +209,15 @@ public actor PatchCoordinator {
         lastRuntimeLog = nil
         generation = 0
         simulatorContainer?.invalidate()
+        return preparation
+    }
+
+    public func captureSources(
+        from roots: [URL], excluding sourceFilter: SourcePathFilter, ignoring buildOutputs: SourcePathFilter
+    ) throws -> SourceSnapshot {
+        try SourceSnapshot.capture(from: roots, excluding: sourceFilter, ignoring: buildOutputs) {
+            resolver.isTestSource($0)
+        }
     }
 
     /// Used by the watcher to discard a removal event queued while a rebuild
@@ -203,6 +238,7 @@ public actor PatchCoordinator {
         guard baselines[url] == nil else { return }
         baselineIndexes.removeValue(forKey: url)
         memories.removeValue(forKey: url)
+        unbuiltSources.remove(url)
         for target in Array(deferredTargets.keys) {
             guard var deferred = deferredTargets[target] else { continue }
             deferred.urls.remove(url)
@@ -526,7 +562,7 @@ public actor PatchCoordinator {
     /// advance only after that single image is confirmed loaded, so there is
     /// no state in which the process represents only a successful prefix of a
     /// multi-file save.
-    public func handle(changes input: [URL]) async -> Outcome {
+    public func handle(changes input: [URL], added: Set<URL> = []) async -> Outcome {
         let inputURLs = Set(input.map(\.standardizedFileURL))
             .sorted { $0.path < $1.path }
         guard !inputURLs.isEmpty else { return .ignored }
@@ -534,14 +570,38 @@ public actor PatchCoordinator {
             return .rejected(buildChangedError())
         }
 
-        let inputSet = Set(inputURLs)
-        let directlyTouchedTargets = Set(inputURLs.map {
-            targetKey(resolver.resolve($0))
-        })
+        let added = Set(added.map(\.standardizedFileURL))
+        resolver.refreshPackageSources(for: added)
+        var inputSet: Set<URL> = []
+        var directlyTouchedTargets: Set<String> = []
+        var resolutions: [URL: ModuleResolver.Resolution] = [:]
+        var unresolved: [String] = []
+        var unresolvedURLs: Set<URL> = []
+        var requiresConfiguration = false
         for url in inputURLs {
-            let target = targetKey(resolver.resolve(url))
-            deferredTargets[target, default: DeferredTarget()].urls.insert(url)
+            switch resolver.membership(of: url) {
+            case .patchable(let resolution):
+                inputSet.insert(url)
+                unbuiltSources.remove(url)
+                let target = targetKey(resolution)
+                resolutions[url] = resolution
+                directlyTouchedTargets.insert(target)
+                deferredTargets[target, default: DeferredTarget()].urls.insert(url)
+            case .test:
+                continue
+            case .unresolved(let failure):
+                inputSet.insert(url)
+                if added.contains(url) { unbuiltSources.insert(url) }
+                if failure.hasNoOwner && unbuiltSources.contains(url) {
+                    unresolved.append(failure.rebuildDescription)
+                } else {
+                    requiresConfiguration = true
+                    unresolved.append(failure.description)
+                }
+                unresolvedURLs.insert(url)
+            }
         }
+        guard !inputSet.isEmpty else { return .ignored }
 
         // A safe event for a blocker also wakes the target that was waiting on
         // it, even though that URL belongs to another compiler context.
@@ -549,6 +609,14 @@ public actor PatchCoordinator {
         for (target, deferred) in deferredTargets
             where !deferred.blockers.isDisjoint(with: inputSet) {
             affectedTargets.insert(target)
+        }
+        if !unresolved.isEmpty {
+            for target in affectedTargets {
+                deferredTargets[target]?.blockers.formUnion(unresolvedURLs)
+            }
+            return .rejected(EmberError(stage: .classify, subject: "source modules",
+                                         reason: unresolved.joined(separator: "\n"),
+                                         recovery: requiresConfiguration ? .configure : .rebuild))
         }
         let urls = Array(affectedTargets.flatMap {
             deferredTargets[$0]?.urls ?? []
@@ -600,13 +668,24 @@ public actor PatchCoordinator {
                                              reason: reason, recovery: .rebuild)
                     }
                 case .hotPatch(let plan):
+                    guard let resolution = resolutions[url] ?? (try? resolver.resolve(url).get()),
+                          affectedTargets.contains(targetKey(resolution)) else {
+                        refusedURLs.insert(url)
+                        if refusal == nil {
+                            refusal = EmberError(
+                                stage: .classify, subject: url.path,
+                                reason: "source module membership changed during this watch session. Restart watch after rebuilding.",
+                                recovery: .configure)
+                        }
+                        continue
+                    }
                     let updatesLoadedContribution = memory.carried.contains { identity in
                         baselineIndex.patchable[identity]?.body
                             != currentIndex.patchable[identity]?.body
                     }
                     let change = PreparedChange(
                         url: url, current: current, index: currentIndex, plan: plan,
-                        resolution: resolver.resolve(url),
+                        resolution: resolution,
                         updatesLoadedContribution: updatesLoadedContribution)
                     currentChanges.append(change)
                     safelyObservedURLs.insert(url)
@@ -701,8 +780,8 @@ public actor PatchCoordinator {
             // contribution in every later image that touches the module.
             for url in memories.keys.sorted(by: { $0.path < $1.path })
                 where !preparedURLs.contains(url) {
-                let rememberedResolution = resolver.resolve(url)
-                guard targetKey(rememberedResolution) == selectedTarget,
+                guard let rememberedResolution = try? resolver.resolve(url).get(),
+                      targetKey(rememberedResolution) == selectedTarget,
                       let baseline = baselines[url] else { continue }
                 let index = baselineIndexes[url] ?? DeclarationIndexer.index(source: baseline)
                 baselineIndexes[url] = index
@@ -723,44 +802,39 @@ public actor PatchCoordinator {
                 ? prepared[0].url.lastPathComponent
                 : "\(prepared.count) source files in \(module)"
             guard inventory.isPatchable(module) else {
+                let setting = resolution.manifest == nil
+                    ? "Add -Xfrontend -enable-implicit-dynamic to this target's OTHER_SWIFT_FLAGS."
+                    : """
+                        Xcode does not pass OTHER_SWIFT_FLAGS into Swift package targets, \
+                        so a package needs the setting in its own manifest:
+
+                            .target(name: "\(resolution.packageTarget ?? module)", swiftSettings: [
+                                .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
+                                             .when(configuration: .debug))
+                            ])
+                        """
                 return .rejected(EmberError(
                     stage: .classify, subject: targetSubject,
                     reason: """
                         \(module) exports no dynamic replacement keys, so nothing in it \
                         can be replaced.
 
-                        Xcode does not pass OTHER_SWIFT_FLAGS into Swift package targets, \
-                        so a package needs the setting in its own manifest:
-
-                            .target(name: "\(module)", swiftSettings: [
-                                .unsafeFlags(["-Xfrontend", "-enable-implicit-dynamic"],
-                                             .when(configuration: .debug))
-                            ])
+                        \(setting)
 
                         Patchable modules in this build: \(inventory.patchableModules.joined(separator: ", "))
                         """,
                     recovery: .configure))
             }
 
-            var flags = context.extraCompilerFlags
-            if let manifest = resolution.manifest {
-                let settings = packageFlags[selectedTarget].map(PackageCompilerSettings.flags)
-                    ?? PackageCompilerSettings.read(
-                        module: module, manifest: manifest,
-                        swiftCompilerPath: context.swiftCompilerPath,
-                        sdkName: context.sdkName,
-                        cacheDirectory: compiler.workDirectory
-                            .appendingPathComponent("package-manifest-cache", isDirectory: true))
-                switch settings {
-                case .flags(let targetFlags):
-                    packageFlags[selectedTarget] = targetFlags
-                    flags = targetFlags
-                case .unknown(let reason):
-                    return .rejected(EmberError(
-                        stage: .classify, subject: targetSubject,
-                        reason: "\(module)'s compiler settings are unavailable: \(reason)",
-                        recovery: .configure))
-                }
+            let flags: [String]
+            switch resolver.compilerSettings(for: resolution) {
+            case .flags(let targetFlags):
+                flags = targetFlags
+            case .unknown(let reason):
+                return .rejected(EmberError(
+                    stage: .classify, subject: targetSubject,
+                    reason: "\(module)'s compiler settings are unavailable: \(reason)",
+                    recovery: .configure))
             }
             preparedTargets.append(PreparedTarget(
                 key: selectedTarget, resolution: resolution, changes: prepared,
@@ -946,12 +1020,12 @@ public actor PatchCoordinator {
     private func emberBoundaryNameConflict(
         excluding edited: URL, updatedIndexes: [URL: FileIndex] = [:]
     ) -> URL? {
-        let editedModule = resolver.resolve(edited).module
+        guard let editedResolution = try? resolver.resolve(edited).get() else { return nil }
         let candidates = Set(baselines.keys).union(excludedSafetyBaselines.keys)
             .union(updatedIndexes.keys)
             .sorted { $0.path < $1.path }
         for candidate in candidates where candidate != edited {
-            guard resolver.resolve(candidate).module == editedModule else { continue }
+            guard (try? resolver.resolve(candidate).get()) == editedResolution else { continue }
             if let index = updatedIndexes[candidate], index.declaresEmberable {
                 return candidate
             }
