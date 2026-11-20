@@ -132,8 +132,9 @@ def wait_for(description, seconds, condition):
 
 
 def smoke(work, cache, logs):
-    sdk = run(("xcrun", "--sdk", "iphonesimulator", "--show-sdk-version")).strip()
-    devices = run(("xcrun", "simctl", "list", "devices", "available"))
+    # The first simctl call also starts CoreSimulator, which is slow on a fresh image.
+    sdk = run(("xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"), timeout=SIMCTL_TIMEOUT).strip()
+    devices = run(("xcrun", "simctl", "list", "devices", "available"), timeout=SIMCTL_TIMEOUT)
     (logs / "devices.log").write_text(devices)
     device = run(("bash", ROOT / "scripts/select-simulator-device.sh", sdk), stdin=devices).strip()
     if not device:
