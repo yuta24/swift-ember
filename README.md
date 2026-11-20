@@ -107,6 +107,14 @@ In another Swift package, declare the same dependency as:
 )
 ```
 
+### Claude Code
+
+From your app's repository, run `swift-ember skill install` to copy the skill
+to `.claude/skills/swift-ember`. Use `--global` for
+`~/.claude/skills/swift-ember`. The skill guides Claude Code through Debug
+preflight, background hot reload, verification, and cleanup.
+See [agent skill installation](docs/agent-skill.md) for scopes and updates.
+
 ## Try it
 
 Boot a simulator, then:

@@ -58,6 +58,7 @@ public struct Options {
       stop      stop the background watcher
       status    show what the daemon would use, without starting it
       xcode     own the watcher from Xcode Scheme actions
+      skill     install, inspect, or uninstall the coding agent skill
 
     Installing the integration:
 

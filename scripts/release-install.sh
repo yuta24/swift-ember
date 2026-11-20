@@ -8,6 +8,8 @@ set -eu
 PREFIX="${1:-${PREFIX:-/usr/local}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+env -u SWIFT_EMBER_HOME "$SCRIPT_DIR/bin/swift-ember" skill install \
+    --dir "$PREFIX/share/swift-ember/skills"
 install -d "$PREFIX/bin"
 install -m 755 "$SCRIPT_DIR/bin/swift-ember" "$PREFIX/bin/swift-ember"
 

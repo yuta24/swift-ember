@@ -15,9 +15,25 @@ func abort(_ message: String, code: Int32 = 1) -> Never {
     exit(code)
 }
 
+let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments.first == "skill" {
+    let skill: SkillCommand
+    do {
+        skill = try SkillCommand.parse(Array(arguments.dropFirst()))
+    } catch {
+        abort("\(error)\n\n\(SkillCommand.usage)", code: 64)
+    }
+    do {
+        try skill.run()
+        exit(0)
+    } catch {
+        abort("\(error)")
+    }
+}
+
 let options: Options
 do {
-    options = try Options.parse(Array(CommandLine.arguments.dropFirst()))
+    options = try Options.parse(arguments)
 } catch let error as Options.ParseError {
     if case .help = error { print(Options.usage); exit(0) }
     if case .version = error { print(error.description); exit(0) }
