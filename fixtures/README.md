@@ -23,9 +23,11 @@ that `DESIGN.md` section 20 asks for, generated from actual runs rather than
 maintained by hand.
 
 The Simulator path uses `xcrun simctl spawn booted`, so boot a simulator first.
-The macOS result file comes from Xcode 27.2 and records 49 passes and three
-Simulator-only UIKit skips. The Simulator result file still records 44 passes
-on an iPhone 17 Pro running iOS 27.0 with Xcode 27.0 Beta 6.
+Both result files come from Xcode 27.2. The macOS file records 49 passes and
+three Simulator-only UIKit skips. The Simulator file records 44 passes on an
+iPhone 18 Pro running iOS 27.2 and eight macOS-only generic and inlining skips.
+The earlier Xcode 27.0 Beta 6 run passed the 44-case matrix on an iPhone 17 Pro
+running iOS 27.0.
 
 ## Case layout
 
@@ -145,8 +147,10 @@ metadata was already resolved before the patch loaded.
 
 It has also diverged by target and toolchain revision. Under Xcode 27.0 Beta 4
 it returned the new value on the macOS host and crashed on the iOS Simulator;
-under Beta 6 it crashes on both. Compare the generated `observed:` field with
-the compatibility history in `DESIGN.md` section 20.
+under Beta 6 it crashes on both. The 27.0 release run recorded `SIGBUS` on the
+host and `SIGSEGV` on the Simulator. The 27.2 rerun returned the new value on
+the host and recorded `SIGSEGV` on the Simulator. Compare the generated
+`observed:` field with the compatibility history in `DESIGN.md` section 20.
 
 Because the outcome is undefined, that case records what happened instead of
 asserting a specific result. Pinning an expectation to undefined behavior would

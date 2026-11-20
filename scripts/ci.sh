@@ -233,18 +233,22 @@ check_runtime_across_toolchains() {
 # differently: XcodeApp is SwiftUI with a local package, UIKitApp is a
 # storyboard with a scene delegate and compiled resources.
 build_xcode_example() {
-    local project ok=0
+    local project log ok=0
+    log="$(mktemp)" || return 1
     for project in XcodeApp UIKitApp; do
         printf '  %-10s ' "$project"
+        # Xcode can print package graph diagnostics after its success banner.
         if xcodebuild -project "examples/$project/$project.xcodeproj" -scheme "$project" \
             -configuration Debug -destination 'generic/platform=iOS Simulator' \
-            build 2>&1 | tail -3 | grep -q 'BUILD SUCCEEDED'; then
+            build > "$log" 2>&1; then
             echo "ok"
         else
             echo "FAILED"
+            cat "$log" >&2
             ok=1
         fi
     done
+    rm -f "$log"
     return "$ok"
 }
 

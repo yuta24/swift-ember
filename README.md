@@ -553,16 +553,21 @@ PRD.md                 scope, tiers, milestones
 
 Xcode 26.2 or later, an arm64 macOS host, and an application deployment target
 of iOS 16 or later. Compatibility evidence spans Swift 6.2.3
-through 6.4 across eight configurations, six locally and two on CI. The newest
-full run passes all 44 fixtures on the Simulator, 41 on the host with the three
-Simulator-only UIKit cases skipped, and the then-current 226 tests on local
-Swift 6.3.3. The current M6 host verification passes all 330 tests on Swift
-6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. The newest host run, on
-Xcode 27.2 / Swift 6.4.2, passes 49 of the 52 fixtures with the three
-Simulator-only UIKit cases skipped, and all 385 tests. `DESIGN.md` section 20
+through 6.4.2 across ten configurations, eight locally and two on CI. The
+Xcode 26.6 full run passed all 44 fixtures on the Simulator, 41 on the host
+with the three Simulator-only UIKit cases skipped, and the then-current 226
+tests on local Swift 6.3.3. The M6 host verification passed all 330 tests on
+Swift 6.3.3 and 6.4, plus the 41 host fixtures on Swift 6.4. Xcode 27.0 and
+27.2 are supported. Each passed 49 of 52 fixtures on the host, 44 of 52 on the
+Simulator, and all 385 tool tests. The host skips three Simulator-only UIKit
+cases, and the Simulator skips eight macOS-only cases. `DESIGN.md` section 20
 records exactly what was run on each configuration. Physical-device delivery
-is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16;
-an actual iOS 16 device has not yet been measured.
+is verified on an arm64 iPhone running iOS 26.4 with a binary targeting iOS 16,
+and again with Xcode 27.2 on an iPhone 14 Pro running iOS 26.7.3: the
+[release checklist](docs/release-checklist.md) passed, including a second
+reload after the device dropped off CoreDevice and reconnected, with each
+reload about 1.7 s from save. An actual iOS 16 device has not yet been
+measured.
 
 One thing does differ, and only by deployment target: below macOS 26 or iOS 26,
 `some View` erases to `AnyView` rather than `DebugReplaceableView`. The
