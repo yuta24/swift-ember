@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import EmberCLI
 import EmberCore
 @testable import EmberDaemon
 
@@ -308,4 +309,91 @@ private let appSettings = [
         "Custom/Unit.swift", "Automation/Nested/Test.swift", "Shared.swift", "Automation/Ignored.swift",
     ].map { resolver.isTestSource(root.appendingPathComponent($0)) }
     #expect(testMembership == [true, true, false, false])
+}
+
+@Test func synchronizedTestSourcesRespectBuildPhaseMembershipExceptions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-xcode-phases-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("App.xcodeproj")
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    try """
+        {
+          rootObject = PROJECT;
+          objects = {
+            PROJECT = { isa = PBXProject; mainGroup = ROOT; };
+            ROOT = { isa = PBXGroup; children = (TESTGROUP); sourceTree = "<group>"; };
+            TESTGROUP = {
+              isa = PBXFileSystemSynchronizedRootGroup;
+              path = Checks;
+              sourceTree = "<group>";
+              exceptions = (SOURCEEXCEPT, RESOURCEEXCEPT, COPYEXCEPT, APPEXCEPT);
+            };
+            SOURCEEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTSOURCES;
+              membershipExceptions = ("Nested/Excluded.swift");
+            };
+            RESOURCEEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTRESOURCES;
+              membershipExceptions = (ResourceException.swift);
+            };
+            COPYEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTCOPY;
+              membershipExceptions = (CopyException.swift);
+              attributesByRelativePath = { CopyException.swift = (CodeSignOnCopy); };
+            };
+            APPEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = APPSOURCES;
+              membershipExceptions = (OtherTargetException.swift);
+            };
+            TESTSOURCES = { isa = PBXSourcesBuildPhase; files = (); };
+            TESTRESOURCES = { isa = PBXResourcesBuildPhase; files = (); };
+            TESTCOPY = { isa = PBXCopyFilesBuildPhase; files = (); };
+            APPSOURCES = { isa = PBXSourcesBuildPhase; files = (); };
+            APP = { isa = PBXNativeTarget; productType = "com.apple.product-type.application"; buildPhases = (APPSOURCES); };
+            TEST = {
+              isa = PBXNativeTarget;
+              productType = "com.apple.product-type.bundle.unit-test";
+              buildPhases = (TESTSOURCES, TESTRESOURCES, TESTCOPY);
+              fileSystemSynchronizedGroups = (TESTGROUP);
+            };
+          };
+        }
+        """.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+
+    let checks = root.appendingPathComponent("Checks")
+    let excluded = checks.appendingPathComponent("Nested/Excluded.swift")
+    let testSources = ["ResourceException.swift", "CopyException.swift", "OtherTargetException.swift"].map {
+        checks.appendingPathComponent($0)
+    }
+    try FileManager.default.createDirectory(at: excluded.deletingLastPathComponent(), withIntermediateDirectories: true)
+    for file in testSources + [excluded] { try Data().write(to: file) }
+
+    let membership = XcodeProject.projectSources(in: [["PROJECT_FILE_PATH": project.path]])
+    var context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+        targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+        sourceRoots: [checks.path], bundleIdentifier: "dev.ember.resolver-tests", xcodeSourceTargets: [])
+    context.xcodeTestSources = membership.test
+    context.xcodeNonTestSources = membership.other
+    let cache = root.appendingPathComponent(".cache")
+    var resolver = ModuleResolver(context: context, cacheDirectory: cache)
+
+    for file in testSources {
+        let isTest = resolver.isTestSource(file)
+        #expect(isTest, "\(file.lastPathComponent) should still belong to the test target")
+    }
+    guard case .unresolved(let failure) = resolver.membership(of: excluded) else {
+        Issue.record("A Swift file excluded from the test Sources phase should be unresolved")
+        return
+    }
+    #expect(failure.hasNoOwner)
+    let ownership = Doctor.watchedModules(context: context, cacheDirectory: cache)
+    #expect(ownership.modules.isEmpty)
+    #expect(ownership.failures.count == 1)
+    #expect(ownership.failures.first?.contains("/Checks/Nested/Excluded.swift:") == true)
 }

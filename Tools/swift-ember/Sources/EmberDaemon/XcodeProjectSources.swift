@@ -36,8 +36,10 @@ extension XcodeProject {
 
             for (id, target) in objects where target["isa"] as? String == "PBXNativeTarget" {
                 var sources = BuildContext.XcodeProjectSources()
-                for phase in target["buildPhases"] as? [String] ?? []
-                where objects[phase]?["isa"] as? String == "PBXSourcesBuildPhase" {
+                let sourcePhases = (target["buildPhases"] as? [String] ?? []).filter {
+                    objects[$0]?["isa"] as? String == "PBXSourcesBuildPhase"
+                }
+                for phase in sourcePhases {
                     for file in objects[phase]?["files"] as? [String] ?? [] {
                         guard let ref = objects[file]?["fileRef"] as? String,
                               let url = paths[ref], url.pathExtension == "swift" else { continue }
@@ -46,10 +48,16 @@ extension XcodeProject {
                 }
                 for group in target["fileSystemSynchronizedGroups"] as? [String] ?? [] {
                     guard let path = paths[group], let object = objects[group] else { continue }
-                    let exceptions = (object["exceptions"] as? [String] ?? []).flatMap { exception in
-                        let entry = objects[exception]
-                        guard entry?["target"] as? String == id else { return [String]() }
-                        return entry?["membershipExceptions"] as? [String] ?? []
+                    let exceptions = (object["exceptions"] as? [String] ?? []).flatMap { exception -> [String] in
+                        guard let entry = objects[exception] else { return [] }
+                        switch entry["isa"] as? String {
+                        case "PBXFileSystemSynchronizedBuildFileExceptionSet" where entry["target"] as? String == id,
+                             "PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet"
+                             where (entry["buildPhase"] as? String).map(sourcePhases.contains) == true:
+                            return entry["membershipExceptions"] as? [String] ?? []
+                        default:
+                            return []
+                        }
                     }
                     sources.directories.append(.init(path: path.path, excludedPaths: exceptions.map {
                         path.appendingPathComponent($0).path
