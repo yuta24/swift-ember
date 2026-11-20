@@ -26,6 +26,9 @@ public enum Watch {
         // *package* setting, because the inventory cannot tell "file missing"
         // from "file exports nothing".
         guard FileManager.default.fileExists(atPath: context.linkTarget) else {
+            let hint = context.xcodeSourceTargets != nil
+                ? "\n\n\(XcodeProject.derivedDataPathHint)"
+                : ""
             throw EmberError(
                 stage: .watch, subject: (context.linkTarget as NSString).lastPathComponent,
                 reason: """
@@ -33,7 +36,7 @@ public enum Watch {
 
                     A patch is compiled and linked against the built product, so the app \
                     has to have been built for this configuration before it can be \
-                    patched. Build it, then start watching again.
+                    patched. Build it, then start watching again.\(hint)
                     """,
                 recovery: .rebuild)
         }
@@ -44,7 +47,7 @@ public enum Watch {
         var testSources: Set<URL> = []
         let manifest = BuildSourceManifest(context: context)
         startupProgress?.report("capturing source snapshot")
-        let snapshot = try manifest.snapshot { url in
+        let snapshot = try await manifest.snapshot { url in
             guard resolver.isTestSource(url) else { return false }
             testSources.insert(url)
             return true

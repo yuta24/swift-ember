@@ -160,8 +160,8 @@ public actor PatchCoordinator {
     public func primeBaselines(
         from roots: [URL],
         excluding sourceFilter: SourcePathFilter = SourcePathFilter()
-    ) throws -> SourcePreparation {
-        let snapshot = try SourceSnapshot.captureForStartup(from: roots, excluding: sourceFilter)
+    ) async throws -> SourcePreparation {
+        let snapshot = try await SourceSnapshot.captureForStartup(from: roots, excluding: sourceFilter)
         return primeBaselines(from: snapshot)
     }
 

@@ -205,6 +205,9 @@ public struct XcodeProject: Sendable {
         return flags
     }
 
+    package static let derivedDataPathHint =
+        "If the build used -derivedDataPath, pass the same directory with --derived-data-path."
+
     func buildOutputPaths(from settings: [String: String], sourceRoots: [String]) -> [String] {
         func directory(_ path: String?) -> URL? {
             guard let path, path.hasPrefix("/") else { return nil }
@@ -232,8 +235,14 @@ public struct XcodeProject: Sendable {
         outputs += derivedData.map { $0.appendingPathComponent("SourcePackages", isDirectory: true) }
 
         let roots = sourceRoots.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let sourceTree = SourcePathFilter(excluding: roots)
+        // Don't let a broad setting such as SYMROOT = SRCROOT prune the scan.
         let projectRoot = directory(settings["SRCROOT"])
+        let knownOutputs = outputs.filter { output in
+            guard let projectRoot else { return true }
+            return !SourcePathFilter(excluding: [output]).excludes(projectRoot)
+        }
+        outputs += otherDerivedDataOutputs(in: roots, excluding: knownOutputs)
+        let sourceTree = SourcePathFilter(excluding: roots)
         var result: [URL] = []
         for output in outputs.sorted(by: { $0.path < $1.path }) {
             let subtree = SourcePathFilter(excluding: [output])
@@ -245,6 +254,57 @@ public struct XcodeProject: Sendable {
             result.append(output)
         }
         return result.map(\.path)
+    }
+
+    private func otherDerivedDataOutputs(in roots: [URL], excluding known: [URL]) -> [URL] {
+        let containerPath = container.environmentLocation.path
+        var workspacePaths = [Self.canonicalPath(containerPath)]
+        if case .project = container {
+            workspacePaths.append(Self.canonicalPath(containerPath + "/project.xcworkspace"))
+        }
+
+        let manager = FileManager.default
+        let knownOutputs = SourcePathFilter(excluding: known)
+        var checked: Set<String> = []
+        var discovered: Set<String> = []
+        for root in roots where !knownOutputs.excludes(root) {
+            guard let walker = manager.enumerator(
+                at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            ) else { continue }
+            for case let url as URL in walker {
+                let path = url.standardizedFileURL.path
+                if knownOutputs.excludes(standardizedPath: path) || discovered.contains(path) {
+                    walker.skipDescendants()
+                    continue
+                }
+                // Look for the conventional children, so ordinary source
+                // directories do not each require an additional plist lookup.
+                guard ["Build", "SourcePackages"].contains(url.lastPathComponent),
+                      (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                let candidate = url.deletingLastPathComponent().standardizedFileURL
+                if checked.insert(candidate.path).inserted {
+                    discovered.formUnion(Self.derivedDataOutputs(at: candidate, workspacePaths: workspacePaths))
+                }
+                if discovered.contains(path) { walker.skipDescendants() }
+            }
+        }
+        return discovered.map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    private static func derivedDataOutputs(at directory: URL, workspacePaths: [String]) -> [String] {
+        let intermediates = directory.appendingPathComponent("Build/Intermediates.noindex", isDirectory: true)
+        let products = directory.appendingPathComponent("Build/Products", isDirectory: true)
+        let info = directory.appendingPathComponent("info.plist")
+        guard (try? intermediates.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+              (try? products.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+              (try? info.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+              let data = try? Data(contentsOf: info),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let workspace = plist["WorkspacePath"] as? String, workspace.hasPrefix("/"),
+              workspacePaths.contains(canonicalPath(workspace)) else { return [] }
+        // The custom DerivedData directory can also contain user sources.
+        // Exclude only the recognized output subtrees.
+        return [intermediates.path, products.path, directory.appendingPathComponent("SourcePackages").path]
     }
 
     func buildSettings(schemeEnvironment: [String: String]?,

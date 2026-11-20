@@ -190,7 +190,8 @@ private func writeModuleFixture(_ text: String, at path: String, in root: URL) t
     let coordinator = PatchCoordinator(
         context: context, server: server, workDirectory: root.appendingPathComponent("p"),
         inventory: ModuleInventory(keys: ["App": 20]))
-    try await coordinator.primeBaselines(from: BuildSourceManifest(context: context).snapshot())
+    let snapshot = try await BuildSourceManifest(context: context).snapshot()
+    await coordinator.primeBaselines(from: snapshot)
 
     // The ignored file can change on disk without changing the running build.
     // Safety checks must keep using the source snapshot that produced it.
