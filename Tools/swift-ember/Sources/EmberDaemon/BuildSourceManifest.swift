@@ -55,8 +55,9 @@ public struct BuildSourceManifest {
             .appendingPathExtension("swift-ember-sources.json")
     }
 
-    public func snapshot() throws -> SourceSnapshot {
-        try SourceSnapshot.captureForStartup(from: roots, excluding: safetyExclusions, ignoring: buildOutputs)
+    public func snapshot(skippingSource: (URL) -> Bool = { _ in false }) throws -> SourceSnapshot {
+        try SourceSnapshot.captureForStartup(
+            from: roots, excluding: safetyExclusions, ignoring: buildOutputs, skippingSource: skippingSource)
     }
 
     private func captureProof() throws -> SourceSnapshot {
@@ -124,7 +125,7 @@ public struct BuildSourceManifest {
 
     /// Returns nil only for a legacy product with no sidecar. A present but
     /// incomplete, stale, or unreadable proof always refuses startup.
-    public func validate(_ snapshot: SourceSnapshot) throws -> [String]? {
+    public func validate(_ snapshot: SourceSnapshot, skippingSource: (URL) -> Bool = { _ in false }) throws -> [String]? {
         guard let state = try read() else { return nil }
         guard case .built(let recorded) = state else {
             throw failure("the build did not finish recording source hashes. Check the build's `xcode prepare` and `xcode record` diagnostics, then rebuild with both actions enabled.")
@@ -134,6 +135,7 @@ public struct BuildSourceManifest {
             throw failure("the source manifest does not match the Mach-O UUIDs at \(linkTarget). Rebuild with source recording enabled.")
         }
         let changed = changedKeys(from: proofDigests(recorded.sha256), to: proofDigests(snapshot.digests))
+            .filter { !skippingSource(URL(fileURLWithPath: $0)) }
         guard changed.isEmpty else {
             throw failure("Swift sources differ from the build:\n\(paths(changed))")
         }

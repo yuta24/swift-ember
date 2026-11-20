@@ -42,55 +42,74 @@ import EmberCore
 
 // MARK: - Mapping a file to its module
 
-private func resolve(_ path: String, appModule: String = "App") -> String {
-    ModuleResolver(appModule: appModule).module(for: URL(fileURLWithPath: path))
+private func moduleContext(_ roots: [URL], appModule: String = "App") -> BuildContext {
+    BuildContext(
+        moduleName: appModule, swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+        targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+        sourceRoots: roots.map(\.path), bundleIdentifier: "dev.ember.resolver-tests")
 }
 
-@Test func aFileInAPackageTargetResolvesToThatTarget() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ember-modules-\(UUID().uuidString)")
-    let target = root.appendingPathComponent("Feature/Sources/Feature")
-    let nested = root.appendingPathComponent("Feature/Sources/Feature/Deep/Deeper")
-    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-    try Data().write(to: root.appendingPathComponent("Feature/Package.swift"))
-
-    #expect(resolve(target.appendingPathComponent("Greeter.swift").path) == "Feature")
-    // Depth inside the target does not change the answer.
-    #expect(resolve(nested.appendingPathComponent("Helper.swift").path) == "Feature")
+private func writeModuleFixture(_ text: String, at path: String, in root: URL) throws -> URL {
+    let url = root.appendingPathComponent(path)
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try text.write(to: url, atomically: true, encoding: .utf8)
+    return url
 }
 
 @Test func severalTargetsInOnePackageAreToldApart() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ember-modules-\(UUID().uuidString)")
-    for target in ["Feature", "FeatureUI"] {
-        try FileManager.default.createDirectory(
-            at: root.appendingPathComponent("Kit/Sources/\(target)"), withIntermediateDirectories: true)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-modules-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifest = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "Feature"), .target(name: "FeatureUI")])
+        """, at: "Package.swift", in: root)
+    let feature = try writeModuleFixture("struct Feature {}", at: "Sources/Feature/A.swift", in: root)
+    let deep = try writeModuleFixture("struct Deep {}", at: "Sources/Feature/Deep/Nested.swift", in: root)
+    let ui = try writeModuleFixture("struct UI {}", at: "Sources/FeatureUI/B.swift", in: root)
+    var resolver = ModuleResolver(context: moduleContext([root]), cacheDirectory: root.appendingPathComponent(".cache"))
+    #expect(try resolver.resolve(feature).get().module == "Feature")
+    #expect(try resolver.resolve(deep).get().manifest?.path == manifest.resolvingSymlinksInPath().path)
+    #expect(try resolver.resolve(ui).get().module == "FeatureUI")
+}
+
+@Test func aCustomPackageTargetRespectsSourcesAndExclusions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-custom-module-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature-Kit", path: "Components", exclude: ["Logic/Skipped.swift"],
+                    sources: ["Logic", "Top.swift"]),
+            .target(name: "Other", path: "Components", sources: ["Other.swift"]),
+        ])
+        """, at: "Package.swift", in: root)
+    let logic = try writeModuleFixture("struct Logic {}", at: "Components/Logic/Nested/Logic.swift", in: root)
+    let top = try writeModuleFixture("struct Top {}", at: "Components/Top.swift", in: root)
+    let excluded = try writeModuleFixture("struct Skipped {}", at: "Components/Logic/Skipped.swift", in: root)
+    let unlisted = try writeModuleFixture("struct Unlisted {}", at: "Components/LogicExtra/Unlisted.swift", in: root)
+    let other = try writeModuleFixture("struct Other {}", at: "Components/Other.swift", in: root)
+
+    let context = moduleContext([root])
+    var resolver = ModuleResolver(context: context, cacheDirectory: root.appendingPathComponent(".cache"))
+    #expect(try resolver.resolve(logic).get().module == "Feature_Kit")
+    #expect(try resolver.resolve(top).get().packageTarget == "Feature-Kit")
+    #expect(try resolver.resolve(other).get().module == "Other")
+    #expect(throws: ModuleResolver.Failure.self) { try resolver.resolve(excluded).get() }
+    #expect(throws: ModuleResolver.Failure.self) { try resolver.resolve(unlisted).get() }
+}
+
+@Test func declaredCustomBuildSourcesUseTheAppModule() throws {
+    let root = URL(fileURLWithPath: "/nowhere/CustomApp/Sources")
+    var resolver = ModuleResolver(context: moduleContext([root]), cacheDirectory: root)
+    let resolution = try resolver.resolve(root.appendingPathComponent("Cart.swift")).get()
+    #expect(resolution.module == "App")
+    #expect(resolution.manifest == nil)
+    #expect(throws: ModuleResolver.Failure.self) {
+        try resolver.resolve(root.deletingLastPathComponent().appendingPathComponent("Other.swift")).get()
     }
-    try Data().write(to: root.appendingPathComponent("Kit/Package.swift"))
-
-    #expect(resolve(root.appendingPathComponent("Kit/Sources/Feature/A.swift").path) == "Feature")
-    #expect(resolve(root.appendingPathComponent("Kit/Sources/FeatureUI/B.swift").path) == "FeatureUI")
-}
-
-@Test func aFileOutsideAnyPackageIsTheAppModule() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ember-modules-\(UUID().uuidString)/Sources")
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    #expect(resolve(root.appendingPathComponent("Cart.swift").path, appModule: "XcodeApp") == "XcodeApp")
-}
-
-@Test func aFileInAPackageButOutsideSourcesIsNotATarget() throws {
-    // Package.swift itself, or a Tests directory: not a target's source, and
-    // guessing a module name from it would produce a patch that imports
-    // something that does not exist.
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ember-modules-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(
-        at: root.appendingPathComponent("Kit/Tests/KitTests"), withIntermediateDirectories: true)
-    try Data().write(to: root.appendingPathComponent("Kit/Package.swift"))
-
-    #expect(resolve(root.appendingPathComponent("Kit/Tests/KitTests/T.swift").path,
-                    appModule: "App") == "App")
 }
 
 // MARK: - Refusing what cannot be patched
@@ -102,7 +121,12 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
         .appendingPathComponent("ember-modules-\(UUID().uuidString)")
     let target = root.appendingPathComponent("Feature/Sources/Feature")
     try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-    try Data().write(to: root.appendingPathComponent("Feature/Package.swift"))
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "Feature")])
+        """, at: "Feature/Package.swift", in: root)
 
     let subject = target.appendingPathComponent("Greeter.swift")
     try #"struct G { func g() -> String { "old" } }"#
@@ -446,37 +470,142 @@ private func resolve(_ path: String, appModule: String = "App") -> String {
             "the first settings failure was cached instead of reevaluating the manifest")
 }
 
-@Test func aFileOutsideAnyPackageHasNoManifest() {
-    let resolver = ModuleResolver(appModule: "App")
-    let resolution = resolver.resolve(URL(fileURLWithPath: "/nowhere/Sources/App/File.swift"))
-    #expect(resolution.manifest == nil)
-    #expect(resolution.module == "App")
-}
-
-/// A manifest somewhere above a file is not evidence the file belongs to a
-/// package target. An app whose sources sit inside a repository that happens to
-/// contain a `Package.swift` -- this project's own examples, for one -- found
-/// it, and every patch was then compiled in that package's language mode. The
-/// sample app's reload went from 348 ms to 2,641 ms before the cause was
-/// obvious.
+/// Custom build sources can coexist with an unrelated package in the repository.
 @Test func aManifestAboveAnAppIsNotThatAppsManifest() throws {
-    let work = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ember-layout-\(UUID().uuidString)")
-    let appSources = work.appendingPathComponent("examples/Demo/Sources", isDirectory: true)
-    try FileManager.default.createDirectory(at: appSources, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: work) }
-    try "// swift-tools-version: 6.0\n".write(to: work.appendingPathComponent("Package.swift"),
-                                              atomically: true, encoding: .utf8)
-
-    let resolver = ModuleResolver(appModule: "Demo")
-    let resolution = resolver.resolve(appSources.appendingPathComponent("Cart.swift"))
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-layout-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [.target(name: "Feature")])
+        """, at: "Package.swift", in: root)
+    let app = try writeModuleFixture("struct Cart {}", at: "examples/Demo/Sources/Cart.swift", in: root)
+    let feature = try writeModuleFixture("struct Greeter {}", at: "Sources/Feature/Greeter.swift", in: root)
+    let context = moduleContext([app.deletingLastPathComponent(), feature.deletingLastPathComponent()],
+                                appModule: "Demo")
+    var resolver = ModuleResolver(context: context, cacheDirectory: root.appendingPathComponent(".cache"))
+    let resolution = try resolver.resolve(app).get()
     #expect(resolution.module == "Demo")
-    #expect(resolution.manifest == nil, "the repository's own manifest was taken for the app's")
-
-    // A real package target under the same manifest still resolves.
-    let target = work.appendingPathComponent("Sources/Feature", isDirectory: true)
-    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-    let inPackage = resolver.resolve(target.appendingPathComponent("Greeter.swift"))
+    #expect(resolution.manifest == nil)
+    let inPackage = try resolver.resolve(feature).get()
     #expect(inPackage.module == "Feature")
     #expect(inPackage.manifest != nil)
+}
+
+@Test func watchRejectsChangesToAnUnresolvedXcodeSource() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-unresolved-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeModuleFixture("func value() -> Int { 1 }", at: "Unknown.swift", in: root)
+    var context = moduleContext([root])
+    context.xcodeSourceTargets = []
+    let server = try IPCServer()
+    defer { server.stop() }
+    let coordinator = PatchCoordinator(context: context, server: server, workDirectory: root)
+    let startup = try await coordinator.primeBaselines(from: [root])
+    #expect(startup.diagnostics.count == 1)
+    try "func value() -> Int { 2 }".write(to: source, atomically: true, encoding: .utf8)
+    guard case .rejected(let error) = await coordinator.handle(change: source) else {
+        Issue.record("the unresolved file was not diagnosed")
+        return
+    }
+    #expect(error.stage == .classify)
+    #expect(error.reason.contains(source.path))
+    #expect(error.reason.contains("sourceModules"))
+}
+
+@Test func aNewUnbuiltSourceRequestsARebuildOnEverySave() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-unbuilt-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    var context = moduleContext([root])
+    context.xcodeSourceTargets = []
+    let server = try IPCServer()
+    defer { server.stop() }
+    let coordinator = PatchCoordinator(context: context, server: server, workDirectory: root)
+    try await coordinator.primeBaselines(from: [root])
+    let source = try writeModuleFixture("func value() -> Int { 1 }", at: "New.swift", in: root)
+    for added: Set<URL> in [[source], []] {
+        guard case .rejected(let error) = await coordinator.handle(changes: [source], added: added) else {
+            Issue.record("a source missing from the current build was accepted")
+            return
+        }
+        #expect(error.stage == .classify)
+        #expect(error.recovery == .rebuild)
+        #expect(error.reason.contains("missing from the current build"))
+        #expect(error.reason.contains("sourceModules") == false)
+    }
+}
+
+@Test func watchPrimesPackageMembershipAndCompilerSettingsBeforeEditing() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-warm-package-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeModuleFixture("func value() -> Int { 1 }", at: "Inputs/Feature.swift", in: root)
+    _ = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature", path: "Inputs", swiftSettings: [.define("TEST_FLAG")])
+        ])
+        """, at: "Package.swift", in: root)
+    let swift = try writeModuleFixture(#"""
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+        exec /usr/bin/swift "$@"
+        """#, at: ".tools/swift", in: root)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: swift.path)
+    let compiler = swift.deletingLastPathComponent().appendingPathComponent("swiftc")
+    try FileManager.default.createSymbolicLink(
+        at: compiler, withDestinationURL: URL(fileURLWithPath: "/usr/bin/false"))
+    let log = swift.deletingLastPathComponent().appendingPathComponent("calls.log")
+
+    var context = moduleContext([source.deletingLastPathComponent()])
+    context.swiftCompilerPath = compiler.path
+    let server = try IPCServer()
+    defer { server.stop() }
+    let coordinator = PatchCoordinator(
+        context: context, server: server, workDirectory: root.appendingPathComponent(".patches"),
+        inventory: ModuleInventory(keys: ["Feature": 1]))
+    let startup = try await coordinator.primeBaselines(from: [source.deletingLastPathComponent()])
+    #expect(startup.diagnostics.isEmpty)
+    let startupCalls = try String(contentsOf: log, encoding: .utf8)
+    #expect(startupCalls.split(separator: "\n").count == 2)
+    #expect(startupCalls.contains("describe --type json"))
+    #expect(startupCalls.contains("dump-package"))
+
+    try "func value() -> Int { 2 }".write(to: source, atomically: true, encoding: .utf8)
+    guard case .rejected(let error) = await coordinator.handle(change: source) else {
+        Issue.record("the compiler fixture should reject the patch")
+        return
+    }
+    #expect(error.stage == .compile)
+    #expect(try String(contentsOf: log, encoding: .utf8) == startupCalls)
+}
+
+@Test func packageTestEditsAndAdditionsDoNotReachThePatchPipeline() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-test-source-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let initialTest = try writeModuleFixture("struct Test {}", at: "Checks/Test.swift", in: root)
+    let library = try writeModuleFixture("struct Product {}", at: "UI/Feature.swift", in: root)
+    _ = try writeModuleFixture("""
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature", path: "UI"),
+            .testTarget(name: "Checks", dependencies: ["Feature"], path: "Checks")
+        ])
+        """, at: "Package.swift", in: root)
+    let roots = [initialTest.deletingLastPathComponent(), library.deletingLastPathComponent()]
+    let server = try IPCServer()
+    defer { server.stop() }
+    let coordinator = PatchCoordinator(context: moduleContext(roots), server: server, workDirectory: root)
+    let startup = try await coordinator.primeBaselines(from: roots)
+    #expect(startup.testSources.count == 1)
+    #expect(startup.diagnostics.isEmpty)
+    #expect(!(await coordinator.hasBaseline(for: initialTest)))
+
+    let newTest = try writeModuleFixture("struct AddedTest {}", at: "Checks/Added.swift", in: root)
+    guard case .ignored = await coordinator.handle(changes: [initialTest, newTest], added: [newTest]) else {
+        Issue.record("test files reached the patch pipeline")
+        return
+    }
 }

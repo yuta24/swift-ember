@@ -37,6 +37,7 @@ public struct Options {
     /// Nil means an emitted context keeps its own exclusions. An explicit or
     /// project-configured empty array deliberately clears them.
     public var excludedSourcePaths: [String]?
+    public var sourceModules: [String: String]?
     public var device: String?
     /// Populated from Xcode's environment for Scheme actions. This is kept
     /// separate from `device`, whose presence selects the physical transport.
@@ -335,7 +336,7 @@ public struct Options {
                     currentDirectory: currentDirectory, validating: validate
                 ) {
                     options.configPath = url.path
-                    configuration.applying(to: &options, from: url, explicit: explicit)
+                    try configuration.applying(to: &options, from: url, explicit: explicit)
                 }
             }
         } catch {
@@ -440,6 +441,7 @@ public struct Options {
         if let project {
             var context = project.context
             if let excludedSourcePaths { context.excludedSourcePaths = excludedSourcePaths }
+            if let sourceModules { context.sourceModules = sourceModules }
             if let signingIdentity { context.codeSigningIdentity = signingIdentity }
             return context
         }
@@ -448,6 +450,7 @@ public struct Options {
         do {
             var context = try BuildContext.load(from: url)
             if let excludedSourcePaths { context.excludedSourcePaths = excludedSourcePaths }
+            if let sourceModules { context.sourceModules = sourceModules }
             if let device {
                 context.deviceIdentifier = device
                 context.simulatorIdentifier = nil

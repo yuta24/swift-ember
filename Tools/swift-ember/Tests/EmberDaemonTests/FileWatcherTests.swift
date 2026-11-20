@@ -100,7 +100,7 @@ private func write(_ source: String, to url: URL) throws {
         try write("struct Ignored {}", to: ignoredFile)
         try write("struct Included {}", to: includedFile)
 
-        let watcher = FileWatcher(roots: [root], excluding: [generated, ignoredFile])
+        let watcher = FileWatcher(roots: [root], excluding: [generated], excludingFiles: [ignoredFile])
         try watcher.prime()
 
         try FileManager.default.setAttributes(
@@ -116,11 +116,27 @@ private func write(_ source: String, to url: URL) throws {
 }
 
 @Test func exclusionsRespectPathComponentBoundaries() {
-    let filter = SourcePathFilter(excluding: [URL(fileURLWithPath: "/project/Sources")])
+    let filter = SourcePathFilter(
+        excluding: [URL(fileURLWithPath: "/project/Sources")],
+        excludingFiles: [URL(fileURLWithPath: "/project/Tests/Ignore.swift")])
 
     #expect(filter.excludes(URL(fileURLWithPath: "/project/Sources/Feature.swift")))
     #expect(filter.excludes(URL(fileURLWithPath: "/project/Sources")))
     #expect(!filter.excludes(URL(fileURLWithPath: "/project/SourcesExtra/Feature.swift")))
+    #expect(filter.excludes(URL(fileURLWithPath: "/project/Tests/./Ignore.swift")))
+    #expect(!filter.excludes(URL(fileURLWithPath: "/project/Tests/Ignore.swift/Child.swift")))
+    #expect(!filter.excludes(URL(fileURLWithPath: "/project/Tests/Ignore.swift.backup")))
+}
+
+@Test func thousandsOfExactFileExclusionsLeaveOtherSourcesVisible() {
+    let root = URL(fileURLWithPath: "/project/Shared", isDirectory: true)
+    let files = (0..<4_096).map { root.appendingPathComponent("Test\($0).swift") }
+    let filter = SourcePathFilter(excludingFiles: files)
+
+    #expect(files.allSatisfy { filter.excludes($0) })
+    #expect(!filter.excludes(root))
+    #expect(!filter.excludes(root.appendingPathComponent("Test4096.swift")))
+    #expect(!filter.excludes(root.appendingPathComponent("Feature.swift")))
 }
 
 @Test func anIncompleteScanPreservesTheLastCompleteSnapshot() throws {

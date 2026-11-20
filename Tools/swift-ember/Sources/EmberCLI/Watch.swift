@@ -38,11 +38,19 @@ public enum Watch {
                 recovery: .rebuild)
         }
 
+        var resolver = ModuleResolver(
+            context: context,
+            cacheDirectory: workDirectory.appendingPathComponent("package-manifest-cache", isDirectory: true))
+        var testSources: Set<URL> = []
         let manifest = BuildSourceManifest(context: context)
         startupProgress?.report("capturing source snapshot")
-        let snapshot = try manifest.snapshot()
+        let snapshot = try manifest.snapshot { url in
+            guard resolver.isTestSource(url) else { return false }
+            testSources.insert(url)
+            return true
+        }
         startupProgress?.report("validating source manifest and Mach-O UUIDs")
-        let verifiedUUIDs = try manifest.validate(snapshot)
+        let verifiedUUIDs = try manifest.validate(snapshot) { resolver.isTestSource($0) }
         if verifiedUUIDs == nil {
             print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
             print("  Pre-watch source edits cannot be verified. Enable build source recording and rebuild.")
@@ -51,9 +59,16 @@ public enum Watch {
         startupProgress?.report("preparing IPC listener and source baselines")
         let server = try IPCServer()
         defer { server.stop() }
-        let coordinator = PatchCoordinator(context: context, server: server, workDirectory: workDirectory)
-        await coordinator.primeBaselines(from: snapshot, buildUUIDs: verifiedUUIDs)
-        let watcher = FileWatcher(roots: roots, excluding: excluded)
+        let coordinator = PatchCoordinator(
+            context: context, server: server, workDirectory: workDirectory, sourceResolver: resolver)
+        startupProgress?.report("evaluating package compiler settings and priming source baselines")
+        let preparation = await coordinator.primeBaselines(from: snapshot, buildUUIDs: verifiedUUIDs)
+        func reportSourceDiagnostics(_ preparation: PatchCoordinator.SourcePreparation) {
+            for diagnostic in preparation.diagnostics { print("[WATCH] source module: \(diagnostic)") }
+        }
+        reportSourceDiagnostics(preparation)
+        let watcher = FileWatcher(
+            roots: roots, excluding: excluded, excludingFiles: Array(testSources.union(preparation.testSources)))
         watcher.prime(from: snapshot)
         defer { watcher.stop() }
         let watchedBuildUUID = BuildUUID(binary: context.linkTarget)
@@ -216,12 +231,12 @@ public enum Watch {
                 while attempt < 3 {
                     try rebuildRunner.throwIfStopping()
                     attempt += 1
-                    let before = try SourceSnapshot.capture(
+                    let before = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let beforeUUIDs = Set(await coordinator.currentBuildUUIDs())
                     try await rebuildRunner.run(rebuildCommand, in: directory)
                     try rebuildRunner.throwIfStopping()
-                    let built = try SourceSnapshot.capture(
+                    let built = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let rebuiltUUIDs = Set(await coordinator.currentBuildUUIDs())
                     guard !rebuiltUUIDs.isEmpty, rebuiltUUIDs != beforeUUIDs,
@@ -259,7 +274,7 @@ public enum Watch {
                     }
 
                     try rebuildRunner.throwIfStopping()
-                    let current = try SourceSnapshot.capture(
+                    let current = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     if current != built {
                         print("sources changed while the rebuilt app was launching; rebuilding again")
@@ -273,7 +288,8 @@ public enum Watch {
                     if Set(await coordinator.currentBuildUUIDs()) != rebuiltUUIDs {
                         throw RebuildRecoveryError.binaryDidNotChange
                     }
-                    await coordinator.resetAfterRebuild(to: built, buildUUIDs: Array(rebuiltUUIDs))
+                    let preparation = await coordinator.resetAfterRebuild(to: built, buildUUIDs: Array(rebuiltUUIDs))
+                    reportSourceDiagnostics(preparation)
                     print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
                     print("")
                     await coordinator.reportToRuntime(RuntimeLogMessage(
@@ -313,7 +329,8 @@ public enum Watch {
                 }
                 continue
             }
-            switch await coordinator.handle(changes: guardedBatch.map(\.url)) {
+            let added = Set(guardedBatch.filter { $0.kind == .added }.map(\.url))
+            switch await coordinator.handle(changes: guardedBatch.map(\.url), added: added) {
                 case .ignored:
                     continue
                 case .rejected(let error):

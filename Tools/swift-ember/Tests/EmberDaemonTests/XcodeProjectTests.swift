@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import EmberCLI
 import EmberCore
 @testable import EmberDaemon
 
@@ -186,4 +187,213 @@ private let appSettings = [
     ]
     #expect(scheme.buildOutputPaths(from: withProjectLocalIntermediates, sourceRoots: [root])
         == [root + "/Intermediates", root + "/Products"])
+}
+
+@Test func xcodeSourceMembershipFollowsLocalFrameworkDependencies() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-xcode-modules-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("App.xcodeproj")
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    try """
+        {
+          objects = {
+            APP = { isa = PBXNativeTarget; name = App; dependencies = (DEPENDENCY); };
+            DEPENDENCY = { isa = PBXTargetDependency; target = KIT; };
+            KIT = { isa = PBXNativeTarget; name = FrameworkTarget; productType = "com.apple.product-type.framework"; };
+            OTHER = { isa = PBXNativeTarget; name = Other; productType = "com.apple.product-type.framework"; };
+          };
+        }
+        """.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+
+    let configuration = root.appendingPathComponent("Debug")
+    let appDirectory = configuration.appendingPathComponent("App.build")
+    let frameworkDirectory = configuration.appendingPathComponent("FrameworkTarget.build")
+    let shared = root.appendingPathComponent("Shared Sources", isDirectory: true)
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    let appSource = shared.appendingPathComponent("App.swift")
+    let frameworkSource = shared.appendingPathComponent("Greeter.swift")
+    let duplicate = shared.appendingPathComponent("Both.swift")
+    let unscheduled = shared.appendingPathComponent("Unscheduled.swift")
+
+    func writeBuildOutputs(_ directory: URL, product: String, module: String, sources: [URL]) throws {
+        let objects = directory.appendingPathComponent("Objects-normal/arm64")
+        try FileManager.default.createDirectory(at: objects, withIntermediateDirectories: true)
+        try Data().write(to: objects.appendingPathComponent("\(module).swiftmodule"))
+        try sources.map(\.path).joined(separator: "\n")
+            .write(to: objects.appendingPathComponent("\(product).SwiftFileList"), atomically: true, encoding: .utf8)
+    }
+
+    try writeBuildOutputs(appDirectory, product: "App", module: "App", sources: [appSource, duplicate])
+    try writeBuildOutputs(frameworkDirectory, product: "FrameworkProduct", module: "FeatureKit",
+                          sources: [frameworkSource, duplicate])
+    try writeBuildOutputs(configuration.appendingPathComponent("Other.build"),
+                          product: "Other", module: "Other", sources: [unscheduled])
+
+    let app = [
+        "TARGET_NAME": "App",
+        "PRODUCT_NAME": "App",
+        "PRODUCT_MODULE_NAME": "App",
+        "TARGET_TEMP_DIR": appDirectory.path,
+        "CONFIGURATION_TEMP_DIR": configuration.path,
+        "PROJECT_FILE_PATH": project.path,
+    ]
+    var context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+        targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+        sourceRoots: [shared.path], bundleIdentifier: "dev.ember.resolver-tests",
+        xcodeSourceTargets: XcodeProject.sourceTargets(appSettings: app, queriedTargets: []))
+    let cache = root.appendingPathComponent(".cache")
+    var resolver = ModuleResolver(context: context, cacheDirectory: cache)
+    #expect(try resolver.resolve(appSource).get().module == "App")
+    #expect(try resolver.resolve(frameworkSource).get().module == "FeatureKit")
+    let error = try #require(throws: ModuleResolver.Failure.self) { try resolver.resolve(duplicate).get() }
+    #expect(error.description.contains("multiple targets compile this source (App, FeatureKit)"))
+    #expect(throws: ModuleResolver.Failure.self) { try resolver.resolve(unscheduled).get() }
+
+    let framework = [
+        "WRAPPER_EXTENSION": "framework",
+        "PRODUCT_NAME": "FrameworkProduct",
+        "PRODUCT_MODULE_NAME": "FeatureKit",
+        "TARGET_TEMP_DIR": frameworkDirectory.path,
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "FEATURE_DEBUG",
+    ]
+    context.xcodeSourceTargets = XcodeProject.sourceTargets(appSettings: app, queriedTargets: [framework])
+    context.sourceModules = [shared.path: "FeatureKit", duplicate.path: "App"]
+    resolver = ModuleResolver(context: context, cacheDirectory: cache)
+    #expect(try resolver.resolve(unscheduled).get().module == "FeatureKit")
+    #expect(try resolver.resolve(duplicate).get().module == "App")
+    #expect(resolver.compilerFlags(for: "FeatureKit") == ["-D", "FEATURE_DEBUG"])
+}
+
+@Test func unbuiltXcodeTestTargetsAreRecognizedFromProjectMembership() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-xcode-tests-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("App.xcodeproj")
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    try """
+        {
+          rootObject = PROJECT;
+          objects = {
+            PROJECT = { isa = PBXProject; mainGroup = ROOT; };
+            ROOT = { isa = PBXGroup; children = (UNITGROUP, UI, APPFILE); sourceTree = "<group>"; };
+            UNITGROUP = { isa = PBXGroup; path = Custom; children = (UNITFILE); sourceTree = "<group>"; };
+            UNITFILE = { isa = PBXFileReference; path = Unit.swift; sourceTree = "<group>"; };
+            APPFILE = { isa = PBXFileReference; path = Shared.swift; sourceTree = SOURCE_ROOT; };
+            UNITBUILD = { isa = PBXBuildFile; fileRef = UNITFILE; };
+            SHAREDBUILD = { isa = PBXBuildFile; fileRef = APPFILE; };
+            UNITPHASE = { isa = PBXSourcesBuildPhase; files = (UNITBUILD, SHAREDBUILD); };
+            APPPHASE = { isa = PBXSourcesBuildPhase; files = (SHAREDBUILD); };
+            UI = { isa = PBXFileSystemSynchronizedRootGroup; path = Automation; sourceTree = "<group>"; exceptions = (EXCEPT); };
+            EXCEPT = { isa = PBXFileSystemSynchronizedBuildFileExceptionSet; target = UITEST; membershipExceptions = (Ignored.swift); };
+            APP = { isa = PBXNativeTarget; productType = "com.apple.product-type.application"; buildPhases = (APPPHASE); };
+            UNIT = { isa = PBXNativeTarget; productType = "com.apple.product-type.bundle.unit-test"; buildPhases = (UNITPHASE); };
+            UITEST = { isa = PBXNativeTarget; productType = "com.apple.product-type.bundle.ui-testing"; fileSystemSynchronizedGroups = (UI); };
+          };
+        }
+        """.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+
+    let membership = XcodeProject.projectSources(in: [["PROJECT_FILE_PATH": project.path]])
+    var context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+        targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+        sourceRoots: [root.path], bundleIdentifier: "dev.ember.resolver-tests", xcodeSourceTargets: [])
+    context.xcodeTestSources = membership.test
+    context.xcodeNonTestSources = membership.other
+    let contextURL = root.appendingPathComponent("context.json")
+    try context.write(to: contextURL)
+    var resolver = ModuleResolver(
+        context: try BuildContext.load(from: contextURL), cacheDirectory: root.appendingPathComponent(".cache"))
+    let testMembership = [
+        "Custom/Unit.swift", "Automation/Nested/Test.swift", "Shared.swift", "Automation/Ignored.swift",
+    ].map { resolver.isTestSource(root.appendingPathComponent($0)) }
+    #expect(testMembership == [true, true, false, false])
+}
+
+@Test func synchronizedTestSourcesRespectBuildPhaseMembershipExceptions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ember-xcode-phases-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("App.xcodeproj")
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    try """
+        {
+          rootObject = PROJECT;
+          objects = {
+            PROJECT = { isa = PBXProject; mainGroup = ROOT; };
+            ROOT = { isa = PBXGroup; children = (TESTGROUP); sourceTree = "<group>"; };
+            TESTGROUP = {
+              isa = PBXFileSystemSynchronizedRootGroup;
+              path = Checks;
+              sourceTree = "<group>";
+              exceptions = (SOURCEEXCEPT, RESOURCEEXCEPT, COPYEXCEPT, APPEXCEPT);
+            };
+            SOURCEEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTSOURCES;
+              membershipExceptions = ("Nested/Excluded.swift");
+            };
+            RESOURCEEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTRESOURCES;
+              membershipExceptions = (ResourceException.swift);
+            };
+            COPYEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = TESTCOPY;
+              membershipExceptions = (CopyException.swift);
+              attributesByRelativePath = { CopyException.swift = (CodeSignOnCopy); };
+            };
+            APPEXCEPT = {
+              isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+              buildPhase = APPSOURCES;
+              membershipExceptions = (OtherTargetException.swift);
+            };
+            TESTSOURCES = { isa = PBXSourcesBuildPhase; files = (); };
+            TESTRESOURCES = { isa = PBXResourcesBuildPhase; files = (); };
+            TESTCOPY = { isa = PBXCopyFilesBuildPhase; files = (); };
+            APPSOURCES = { isa = PBXSourcesBuildPhase; files = (); };
+            APP = { isa = PBXNativeTarget; productType = "com.apple.product-type.application"; buildPhases = (APPSOURCES); };
+            TEST = {
+              isa = PBXNativeTarget;
+              productType = "com.apple.product-type.bundle.unit-test";
+              buildPhases = (TESTSOURCES, TESTRESOURCES, TESTCOPY);
+              fileSystemSynchronizedGroups = (TESTGROUP);
+            };
+          };
+        }
+        """.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+
+    let checks = root.appendingPathComponent("Checks")
+    let excluded = checks.appendingPathComponent("Nested/Excluded.swift")
+    let testSources = ["ResourceException.swift", "CopyException.swift", "OtherTargetException.swift"].map {
+        checks.appendingPathComponent($0)
+    }
+    try FileManager.default.createDirectory(at: excluded.deletingLastPathComponent(), withIntermediateDirectories: true)
+    for file in testSources + [excluded] { try Data().write(to: file) }
+
+    let membership = XcodeProject.projectSources(in: [["PROJECT_FILE_PATH": project.path]])
+    var context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+        targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+        sourceRoots: [checks.path], bundleIdentifier: "dev.ember.resolver-tests", xcodeSourceTargets: [])
+    context.xcodeTestSources = membership.test
+    context.xcodeNonTestSources = membership.other
+    let cache = root.appendingPathComponent(".cache")
+    var resolver = ModuleResolver(context: context, cacheDirectory: cache)
+
+    for file in testSources {
+        let isTest = resolver.isTestSource(file)
+        #expect(isTest, "\(file.lastPathComponent) should still belong to the test target")
+    }
+    guard case .unresolved(let failure) = resolver.membership(of: excluded) else {
+        Issue.record("A Swift file excluded from the test Sources phase should be unresolved")
+        return
+    }
+    #expect(failure.hasNoOwner)
+    let ownership = Doctor.watchedModules(context: context, cacheDirectory: cache)
+    #expect(ownership.modules.isEmpty)
+    #expect(ownership.failures.count == 1)
+    #expect(ownership.failures.first?.contains("/Checks/Nested/Excluded.swift:") == true)
 }

@@ -38,7 +38,7 @@ enum PackageCompilerSettings: Sendable {
         // result available when only the build's compiler driver is retained.
         let requiresEvaluation = [
             "swiftSettings", "swiftLanguageModes", "swiftLanguageVersions", "resources",
-        ].contains { manifestSource.contains($0) }
+        ].contains { manifestSource.contains($0) } || PackageManifest.hasVersionedManifest(beside: manifest)
         if !requiresEvaluation {
             switch PackageLanguageMode.read(from: manifest) {
             case .mode(let mode):
@@ -53,30 +53,11 @@ enum PackageCompilerSettings: Sendable {
         }
 
         do {
-            try FileManager.default.createDirectory(
-                at: cacheDirectory, withIntermediateDirectories: true)
-            let swift = URL(fileURLWithPath: swiftCompilerPath)
-                .deletingLastPathComponent().appendingPathComponent("swift")
-            guard FileManager.default.isExecutableFile(atPath: swift.path) else {
-                return .unknown("could not locate swift next to the selected compiler")
-            }
-            var environment = ProcessInfo.processInfo.environment
-            environment["CLANG_MODULE_CACHE_PATH"] = cacheDirectory.path
-            environment["SWIFTPM_MODULECACHE_OVERRIDE"] = cacheDirectory.path
-            let result = try Subprocess.runSeparated(
-                swift.path,
-                arguments: [
-                    "package", "--disable-sandbox", "dump-package",
-                    "--package-path", manifest.deletingLastPathComponent().path,
-                ],
-                environment: environment)
-            guard result.exitCode == 0 else {
-                let reason = result.standardError
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return .unknown("could not evaluate \(manifest.lastPathComponent): \(reason)")
-            }
+            let data = try PackageManifest.run(
+                ["dump-package"], manifest: manifest, swiftCompilerPath: swiftCompilerPath,
+                cacheDirectory: cacheDirectory)
             switch decode(
-                Data(result.standardOutput.utf8), module: module,
+                data, module: module,
                 platform: packagePlatform(for: sdkName),
                 packageIdentity: packageIdentity(for: manifest)) {
             case .flags(let flags): return .flags(automatic + flags)

@@ -266,7 +266,7 @@ struct StartupBaselineTests {
         #expect(try manifest.validate(snapshot) != nil)
         #expect(snapshot.watched.count == 1)
         #expect(snapshot.excluded.isEmpty)
-        #expect(Doctor.watchedModules(context: context) == [context.moduleName])
+        #expect(Doctor.watchedModules(context: context, cacheDirectory: fixture.sources.appendingPathComponent(".cache")).modules == [context.moduleName])
 
         let watcher = FileWatcher(roots: [fixture.sources], excluding: [derived])
         watcher.prime(from: snapshot)

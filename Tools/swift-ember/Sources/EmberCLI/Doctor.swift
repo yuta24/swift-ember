@@ -5,7 +5,9 @@ import EmberDaemon
 /// DESIGN.md section 21. Every check reports what it looked at, so a failure
 /// tells the developer where to go rather than only that something is wrong.
 public enum Doctor {
-    public static func run(context: BuildContext, project: XcodeProject.Resolved? = nil) -> Bool {
+    public static func run(
+        context: BuildContext, project: XcodeProject.Resolved? = nil, manifestCacheDirectory: URL
+    ) -> Bool {
         var ok = true
 
         func check(_ label: String, _ detail: String?, passed: Bool) {
@@ -45,12 +47,18 @@ public enum Doctor {
             : "build the selected app first and pass --derived-data-path if the build used -derivedDataPath"
         check("App binary", built ? binary : "missing at \(binary). \(buildHint)", passed: built)
 
-        let watched = watchedModules(context: context)
+        let ownership = watchedModules(context: context, cacheDirectory: manifestCacheDirectory)
+        let watched = ownership.modules
         let watchesAppModule = watched.contains(context.moduleName)
         check("Watched modules", watched.isEmpty
-              ? "no Swift sources found under the configured source roots"
+              ? "no watched Swift sources resolved to a module"
               : watched.joined(separator: ", "),
               passed: !watched.isEmpty)
+        if !ownership.failures.isEmpty {
+            let label = "Source modules".padding(toLength: 22, withPad: " ", startingAt: 0)
+            print("\(label)WARN  \(ownership.failures.count) unresolved Swift source(s)")
+            for failure in ownership.failures { print("  \(failure)") }
+        }
 
         // The two settings that decide whether hot reload can work at all.
         var keys = 0
@@ -128,14 +136,6 @@ public enum Doctor {
                       ? "-Xfrontend -enable-implicit-dynamic"
                       : "add -Xfrontend -enable-implicit-dynamic to OTHER_SWIFT_FLAGS",
                       passed: project.implicitDynamicEnabled)
-            } else {
-                // These values describe the selected application target. Xcode
-                // does not report the corresponding settings for local package
-                // targets, so treating the app's values as the package's gave
-                // false failures. The built module inventory and compiler
-                // probe above are the package-target evidence we can trust.
-                check("Package settings",
-                      "verified from the built watched modules", passed: true)
             }
             // Not a pass/fail. When the runtime arrives as the EmberRuntime
             // package product it is enabled by the package manifest, not by
@@ -167,36 +167,48 @@ public enum Doctor {
     /// Modules reachable from the exact roots the user asked Ember to watch.
     /// Kept separate from the binary inventory: the latter contains every
     /// linked package, including modules no watched file can ever belong to.
-    static func watchedModules(context: BuildContext) -> [String] {
-        let resolver = ModuleResolver(appModule: context.moduleName)
+    static func watchedModules(
+        context: BuildContext, cacheDirectory: URL
+    ) -> (modules: [String], failures: [String]) {
+        var resolver = ModuleResolver(context: context, cacheDirectory: cacheDirectory)
         let sourceFilter = SourcePathFilter(excluding: context.unwatchedSourcePaths.map {
             URL(fileURLWithPath: $0)
         })
         var modules = Set<String>()
+        var failures = Set<String>()
+
+        func inspect(_ file: URL) {
+            switch resolver.membership(of: file) {
+            case .patchable(let resolution): modules.insert(resolution.module)
+            case .test: break
+            case .unresolved(let error): failures.insert(error.description)
+            }
+        }
 
         for path in context.sourceRoots {
             let root = URL(fileURLWithPath: path).standardizedFileURL
             guard !sourceFilter.excludes(root) else { continue }
             if root.pathExtension == "swift" {
                 if FileManager.default.fileExists(atPath: root.path) {
-                    modules.insert(resolver.module(for: root))
+                    inspect(root)
                 }
                 continue
             }
 
             guard let walker = FileManager.default.enumerator(
-                at: root, includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+                at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]) else { continue }
             for case let file as URL in walker {
                 if sourceFilter.excludes(file) {
                     walker.skipDescendants()
                     continue
                 }
-                guard file.pathExtension == "swift" else { continue }
-                modules.insert(resolver.module(for: file))
+                guard file.pathExtension == "swift",
+                      (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+                inspect(file)
             }
         }
-        return modules.sorted()
+        return (modules.sorted(), failures.sorted())
     }
 
     /// Whether `module` was built for private imports, asked by compiling the

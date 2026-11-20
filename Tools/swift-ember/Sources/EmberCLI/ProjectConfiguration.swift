@@ -11,6 +11,7 @@ struct ProjectConfiguration: Decodable {
     let configuration: String?
     let sources: [String]?
     let exclude: [String]?
+    let sourceModules: [String: String]?
     let startupTimeout: TimeInterval?
     let rebuildCommand: String?
     let rebuildTimeout: TimeInterval?
@@ -23,6 +24,7 @@ struct ProjectConfiguration: Decodable {
         case invalidRebuildTimeout(URL)
         case emptyRebuildCommand(URL)
         case emptyExcludePath(URL)
+        case invalidSourceModules(URL)
         case unknownKeys(URL, [String])
 
         var description: String {
@@ -41,6 +43,8 @@ struct ProjectConfiguration: Decodable {
                 "\(url.path) has an empty rebuildCommand; remove it or provide a command"
             case .emptyExcludePath(let url):
                 "\(url.path) has an empty exclude path; remove it or use an empty array"
+            case .invalidSourceModules(let url):
+                "\(url.path) requires nonempty paths and Swift module names in sourceModules, with one module per path"
             case .unknownKeys(let url, let keys):
                 "\(url.path) has unknown keys: \(keys.joined(separator: ", "))"
             }
@@ -53,7 +57,7 @@ struct ProjectConfiguration: Decodable {
             let data = try Data(contentsOf: url)
             if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 let allowed: Set<String> = [
-                    "project", "workspace", "scheme", "configuration", "sources", "exclude",
+                    "project", "workspace", "scheme", "configuration", "sources", "exclude", "sourceModules",
                     "startupTimeout", "rebuildCommand", "rebuildTimeout",
                 ]
                 let unknown = object.keys.filter { !allowed.contains($0) }.sorted()
@@ -90,6 +94,7 @@ struct ProjectConfiguration: Decodable {
         }) == true {
             throw ConfigurationError.emptyExcludePath(url)
         }
+        _ = try configuration.sourceModulePaths(relativeTo: url)
         return configuration
     }
 
@@ -131,7 +136,7 @@ struct ProjectConfiguration: Decodable {
         return nil
     }
 
-    func applying(to options: inout Options, from url: URL, explicit: Options.ExplicitOptions) {
+    func applying(to options: inout Options, from url: URL, explicit: Options.ExplicitOptions) throws {
         let root = url.deletingLastPathComponent()
         if !explicit.context && !explicit.container {
             options.project = project.map { Self.absoluteURL($0, relativeTo: root).path }
@@ -147,6 +152,7 @@ struct ProjectConfiguration: Decodable {
         if !explicit.excludes, let exclude {
             options.excludedSourcePaths = exclude.map { Self.absoluteURL($0, relativeTo: root).path }
         }
+        options.sourceModules = try sourceModulePaths(relativeTo: url)
         if !explicit.startupTimeout, let startupTimeout {
             options.startupTimeout = startupTimeout
         }
@@ -159,6 +165,22 @@ struct ProjectConfiguration: Decodable {
         if !explicit.rebuildTimeout, let rebuildTimeout {
             options.rebuildTimeout = rebuildTimeout
         }
+    }
+
+    private func sourceModulePaths(relativeTo url: URL) throws -> [String: String]? {
+        guard let sourceModules else { return nil }
+        let root = url.deletingLastPathComponent()
+        var result: [String: String] = [:]
+        for (path, module) in sourceModules {
+            let absolute = Self.absoluteURL(path, relativeTo: root).resolvingSymlinksInPath().path
+            guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !module.isEmpty, module.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+                  result[absolute] == nil || result[absolute] == module else {
+                throw ConfigurationError.invalidSourceModules(url)
+            }
+            result[absolute] = module
+        }
+        return result
     }
 
     private static func absoluteURL(_ path: String, relativeTo root: URL) -> URL {

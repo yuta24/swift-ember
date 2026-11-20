@@ -721,24 +721,36 @@ private func withConfiguration(
     let package = root.appendingPathComponent("FeaturePackage")
     let feature = package.appendingPathComponent("Sources/Feature")
     let helper = package.appendingPathComponent("Sources/Helper")
+    let checks = package.appendingPathComponent("Checks")
+    try FileManager.default.createDirectory(at: checks, withIntermediateDirectories: true)
+    try "struct FeatureTests {}\n".write(to: checks.appendingPathComponent("FeatureTests.swift"),
+                                          atomically: true, encoding: .utf8)
     try FileManager.default.createDirectory(at: feature, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: helper, withIntermediateDirectories: true)
-    try "// package\n".write(to: package.appendingPathComponent("Package.swift"),
-                              atomically: true, encoding: .utf8)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Fixture", targets: [
+            .target(name: "Feature"), .target(name: "Helper"),
+            .testTarget(name: "FeatureTests", dependencies: ["Feature"], path: "Checks")
+        ])
+        """.write(to: package.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
     try "struct Screen {}\n".write(to: feature.appendingPathComponent("Screen.swift"),
                                     atomically: true, encoding: .utf8)
     try "struct HiddenHelper {}\n".write(to: helper.appendingPathComponent("Helper.swift"),
                                           atomically: true, encoding: .utf8)
 
     let context = BuildContext(
-        moduleName: "App", swiftCompilerPath: "/swiftc", swiftCompilerVersion: "6",
+        moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "6",
         targetTriple: "arm64-apple-ios16.0-simulator", sdkPath: "/sdk",
         sdkName: "iphonesimulator", appBinaryPath: "/App", moduleSearchPaths: [],
-        extraCompilerFlags: [], sourceRoots: [package.appendingPathComponent("Sources").path],
+        extraCompilerFlags: [], sourceRoots: [package.appendingPathComponent("Sources").path, checks.path],
         bundleIdentifier: "id",
         excludedSourcePaths: [helper.path])
 
-    #expect(Doctor.watchedModules(context: context) == ["Feature"])
+    let ownership = Doctor.watchedModules(context: context, cacheDirectory: root.appendingPathComponent(".cache"))
+    #expect(ownership.modules == ["Feature"])
+    #expect(ownership.failures.isEmpty)
 }
 
 @Test func physicalLoadFailuresKeepTheirStructuredRecovery() {
@@ -820,4 +832,36 @@ private func withConfiguration(
     #expect(finished.exitCode == 0)
     #expect(finished.standardOutput == "done")
     #expect(finished.standardError.count == 300_000)
+}
+
+@Test func configuredSourceModulesReachDoctorAndTheBackgroundContext() throws {
+    try withConfiguration(#"""
+        { "sourceModules": { "Components": "FeatureKit", "Components/App.swift": "App" } }
+        """#, in: true) { root, current in
+        let sources = root.appendingPathComponent("Components")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        let app = sources.appendingPathComponent("App.swift")
+        let feature = sources.appendingPathComponent("Feature.swift")
+        let unknown = root.appendingPathComponent("Unknown.swift")
+        for file in [app, feature, unknown] {
+            try "struct Source {}".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let contextURL = root.appendingPathComponent("context.json")
+        let original = BuildContext(
+            moduleName: "App", swiftCompilerPath: "/usr/bin/swiftc", swiftCompilerVersion: "test",
+            targetTriple: "arm64-apple-macosx14.0", sdkPath: "/", sdkName: "macosx",
+            appBinaryPath: "/unused", moduleSearchPaths: [], extraCompilerFlags: [],
+            sourceRoots: [root.path], bundleIdentifier: "dev.ember.resolver-tests", xcodeSourceTargets: [])
+        try original.write(to: contextURL)
+        let options = try Options.parse(
+            ["doctor", "--context", contextURL.path, "--config", "../.swift-ember.json"],
+            environment: [:], currentDirectory: current)
+        try options.buildContext(project: nil).write(to: contextURL)
+        let context = try BuildContext.load(from: contextURL)
+        let ownership = Doctor.watchedModules(context: context, cacheDirectory: root.appendingPathComponent(".cache"))
+        #expect(ownership.modules == ["App", "FeatureKit"])
+        #expect(ownership.failures.count == 1)
+        #expect(ownership.failures.first?.contains(unknown.path) == true)
+        #expect(ownership.failures.first?.contains("sourceModules") == true)
+    }
 }
