@@ -152,7 +152,7 @@ cases:
     kind: unsafe
     state_preserved: false
     result: pass
-    observed: "signal 11"
+    observed: "exit 0; g0: old g1: 42"
     note: "compiles and loads with no diagnostic; runtime outcome is undefined and has been observed as the new value, as garbage, and as SIGSEGV"
   - id: opaque-result-type-stable
     supported: true

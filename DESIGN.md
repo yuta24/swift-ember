@@ -1228,8 +1228,8 @@ instance methods and `@MainActor` methods all replace successfully with
 state preserved, for invocations started after the patch loads. A call already
 suspended at an `await` finishes its old frame after the patch loads, while a
 later invocation enters the replacement. The suspended case passes on the
-macOS host under Swift 6.2.3, 6.3.2, 6.3.3, and 6.4, and on an iOS 27.0
-Simulator under Swift 6.4.
+macOS host under Swift 6.2.3, 6.3.2, 6.3.3, 6.4, and 6.4.2. It also passes on
+the iOS 27.0 and 27.2 Simulators under Swift 6.4 and 6.4.2, respectively.
 
 ### 12.7 Opaque result types are memory-unsafe to change
 
@@ -1263,8 +1263,10 @@ had already been resolved before the patch loaded: a program that reads
 the property only after loading tends to get the new value, while one
 that read it beforehand reads an `Int` through cached `String` metadata.
 
-It diverges by platform too. The identical fixture returns the new value
-on the macOS host and crashes with `SIGSEGV` on the iOS Simulator.
+It has diverged by platform too. Under Xcode 27.0 Beta 4, the identical fixture
+returned the new value on the macOS host and crashed with `SIGSEGV` on the iOS
+Simulator. Section 20 records the release runs, including `SIGBUS` on the
+Xcode 27.0 host.
 
 Undefined behavior that sometimes produces the right answer is worse
 than a reliable crash, because it survives casual testing.
@@ -2468,7 +2470,7 @@ toolchains:
       swiftui: experimental
 ```
 
-Seven local Xcode versions measured, five of them shipping releases. The table
+Eight local Xcode versions measured, six of them shipping releases. The table
 records runs of `fixtures/run.sh` and `swift test --package-path Tools/swift-ember`:
 
 ``` text
@@ -2479,15 +2481,17 @@ local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 local, Xcode 26.6    6.3.3   macosx26.0    41/44  44/44 (iOS 26.5)   226/226
 local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   203/203
 local, Xcode 27.0b6  6.4     macosx26.0    41/44  44/44 (iOS 27.0)   203/203
-local, Xcode 27.2    6.4.2   macosx27.0    49/52  not run            385/385
+local, Xcode 27.0    6.4     macosx27.0    49/52  44/52 (iOS 27.0)   385/385
+local, Xcode 27.2    6.4.2   macosx27.0    49/52  44/52 (iOS 27.2)   385/385
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
 
 The counts reflect the matrix and test suite at the time of each run.
-The current host run passed 49 of 52 cases, with the three Simulator-only
-UIKit cases skipped by name. The Xcode 26.6 and 27.0 Beta 6 rows cover the
-44-case matrix on both targets.
+The Xcode 27 release runs passed 49 of 52 cases on the host, with the three
+Simulator-only UIKit cases skipped by name. The Simulator runs passed 44 of
+52 cases and skipped the eight macOS-only generic and inlining cases. The
+Xcode 26.6 and 27.0 Beta 6 rows cover the 44-case matrix on both targets.
 
 The M6 host-only verification on 2026-09-11 passes 330/330 tests under local
 Swift 6.3.3 and Xcode 27.0 Beta 6's Swift 6.4. The latter also passes the
@@ -2511,6 +2515,10 @@ installed locally too, and its full run is recorded above. The CI row remains
 useful because it was measured independently and because the macOS 15 target
 cannot be reproduced on this machine.
 
+The CI matrix includes `xcode-27` as an optional check. Pull requests
+use the host-only profile. Pushes to `main` and manual runs also run the
+Simulator fixtures.
+
 No supported result has differed where the same case was measured on more than
 one configuration. The SwiftUI erasure to `DebugReplaceableView` is present on
 all measured local toolchains, and a full reload of the sample app works on
@@ -2520,9 +2528,10 @@ The unsafe cases are the exception. `opaque-inside-a-type` produces SIGSEGV
 everywhere. `opaque-result-type-changed` produced
 `exit 0; g0: old g1: 42` on the Xcode 27.0 Beta 4 host, but SIGSEGV on that
 Simulator and on both targets under Beta 6. Under Xcode 26.6 it again returned
-the new value on the host and produced SIGSEGV on the Simulator. The
-checked-in macOS result records SIGSEGV under Xcode 27.2. The Simulator
-result records SIGSEGV under Beta 6.
+the new value on the host and produced SIGSEGV on the Simulator. An earlier
+Xcode 27.2 host run also recorded SIGSEGV. In the release reruns, the 27.0
+host produced `SIGBUS` and the 27.2 host returned `exit 0; g0: old g1: 42`.
+Both release Simulator runs produced `SIGSEGV`.
 
 Reproduce a row with:
 
@@ -2542,6 +2551,9 @@ crashes the type checker with signal 5 on Swift 6.3.2 and earlier, which
 is every shipping toolchain at the time of writing. Spelling `self.`
 explicitly compiles everywhere. It was found by building the package
 under each toolchain rather than by reading anything.
+
+The implicit form compiles on Xcode 27.0 and 27.2. The explicit `self.` is
+still needed at the Xcode 26.2 support floor.
 
 The earlier data point, on the macOS host and an arm64 iOS Simulator
 (see Appendix A):
@@ -2944,17 +2956,21 @@ baseline. Do not generalize these results across Xcode versions.
 ### A.1 Environment
 
 ``` text
-macOS       Xcode 27.2 (27B52), Apple Swift 6.4.2, arm64-apple-macosx27.0
-Simulator   Xcode 27.0 Beta 6, Apple Swift 6.4, arm64-apple-ios27.0-simulator
-            iPhone 17 Pro, iOS 27.0
+macOS       Xcode 27.0 (27A266a), Apple Swift 6.4, arm64-apple-macosx27.0
+            Xcode 27.2 (27B52), Apple Swift 6.4.2, arm64-apple-macosx27.0
+Simulator   Xcode 27.0, arm64-apple-ios27.0-simulator, iPhone 18 Pro
+            Xcode 27.2, arm64-apple-ios27.2-simulator, iPhone 18 Pro
 ```
 
-The macOS run passed 49 cases and skipped three Simulator-only UIKit
-cases. The recorded Simulator run passed the 44 cases then in the matrix.
-The eight new generic and inlining cases were measured on macOS.
+The release runs used an arm64 macOS 27.2.1 host. Each macOS run passed 49
+cases and skipped three Simulator-only UIKit cases. Each Simulator run passed
+44 cases and skipped the eight macOS-only generic and inlining cases. The
+earlier Xcode 27.0 Beta 6 Simulator run passed the 44 cases then in the matrix
+on an iPhone 17 Pro running iOS 27.0.
 
-Use `fixtures/run.sh --results fixtures/results-macos.yaml` to reproduce the
-host run. On a booted Simulator, use
+The checked-in snapshots use Xcode 27.2. Use
+`fixtures/run.sh --results fixtures/results-macos.yaml` to reproduce the host
+run. On a booted iOS 27.2 Simulator, use
 `fixtures/run.sh --platform simulator --results fixtures/results-simulator.yaml`.
 
 ### A.2 Method
@@ -3066,9 +3082,10 @@ macOS host, fixture case            exit 0, returned the new value
 iOS Simulator, same fixture case    SIGSEGV
 ```
 
-The last two lines are the same source compiled by the same toolchain,
-differing only in target. A developer who tries this edit on one
-platform learns nothing about the other.
+The last two lines are the same source compiled by the same toolchain
+(Xcode 27.0 Beta 4), differing only in target. A developer who tries this edit
+on one platform learns nothing about the other. The Xcode 27.2 rerun
+reproduced the two outcomes in the table.
 
 ### A.4 Coverage of implicit dynamic
 
