@@ -69,6 +69,16 @@ unzip swift-ember.zip
 Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
 check the installation with `swift-ember --help`.
 
+With [mise](https://mise.jdx.dev), install the same `swift-ember.zip` through
+the GitHub backend. This pins the version in the project's `mise.toml`:
+
+```sh
+mise use github:yuta24/swift-ember@0.5.0
+```
+
+Skip `install.sh` in this case. mise unpacks the archive and puts `bin/` on
+`PATH` in shells where it is activated.
+
 Each release also includes `swift-ember.artifactbundle.zip` for SwiftPM binary
 targets and build-tool plugins. Normal command-line installation should use
 `swift-ember.zip` above.
@@ -365,6 +375,10 @@ For a terminal-managed watcher with a manifest, set the Build post-action to
 `xcode record` and run `swift-ember watch` after launching the app. Select the
 same app target under **Provide build settings from** for both build actions.
 Use **Product > Clean Build Folder** before the first build with these actions.
+
+The examples use the `$HOME/.local/bin` installation. Scheme actions do not
+run in a shell where mise is activated, so with mise use the absolute path
+that `mise which swift-ember` prints, and update it when you change versions.
 
 Both actions use the selected app target's build settings, including the
 output paths of builds run with `xcodebuild -derivedDataPath`. The pre-action
