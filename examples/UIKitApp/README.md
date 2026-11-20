@@ -14,14 +14,19 @@ Boot a simulator, then from the repository root:
 xcodebuild -project examples/UIKitApp/UIKitApp.xcodeproj -scheme UIKitApp \
            -configuration Debug \
            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+```
 
+Install and launch the built app, or build and run from Xcode. Then start the
+watcher in a terminal:
+
+```sh
 swift-ember doctor --project examples/UIKitApp/UIKitApp.xcodeproj \
                     --scheme UIKitApp --sources examples/UIKitApp/Sources
 swift-ember watch  --project examples/UIKitApp/UIKitApp.xcodeproj \
                     --scheme UIKitApp --sources examples/UIKitApp/Sources
 ```
 
-Install and launch the built app, then edit one of the bodies below. The
+Once the watcher connects, edit one of the bodies below. The
 `session` shown under the title is generated once per launch: if it does not
 change, nothing restarted.
 

@@ -120,26 +120,12 @@ before and after. `examples/CounterApp/README.md` walks through what happened.
 
 ## Configuring your project
 
-Share your app's scheme in Xcode and copy `integrations/xcode/Ember.xcconfig`
-from the checked-out release beside your project. Preview the Debug setup,
-then apply it with `--write`.
+### Add the runtime
 
-```sh
-swift-ember init --project App.xcodeproj --scheme App --sources Sources
-swift-ember init --project App.xcodeproj --scheme App --sources Sources --write
-```
-
-Use `--workspace App.xcworkspace` for a workspace, or `--ember-xcconfig <path>`
-to use a template elsewhere. `init` creates `.swift-ember.json`, configures the
-app target's Debug xcconfig, and adds the scheme actions for source recording.
-If Debug already has a Base Configuration, the new xcconfig includes it first
-and then includes Ember. See [Xcode integration](integrations/xcode/README.md)
-for CocoaPods, existing project settings, and manual setup.
-
-Add the Ember package product and call `Ember.start()` once at launch.
+Add the [Ember package product](#in-app-runtime), import `EmberRuntime` for
+UIKit or `EmberSwiftUI` for SwiftUI, and call `Ember.start()` once at launch.
 The package compiles its active runtime only for Debug and provides an inert
-entry point in Release. For local packages you want to reload, configure their
-flags separately as shown in [Making a Swift package patchable](integrations/xcode/Package.md).
+entry point in Release.
 
 A SwiftUI View whose `body` should reload adds two explicit boundaries:
 
@@ -168,9 +154,36 @@ default it invalidates layout and reloads lists, which is what makes the edit
 visible; `Ember.start(refresh: .none)` turns that off if the app would rather
 do it itself.
 
-Review the generated `.swift-ember.json` beside the project or workspace. Paths in this file
-are relative to the configuration file, so the same file works for every
-checkout:
+### Set Debug Build Settings
+
+In Xcode, select your app target, open **Build Settings**, and set these values
+for **Debug** only. Append both flag pairs to any existing Other Swift Flags
+and keep `$(inherited)` to preserve flags from the project.
+
+| Xcode setting | Debug value | Reason |
+| --- | --- | --- |
+| Other Swift Flags (`OTHER_SWIFT_FLAGS`) | `-Xfrontend -enable-implicit-dynamic -Xfrontend -enable-private-imports` | Implicit dynamic makes declarations replaceable. Private imports let patches replace and refer to `private` and `fileprivate` declarations. Both are frontend options and each needs its own `-Xfrontend`. |
+| Enable Testability (`ENABLE_TESTABILITY`) | `YES` | Exports the replacement keys for internal declarations so patches can bind to them. |
+| Optimization Level (`SWIFT_OPTIMIZATION_LEVEL`, under Swift Compiler) | **No Optimization [-Onone]** | Replacement dispatch only survives without optimization. |
+
+Add `EMBER_ENABLED` to the app target's Debug **Active Compilation Conditions**
+only if the app's own code uses `#if EMBER_ENABLED` or you compile the runtime
+sources directly. The package product enables its active runtime in Debug
+through its manifest. Xcode does not pass the app target's conditions into
+package targets. Ember forwards the app target's condition to patch
+compilation so a patched body takes the same branch.
+
+Configure each local Swift package you want to reload separately. Xcode does
+not pass the app target's flags to package targets. See
+[Making a Swift package patchable](integrations/xcode/Package.md).
+Keep these settings out of Release and check the shipping build with
+[`swift-ember doctor --release`](#checking-a-shipping-build).
+
+### Configure the watcher (optional)
+
+You can put your target, source roots, and exclusions in `.swift-ember.json`
+beside the project or workspace, or supply them as command-line arguments.
+Paths in the file are relative to the file, so it works across checkouts.
 
 ```json
 {
@@ -250,53 +263,105 @@ specific file anyway, or `--no-config` to disable discovery explicitly. A
 manifest passed with `--context` and an Xcode project/workspace are separate
 target modes and cannot be combined.
 
+### Build, run, and watch
+
+Select your app scheme and a Simulator in Xcode, then build and run the Debug
+app. With the app running, open a terminal and run the following commands from
+the project directory. Wait for `watch` to report a connection before editing
+a method body.
+
+```sh
+swift-ember doctor --project App.xcodeproj --scheme App --sources Sources
+swift-ember watch --project App.xcodeproj --scheme App --sources Sources
 ```
+
+Use `--workspace App.xcworkspace` for a workspace. If you created
+`.swift-ember.json`, Ember can discover the target and sources from it.
+
+```sh
 swift-ember doctor
 swift-ember watch
 ```
 
-`watch` stays in the foreground, which is convenient in a terminal. To let an
-Xcode action own the same watcher, run it in the background instead:
+`doctor` names missing settings and checks the built binary for replacement
+keys. `watch` stays in the foreground. If you build with a custom DerivedData
+directory, pass the same directory to both terminal commands.
 
 ```sh
-swift-ember start
-swift-ember status
-swift-ember stop
+xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build-xcode build
+swift-ember doctor --project App.xcodeproj --scheme App --sources Sources \
+  --derived-data-path .build-xcode
+swift-ember watch --project App.xcodeproj --scheme App --sources Sources \
+  --derived-data-path .build-xcode
 ```
 
-`start` returns only after the watcher is ready. A second `start` is harmless,
-and `stop` is idempotent. Session records, logs, and isolated patch output live
-under `.ember/sessions`, `.ember/logs`, and `.ember/patches` beside the project
-or context file. `stop` verifies the PID, executable path, and process start
-time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
-process. Startup waits for up to 60 seconds by default; unusually large or slow
-projects can override that with `--startup-timeout <seconds>`.
+When more than one Simulator is booted, select one by UDID.
 
-Pass `--post-action start` to `init` if Xcode should also restart the background
-watcher after a successful Debug build. For manual setup, add the following
-to the scheme's **Build > Pre-actions**.
+```sh
+xcrun simctl list devices booted
+
+swift-ember doctor --project App.xcodeproj --scheme App \
+  --simulator <Simulator-UDID>
+swift-ember watch --project App.xcodeproj --scheme App \
+  --simulator <Simulator-UDID>
+```
+
+For a physical device, build and run the Debug app on that device once, then
+select its CoreDevice identifier.
+
+```sh
+xcrun devicectl list devices
+
+swift-ember doctor --project App.xcodeproj --scheme App \
+  --device <CoreDevice-ID>
+swift-ember watch --project App.xcodeproj --scheme App \
+  --device <CoreDevice-ID>
+```
+
+The patch is signed with the build's Development identity and its Team ID is
+checked against the app before transfer. If a project does not expose an
+expanded identity through its build settings, pass
+`--signing-identity <certificate-name-or-SHA>`. The phone must be paired,
+unlocked, in Developer Mode, and the app must remain foreground-runnable while
+a patch is applied. iOS may suspend the file client in the background.
+
+See [XcodeApp](examples/XcodeApp) for SwiftUI with a local package and
+[UIKitApp](examples/UIKitApp) for storyboards, navigation, and a table view.
+Before publishing a release, run the [physical iPhone release checklist](docs/release-checklist.md).
+
+### Scheme actions (optional)
+
+Add scheme actions if you want a build source manifest, automatic watcher
+startup, or hot-reload messages in Xcode's debug console. The manifest lets
+the watcher detect edits made between the build and watcher startup.
+Build and run the app once on the selected destination before enabling
+`xcode start` so the watcher can reach the installed app's data container.
+
+In **Edit Scheme > Build > Pre-actions**, add:
 
 ```sh
 "$HOME/.local/bin/swift-ember" xcode prepare
 ```
 
-In **Build > Post-actions**, add:
+In **Build > Post-actions**, add the following to record the manifest and
+start the background watcher after a successful Debug build:
 
 ```sh
 "$HOME/.local/bin/swift-ember" xcode start
 ```
 
-Select the same app target under **Provide build settings from** for both
-actions. Use **Product > Clean Build Folder** before the first build with
-these actions. For a terminal-managed watcher, set the Build post-action to
-`xcode record`.
+For a terminal-managed watcher with a manifest, set the Build post-action to
+`xcode record` and run `swift-ember watch` after launching the app. Select the
+same app target under **Provide build settings from** for both build actions.
+Use **Product > Clean Build Folder** before the first build with these actions.
 
 Both actions use the selected app target's build settings, including the
 output paths of builds run with `xcodebuild -derivedDataPath`. The pre-action
 can run before the binary exists. The post-action requires the built binary.
 
-Add the matching line to **Run > Post-actions** so the watcher exits with the
-app:
+If you use `xcode start`, add this line to **Run > Post-actions** so the
+watcher exits with the app:
 
 ```sh
 "$HOME/.local/bin/swift-ember" xcode stop
@@ -316,24 +381,10 @@ The executable may live inside the repository instead; use its absolute path
 derived from `SRCROOT`, for example
 `"$SRCROOT/../tools/swift-ember" xcode start`. If no configuration file is
 used, Xcode supplies the project or workspace path. Pass `--scheme` and any
-extra `--sources` to the build actions. To keep live output in a terminal,
-use `watch`, which also accepts an explicit project and scheme:
+extra `--sources` to the build actions, and pass the same `--scheme` to
+`xcode stop`.
 
-```sh
-swift-ember watch --project App.xcodeproj --scheme App --sources Sources
-```
-
-When building with a custom DerivedData directory, use the same directory
-for terminal commands. The Scheme actions get the directory from Xcode.
-
-```sh
-xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
-  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build-xcode build
-swift-ember doctor --derived-data-path .build-xcode
-swift-ember watch --derived-data-path .build-xcode
-```
-
-For a terminal-driven build without Scheme actions, run `swift-ember xcode
+To record sources in a terminal-driven build, run `swift-ember xcode
 prepare --derived-data-path .build-xcode` before the build and `swift-ember
 xcode record --derived-data-path .build-xcode` after it succeeds. These
 examples use the project, scheme, and source roots in `.swift-ember.json`.
@@ -356,10 +407,10 @@ version and rebuild. If sources keep changing during startup, wait for
 writes to finish and retry. A startup read or UTF-8 error lists the affected
 paths and stops the watcher.
 
-Existing builds without a source manifest still start with a warning so
-existing integrations can upgrade independently. For those builds, watch
-cannot detect edits made between the build and startup. An incomplete,
-unreadable, or stale manifest stops startup.
+Without a source manifest, `watch` starts with a warning and takes its
+baseline from the source files at startup. Save changes after `watch` is
+ready so they can be applied to the running app. An incomplete, unreadable,
+or stale manifest stops startup.
 
 For a custom build using `--context`, write `ember-context.json` before
 compiling, then bracket the successful build with these commands:
@@ -374,49 +425,45 @@ Keep both commands in the same build script and serialize builds that share
 an output product. The CounterApp example uses these commands when
 `SWIFT_EMBER_CLI` points to the CLI executable.
 
-When more than one Simulator is booted, terminal commands need the Simulator
-UDID that Xcode Scheme actions obtain automatically:
+To manage a background watcher from a terminal, use:
 
 ```sh
-xcrun simctl list devices booted
-
-swift-ember doctor --project App.xcodeproj --scheme App \
-  --simulator <Simulator-UDID>
-swift-ember watch --project App.xcodeproj --scheme App \
-  --simulator <Simulator-UDID>
-swift-ember stop --project App.xcodeproj --scheme App \
-  --simulator <Simulator-UDID>
+swift-ember start
+swift-ember status
+swift-ember stop
 ```
 
-Pass the same `--simulator` value to `start`, `status`, and `stop` when using
-the background lifecycle from a terminal.
+`start` returns only after the watcher is ready. A second `start` is harmless,
+and `stop` is idempotent. Session records, logs, and isolated patch output live
+under `.ember/sessions`, `.ember/logs`, and `.ember/patches` beside the project
+or context file. `stop` verifies the PID, executable path, and process start
+time before sending SIGTERM, so a stale PID file cannot terminate an unrelated
+process. Startup waits for up to 60 seconds by default. Override it with
+`--startup-timeout <seconds>`. When selecting a Simulator by UDID, pass the
+same `--simulator` value to `start`, `status`, and `stop`.
 
-For a physical device, build and run the Debug app on that device once, then
-select its CoreDevice identifier:
+### Using init and Ember.xcconfig (optional)
 
+To apply the Debug Build Settings together, include
+`integrations/xcode/Ember.xcconfig` from the checked-out release in your Debug
+xcconfig or select it as the Debug Base Configuration. To set up the xcconfig,
+configuration file, and source recording in one step, share your app's scheme
+and copy `Ember.xcconfig` beside the project. Preview the changes with
+`swift-ember init`, then apply them with `--write`.
+
+```sh
+swift-ember init --project App.xcodeproj --scheme App --sources Sources
+swift-ember init --project App.xcodeproj --scheme App --sources Sources --write
 ```
-xcrun devicectl list devices
 
-swift-ember doctor --project App.xcodeproj --scheme App \
-  --device <CoreDevice-ID>
-swift-ember watch --project App.xcodeproj --scheme App \
-  --device <CoreDevice-ID>
-```
-
-The patch is signed with the build's Development identity and its Team ID is
-checked against the app before transfer. If a project does not expose an
-expanded identity through its build settings, pass
-`--signing-identity <certificate-name-or-SHA>`. The phone must be paired,
-unlocked, in Developer Mode, and the app must remain foreground-runnable while
-a patch is applied; iOS may suspend the file client in the background.
-
-`doctor` names each missing setting rather than reporting a general failure,
-and it verifies the claim against the built binary instead of trusting the
-settings. `examples/XcodeApp` (SwiftUI, with a local package) and `examples/UIKitApp`
-(storyboards, a navigation controller, a table view) are projects wired up
-this way.
-
-Before publishing a release, run the [physical iPhone release checklist](docs/release-checklist.md).
+Use `--workspace App.xcworkspace` for a workspace or `--ember-xcconfig <path>`
+to use a template elsewhere. `init` creates `.swift-ember.json`, configures the
+app target's Debug xcconfig, and adds the scheme actions for source recording.
+Pass `--post-action start` to also restart the background watcher after each
+successful Debug build. If Debug already has a Base Configuration, the new
+xcconfig includes it first and then includes Ember. See
+[Xcode integration](integrations/xcode/README.md) for CocoaPods and existing
+project settings.
 
 ### Checking a shipping build
 

@@ -250,10 +250,10 @@ Evaluate in this order:
     compatibility becomes unacceptable.
 4.  Compiler plugin/fork only as a last resort.
 
-Option 1 was enough. `integrations/xcode/Ember.xcconfig` carries the
-four settings; a project bases its Debug configuration on it and changes
-nothing else. `doctor` reads each setting back separately, so a
-half-configured project is told which half.
+Xcode projects can set the flags in the app target's
+[Debug Build Settings](README.md#set-debug-build-settings) or use
+`integrations/xcode/Ember.xcconfig` to apply them together. `doctor` reads
+each setting back separately and reports missing settings.
 
 The runtime arrives as a package product rather than as source to copy,
 and is Debug-only by construction: the target defines `EMBER_ENABLED`
@@ -520,9 +520,9 @@ delivery are included because their declarations still participate in
 cross-file checks. The sidecar is local to the build product and lives outside
 the signed app bundle.
 
-The Xcode Build pre-action (`xcode prepare`) captures source bytes and file
-metadata before compilation and marks the sidecar as in progress, even on a
-clean build where the link target does not yet exist. After a
+With optional source recording, the Xcode Build pre-action (`xcode prepare`)
+captures source bytes and file metadata before compilation and marks the
+sidecar as in progress, even on a clean build without a link target. After a
 successful build, `xcode start` or `xcode record` checks the same tree again
 and atomically publishes the hashes with all UUIDs of the executable or debug
 dylib the daemon will link against. The file identity and change time also
@@ -533,11 +533,11 @@ sharing a product must run serially. Custom builds can use the same actions
 with `--context`.
 
 `watch` validates the entire source snapshot against the sidecar before
-publishing a session. Missing proof warns for older integrations. If proof is
-present but incomplete, unreadable, or mismatched, startup refuses and
-requires a rebuild. A verified baseline stays tied to those UUIDs while
-patching. Automatic rebuild recovery can advance that baseline after proving
-the new build and process.
+publishing a session. Without a manifest, `watch` warns and uses the startup
+source snapshot as its baseline. An incomplete, unreadable, or mismatched
+manifest stops startup and requires a rebuild. A verified baseline stays tied
+to those UUIDs while patching. Automatic rebuild recovery can advance that
+baseline after proving the new build and process.
 
 ## 7. Change detection and classification
 
@@ -737,9 +737,9 @@ dispatch, 20M calls          1,455 -> 1,461 ms        +0.4%
 
 The costs it does carry are not in the numbers. It is a second undocumented
 frontend option to keep behind the adapter in section 4.4, and it changes what
-every integrating project must build with --- one line in the xcconfig, and one
-per local package, since Xcode does not pass `OTHER_SWIFT_FLAGS` into package
-targets. `doctor` asks the compiler per module rather than reading the setting,
+every integrating project must build with --- a flag in the app target's Debug
+settings and in each patchable local package, since Xcode does not pass
+`OTHER_SWIFT_FLAGS` into package targets. `doctor` asks the compiler per module,
 because a setting can be right in a file nobody has rebuilt since; that exact
 mistake is how this was first measured wrong.
 
