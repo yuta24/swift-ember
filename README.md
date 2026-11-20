@@ -81,8 +81,10 @@ the GitHub backend. This pins the version in the project's `mise.toml`:
 mise use github:yuta24/swift-ember@0.5.0
 ```
 
-Use `mise use -g github:yuta24/swift-ember` instead to install it for every
-directory, and `mise upgrade github:yuta24/swift-ember` to update it. Skip
+To update the pinned version, run
+`mise upgrade --bump github:yuta24/swift-ember`. Use
+`mise use -g github:yuta24/swift-ember` instead to install the latest release
+for every directory, and `mise upgrade github:yuta24/swift-ember` to update it. Skip
 `install.sh` in this case. mise unpacks the archive and puts `bin/` on `PATH`
 in shells where it is activated. `swift-ember skill install` finds the skill
 bundled next to `bin/`.
