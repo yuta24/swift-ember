@@ -70,9 +70,9 @@ Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there, then
 check the installation with `swift-ember --help`. To update, repeat these steps
 with the new version.
 
-The binary is ad-hoc signed, not notarized. Download it with `curl` as shown.
-A browser marks the download as quarantined, and macOS then refuses to run
-the binary.
+The release binary is signed with Developer ID and notarized, so you can
+download the ZIP with a browser. The first run after a browser download
+requires a network connection so macOS can check the notarization ticket.
 
 With [mise](https://mise.jdx.dev), install the same `swift-ember.zip` through
 the GitHub backend. This pins the version in the project's `mise.toml`:
@@ -356,6 +356,7 @@ a patch is applied. iOS may suspend the file client in the background.
 
 See [XcodeApp](examples/XcodeApp) for SwiftUI with a local package and
 [UIKitApp](examples/UIKitApp) for storyboards, navigation, and a table view.
+See [Release signing](docs/release-signing.md) for the GitHub Actions setup.
 Before publishing a release, run the [physical iPhone release checklist](docs/release-checklist.md).
 
 ### Scheme actions (optional)

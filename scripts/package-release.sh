@@ -4,20 +4,35 @@
 #
 #   scripts/package-release.sh 0.5.0
 #   scripts/package-release.sh 0.5.0 /path/to/output
+#   scripts/package-release.sh --notarize 0.5.0
 #
 # swift-ember.zip is for direct installation. The artifact bundle contains the
 # same executable in the structured form consumed by SwiftPM binary targets.
+# Set EMBER_CODESIGN_IDENTITY to sign with Developer ID Application and
+# EMBER_CODESIGN_KEYCHAIN to select its keychain. See notarize.sh for API credentials.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TOOL_PACKAGE="$ROOT/Tools/swift-ember"
+NOTARIZE=false
+if [ "${1:-}" = "--notarize" ]; then
+    NOTARIZE=true
+    shift
+fi
 VERSION="${1:-}"
 OUTPUT_DIR="${2:-$ROOT/dist}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "usage: $0 <major.minor.patch> [output-directory]" >&2
+    echo "usage: $0 [--notarize] <major.minor.patch> [output-directory]" >&2
     exit 64
+fi
+
+if "$NOTARIZE"; then
+    : "${EMBER_CODESIGN_IDENTITY:?--notarize requires a Developer ID Application identity}"
+    : "${NOTARY_KEY_PATH:?--notarize requires NOTARY_KEY_PATH}"
+    : "${NOTARY_KEY_ID:?--notarize requires NOTARY_KEY_ID}"
+    : "${NOTARY_ISSUER_ID:?--notarize requires NOTARY_ISSUER_ID}"
 fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/swift-ember-release.XXXXXXXX")"
@@ -40,13 +55,22 @@ if [ "$VERSION" != "0.0.0" ]; then
     }
 fi
 
-# Sign one payload and copy that exact file into both archives. A Developer ID
-# signature can replace this step later; current releases deliberately use
-# ad-hoc signing and therefore need no repository secret.
+# Sign one payload and copy that exact file into both archives.
 PAYLOAD_BINARY="$WORK_DIR/swift-ember"
 cp "$SOURCE_BINARY" "$PAYLOAD_BINARY"
 chmod 755 "$PAYLOAD_BINARY"
-codesign --force --sign - "$PAYLOAD_BINARY"
+if [ -n "${EMBER_CODESIGN_IDENTITY:-}" ]; then
+    signing_args=(--options runtime --timestamp --sign "$EMBER_CODESIGN_IDENTITY")
+    if [ -n "${EMBER_CODESIGN_KEYCHAIN:-}" ]; then
+        signing_args+=(--keychain "$EMBER_CODESIGN_KEYCHAIN")
+    fi
+    if ! codesign --force "${signing_args[@]}" "$PAYLOAD_BINARY" >/dev/null 2>&1; then
+        echo "Developer ID signing failed; check the certificate, keychain access, and timestamp service" >&2
+        exit 1
+    fi
+else
+    codesign --force --sign - "$PAYLOAD_BINARY"
+fi
 
 ARCHITECTURES="$(lipo -archs "$PAYLOAD_BINARY")"
 case "$ARCHITECTURES" in
@@ -65,6 +89,25 @@ case "$ARCHITECTURES" in
         exit 1
         ;;
 esac
+
+if [ -n "${EMBER_CODESIGN_IDENTITY:-}" ]; then
+    codesign --verify --strict "$PAYLOAD_BINARY"
+    for arch in $ARCHITECTURES; do
+        # The full display includes the signing identity and Team ID.
+        if ! signature="$(codesign -dv --verbose=4 --architecture "$arch" "$PAYLOAD_BINARY" 2>&1)" ||
+            ! grep -q '^Authority=Developer ID Application: ' <<< "$signature" ||
+            ! grep -q '^CodeDirectory .*flags=[^ ]*runtime' <<< "$signature" ||
+            ! grep -q '^Timestamp=.' <<< "$signature"; then
+            echo "expected Developer ID Application, hardened runtime, and a secure timestamp for $arch" >&2
+            exit 1
+        fi
+        echo "Verified Developer ID Application, hardened runtime, and secure timestamp for $arch"
+    done
+fi
+
+if "$NOTARIZE"; then
+    "$ROOT/scripts/notarize.sh" "$PAYLOAD_BINARY"
+fi
 
 DIRECT_ROOT="$WORK_DIR/direct/swift-ember"
 mkdir -p "$DIRECT_ROOT/bin"
@@ -116,6 +159,7 @@ DIRECT_BINARY="$WORK_DIR/verify/direct/swift-ember/bin/swift-ember"
 BUNDLE_BINARY="$WORK_DIR/verify/artifact/swift-ember.artifactbundle/$VARIANT/bin/swift-ember"
 test -x "$DIRECT_BINARY"
 test -x "$BUNDLE_BINARY"
+cmp "$PAYLOAD_BINARY" "$DIRECT_BINARY"
 cmp "$DIRECT_BINARY" "$BUNDLE_BINARY"
 codesign --verify --strict "$DIRECT_BINARY"
 codesign --verify --strict "$BUNDLE_BINARY"
