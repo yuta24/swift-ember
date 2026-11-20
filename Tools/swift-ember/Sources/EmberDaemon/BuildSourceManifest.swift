@@ -3,7 +3,7 @@ import EmberCore
 
 /// Source proof for the local link target. The sidecar lives beside the app
 /// bundle so it neither modifies a signed product nor travels to the device.
-public struct BuildSourceManifest {
+public struct BuildSourceManifest: Sendable {
     private struct Recorded: Codable, Equatable {
         let linkTarget: String
         let buildUUIDs: [String]
@@ -36,8 +36,10 @@ public struct BuildSourceManifest {
     private let buildOutputs: SourcePathFilter
     private let proofExclusions: SourcePathFilter
     private let linkTarget: String
+    private let usesXcode: Bool
 
     public init(context: BuildContext) {
+        usesXcode = context.xcodeSourceTargets != nil
         roots = context.sourceRoots.map { URL(fileURLWithPath: $0) }
         safetyExclusions = SourcePathFilter(excluding: context.excludedSourcePaths.map { URL(fileURLWithPath: $0) })
         buildOutputs = SourcePathFilter(excluding: context.buildOutputPaths.map { URL(fileURLWithPath: $0) })
@@ -55,13 +57,13 @@ public struct BuildSourceManifest {
             .appendingPathExtension("swift-ember-sources.json")
     }
 
-    public func snapshot(skippingSource: (URL) -> Bool = { _ in false }) throws -> SourceSnapshot {
-        try SourceSnapshot.captureForStartup(
+    public func snapshot(skippingSource: (URL) -> Bool = { _ in false }) async throws -> SourceSnapshot {
+        try await SourceSnapshot.captureForStartup(
             from: roots, excluding: safetyExclusions, ignoring: buildOutputs, skippingSource: skippingSource)
     }
 
-    private func captureProof() throws -> SourceSnapshot {
-        try SourceSnapshot.captureForStartup(from: roots, ignoring: proofExclusions)
+    private func captureProof() async throws -> SourceSnapshot {
+        try await SourceSnapshot.captureForStartup(from: roots, ignoring: proofExclusions)
     }
 
     private func proofDigests(_ digests: [String: String]) -> [String: String] {
@@ -76,10 +78,10 @@ public struct BuildSourceManifest {
 
     /// Runs before compiling. Publish the in-progress state before reading
     /// sources so a failed prepare cannot be mistaken for a legacy build.
-    public func prepare() throws {
+    public func prepare() async throws {
         let previous = try read(replacingMalformed: true)?.lastBuild
         try write(.building(previous: previous, inputs: nil))
-        let sources = try captureProof()
+        let sources = try await captureProof()
         let previousUUIDs = FileManager.default.fileExists(atPath: linkTarget) ? try readUUIDs() : []
         let inputs = BuildInputs(linkTarget: linkTarget, previousUUIDs: previousUUIDs,
                                  stamps: sources.stamps, sha256: sources.digests)
@@ -89,7 +91,7 @@ public struct BuildSourceManifest {
     /// Runs after a successful build. A no-op build can preserve an existing
     /// proof, but it cannot attest that newly captured inputs were compiled.
     @discardableResult
-    public func record(required: Bool = true) throws -> Bool {
+    public func record(required: Bool = true) async throws -> Bool {
         guard case .building(var previous, let inputs) = try read() else {
             if required { throw failure("run `xcode prepare` before compiling and try again.") }
             return false
@@ -100,7 +102,7 @@ public struct BuildSourceManifest {
         guard let stamps = inputs.stamps else {
             throw failure("build preparation did not record source metadata. Run `xcode prepare` with the current swift-ember and rebuild.")
         }
-        let sources = try captureProof()
+        let sources = try await captureProof()
         var changed = changedKeys(from: proofDigests(inputs.sha256), to: sources.digests)
         // A source can return to its original bytes after the compiler reads it.
         let proofStamps = stamps.filter { !proofExclusions.excludes($0.key) }
@@ -137,7 +139,14 @@ public struct BuildSourceManifest {
         let changed = changedKeys(from: proofDigests(recorded.sha256), to: proofDigests(snapshot.digests))
             .filter { !skippingSource(URL(fileURLWithPath: $0)) }
         guard changed.isEmpty else {
-            throw failure("Swift sources differ from the build:\n\(paths(changed))")
+            let includesXcodeOutputs = usesXcode && changed.contains {
+                $0.contains("/Build/Intermediates.noindex/") || $0.contains("/Build/Products/")
+                    || $0.contains("/SourcePackages/checkouts/")
+            }
+            let hint = includesXcodeOutputs
+                ? "\n\n\(XcodeProject.derivedDataPathHint)"
+                : ""
+            throw failure("Swift sources differ from the build:\n\(paths(changed))\(hint)")
         }
         return uuids
     }

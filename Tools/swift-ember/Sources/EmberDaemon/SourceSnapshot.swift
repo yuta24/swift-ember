@@ -23,6 +23,7 @@ public struct SourceSnapshot: Equatable, Sendable {
         lhs.digests == rhs.digests && lhs.stamps == rhs.stamps && lhs.watched.keys == rhs.watched.keys
     }
 
+    /// Takes a single snapshot. The rebuild flow coordinates its own retries.
     public static func capture(
         from roots: [URL],
         excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
@@ -71,32 +72,37 @@ public struct SourceSnapshot: Equatable, Sendable {
         return SourceSnapshot(watched: watched, excluded: excluded, stamps: stamps, digests: digests)
     }
 
+    private static let startupRetryDelays: [Duration] = [
+        .milliseconds(60), .milliseconds(120), .milliseconds(240), .milliseconds(480),
+    ]
+
     public static func captureForStartup(
         from roots: [URL], excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
         ignoring ignored: SourcePathFilter = SourcePathFilter(),
         skippingSource: (URL) -> Bool = { _ in false }
-    ) throws -> SourceSnapshot {
-        try captureForStartup(excluding: sourceFilter) {
+    ) async throws -> SourceSnapshot {
+        try await captureForStartup(excluding: sourceFilter) {
             try FileWatcher.scan(roots: roots, excluding: ignored, skippingSource: skippingSource)
         }
     }
 
     static func captureForStartup(
         excluding sourceFilter: SourcePathFilter = SourcePathFilter(),
+        sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         scan: () throws -> [URL: SourceFileStamp]
-    ) throws -> SourceSnapshot {
-        var retries = 2
+    ) async throws -> SourceSnapshot {
+        var delays = startupRetryDelays.makeIterator()
         while true {
+            try Task.checkCancellation()
             do {
                 return try capture(excluding: sourceFilter, scan: scan)
             } catch let unstable as UnstableSources {
-                guard retries > 0 else {
+                guard let delay = delays.next() else {
                     throw EmberError(stage: .watch, subject: "source roots",
-                                     reason: "sources did not settle after three snapshot attempts.\n\n\(unstable)",
+                                     reason: "sources did not settle after \(startupRetryDelays.count + 1) snapshot attempts.\n\n\(unstable)",
                                      recovery: .retry)
                 }
-                retries -= 1
-                Thread.sleep(forTimeInterval: 0.05)
+                try await sleep(delay)
             } catch {
                 throw EmberError(stage: .watch, subject: "source roots",
                                  reason: "cannot take the initial source snapshot.\n\n\(error)",

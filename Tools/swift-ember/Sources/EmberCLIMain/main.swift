@@ -112,14 +112,14 @@ case .xcode:
     do {
         let manifest = BuildSourceManifest(context: context)
         if options.xcodeAction == .prepare {
-            try manifest.prepare()
+            try await manifest.prepare()
             exit(0)
         }
         if options.xcodeAction == .record {
-            try manifest.record()
+            try await manifest.record()
             exit(0)
         }
-        try manifest.record(required: false)
+        try await manifest.record(required: false)
         // The automatic rebuild owns the existing watcher, but the Scheme
         // still records the build for future watcher startups.
         if ProcessInfo.processInfo.environment["SWIFT_EMBER_REBUILD"] == "1" {

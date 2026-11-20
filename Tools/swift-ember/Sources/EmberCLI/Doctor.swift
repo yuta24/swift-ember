@@ -44,7 +44,7 @@ public enum Doctor {
         let binary = context.linkTarget
         let built = FileManager.default.fileExists(atPath: binary)
         let buildHint = project == nil ? "build the app first"
-            : "build the selected app first and pass --derived-data-path if the build used -derivedDataPath"
+            : "build the selected app first. \(XcodeProject.derivedDataPathHint)"
         check("App binary", built ? binary : "missing at \(binary). \(buildHint)", passed: built)
 
         let ownership = watchedModules(context: context, cacheDirectory: manifestCacheDirectory)
