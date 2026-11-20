@@ -383,6 +383,8 @@ settings. `examples/XcodeApp` (SwiftUI, with a local package) and `examples/UIKi
 (storyboards, a navigation controller, a table view) are projects wired up
 this way.
 
+Before publishing a release, run the [physical iPhone release checklist](docs/release-checklist.md).
+
 ## How it works
 
 ```

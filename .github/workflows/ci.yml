@@ -81,6 +81,34 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  simulator-smoke:
+    name: XcodeApp Simulator smoke test
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # Probing every Xcode on a fresh image is slow; choose once, as a step of
+      # its own, so a failure here reads as a toolchain problem.
+      - name: Select Xcode
+        run: |
+          developer_dir="$(scripts/select-xcode.sh)"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+
+      - name: Verify save-to-screen hot reload
+        run: python3 scripts/simulator-smoke.py
+
+      - name: Upload Simulator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodeapp-simulator-smoke
+          path: .ci-results/simulator-smoke/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
   # Separate because the matrix jobs always take the newest toolchain on their
   # image, and some things only break on older ones -- a type-checker crash in
   # this project's own runtime did, on every shipping Xcode at the time. This
