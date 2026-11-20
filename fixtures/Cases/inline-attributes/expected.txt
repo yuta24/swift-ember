@@ -1,0 +1,4 @@
+g0: always: old(7)
+g0: never: old(7)
+g1: always: new(7)
+g1: never: new(7)

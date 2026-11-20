@@ -133,6 +133,24 @@ private func bodyEdit(_ source: String, _ from: String, _ to: String) -> String 
     #expect(reason.contains("@inlinable"))
 }
 
+@Test func genericInitializerAndSignatureChangesRequireRebuild() {
+    let source = """
+        struct Box<T> {
+            init(_ value: T) { _ = value }
+            func equal<U: Equatable>(_ first: U, _ second: U) -> Bool { first == second }
+        }
+        """
+    for current in [
+        bodyEdit(source, "_ = value", "_ = String(describing: value)"),
+        bodyEdit(source, "U: Equatable", "U: Hashable"),
+    ] {
+        guard case .rebuildRequired = ChangeClassifier.classify(baseline: source, current: current) else {
+            Issue.record("expected a rebuild for \(current)")
+            continue
+        }
+    }
+}
+
 /// A `private` declaration is replaced like any other under
 /// `-enable-private-imports`, whether or not anything in the file calls it: it
 /// has a replacement key of its own, so there is no caller analysis to do.

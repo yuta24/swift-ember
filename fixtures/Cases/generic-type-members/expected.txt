@@ -1,0 +1,18 @@
+g0: struct method: old(7)
+g0: struct getter: old(7)
+g0: struct static: old(Int)
+g0: struct init: old / old
+g0: class method: old(8)
+g0: class getter: old(8)
+g0: class static: old(Int)
+g0: class designated init: old / old
+g0: class convenience init: old / old
+g1: struct method: new(7)
+g1: struct getter: new(7)
+g1: struct static: new(Int)
+g1: struct init: old / new
+g1: class method: new(8)
+g1: class getter: new(8)
+g1: class static: new(Int)
+g1: class designated init: old / new
+g1: class convenience init: old / new

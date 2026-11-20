@@ -848,6 +848,57 @@ private final class DeliveryProbe: @unchecked Sendable {
     var count: Int { lock.withLock { deliveries } }
 }
 
+@Test(arguments: ["@inlinable", "@_alwaysEmitIntoClient"])
+func aLocalPackageClientBodyEditIsRefusedBeforePatchBuild(attribute: String) async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ember-client-body-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sources = root.appendingPathComponent("Sources/FixtureDependency")
+    try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+    try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "FixturePackage", targets: [.target(name: "FixtureDependency")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    let source = sources.appendingPathComponent("Dependency.swift")
+    try "\(attribute) public func clientValue() -> Int { 1 }"
+        .write(to: source, atomically: true, encoding: .utf8)
+
+    let server = try IPCServer()
+    defer { server.stop() }
+    let patches = root.appendingPathComponent("patches")
+    let context = BuildContext(
+        moduleName: "App", swiftCompilerPath: "/usr/bin/true",
+        swiftCompilerVersion: "test", targetTriple: "arm64-apple-macosx26.0",
+        sdkPath: "/", sdkName: "macosx",
+        appBinaryPath: root.appendingPathComponent("app").path,
+        moduleSearchPaths: [root.path], extraCompilerFlags: [],
+        sourceRoots: [sources.path], bundleIdentifier: "dev.swift-ember.client-body-test")
+    let coordinator = PatchCoordinator(
+        context: context, server: server, workDirectory: patches,
+        deliver: { image in image }, inventory: ModuleInventory(keys: ["FixtureDependency": 1]))
+    try await coordinator.primeBaselines(from: [sources])
+
+    try "\(attribute) public func clientValue() -> Int { 2 }"
+        .write(to: source, atomically: true, encoding: .utf8)
+    guard case .rejected(let error) = await coordinator.handle(change: source) else {
+        Issue.record("expected the local package body edit to require a rebuild")
+        return
+    }
+    #expect(error.stage == .classify)
+    #expect(error.recovery == .rebuild)
+    let reason = attribute == "@inlinable"
+        ? "@inlinable declarations are not made dynamic by -enable-implicit-dynamic"
+        : "@_alwaysEmitIntoClient declarations are emitted into callers"
+    #expect(error.description == """
+        [CLASSIFY] Dependency.swift
+        clientValue()[]: \(reason)
+
+        Action: full rebuild required.
+        """)
+    #expect(!FileManager.default.fileExists(atPath: patches.appendingPathComponent("Patch_001.swift").path))
+}
+
 @Test func aCrossContextRefusalRefreshesEachPendingTransaction() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("ember-atomic-pending-contexts-\(UUID().uuidString)")

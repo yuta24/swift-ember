@@ -622,9 +622,12 @@ so it displaces nothing and changes no layout.
 -   operator declarations, which are replaceable but whose
     `@_dynamicReplacement(for:)` spelling this generator does not know,
 -   protocol requirements, whose shape is the witness table's,
--   body of an `@inlinable` or `@_transparent` declaration changed ---
-    implicit dynamic does not cover these, so the patch cannot be built;
-    see section 12.8,
+-   body of an `@inlinable`, `@_transparent`, or `@_alwaysEmitIntoClient`
+    declaration changed. These can put a copy of the body in callers
+    and are refused at CLASSIFY. See section 12.8,
+-   initializer body changed. The current generator emits functions and
+    computed properties only. Handwritten initializer replacements
+    were measured in section 12.4,
 -   body of a `private` or `fileprivate` declaration changed, where any
     caller cannot itself be replaced: an initialiser, a stored property's
     initial value, a top-level statement, or an `@inlinable` body. The copy
@@ -1144,20 +1147,35 @@ Do not support optimized Release behavior in v0.x.
 
 ### 12.4 Generics
 
-`-enable-implicit-dynamic` does emit a replacement key for generic
-declarations, and a generic function body replacement has been observed
-to work under `-Onone` (Appendix A).
+The macOS matrix on Xcode 27.2 measures replacement under `-Onone`
+for generic functions and for instance methods, computed getters, and
+static methods on generic structs and classes. Handwritten replacements
+for a struct initializer and for class designated and convenience
+initializers affect newly constructed instances. Existing instances keep
+their stored values. Ember currently classifies initializer body edits
+as rebuild-required.
 
-Remaining risks concern optimized or already-specialized call paths:
+`generic-dispatch` covers a method on an extension constrained by
+`T: Equatable` and a witness from a conditional conformance. The witness
+reaches the replacement when called on the concrete type, through
+`any Scoring` or `some Scoring`, and from a generic context. Function and
+bound method references captured and invoked before loading the patch
+also reach the replacement on subsequent calls. The opaque value in this
+case is an unchanged caller of the edited witness.
 
--   specialization,
--   metadata accessors,
--   witness tables,
--   pre-existing specialized call paths.
+The `-O` client in `generic-dispatch-optimized` has a
+`throughGeneric(Box<Int>)` specialization in emitted SIL. It retains
+`dynamic_function_ref` to the patched witness, and all seven probes
+switch to the new bodies. `cross-module-generics` measures an unchanged
+app importing a separately compiled module. Its generic call and its
+call to an `@usableFromInline` helper via an `@inlinable` wrapper see the
+replacement. Section 12.8 describes the client copies of the wrapper
+itself.
 
-Because the supported configuration is `-Onone`, a generic *body* change
-may be treated as a hot patch candidate. A generic *signature* change
-remains rebuild-required.
+A generic body change with stable ABI can be a hot patch candidate in
+Debug. Generic signature and conformance changes still require a rebuild.
+Other specialization paths, metadata changes, and Release builds are
+outside this measurement.
 
 ### 12.5 Protocol witnesses
 
@@ -1284,11 +1302,13 @@ covered      internal, public, @usableFromInline
              init, subscript, operator functions
              computed properties, lazy properties
              nested type methods, extensions on imported types
-             generic functions
+             generic functions and generic type members
+             @inline(__always), @inline(never)
 
-not covered  @inlinable
+excluded     @inlinable
              @_transparent
-             private, fileprivate
+             @_alwaysEmitIntoClient (local key in the measured case)
+             private, fileprivate without -enable-private-imports
              deinit
 ```
 
@@ -1299,32 +1319,51 @@ of its own, so an extension accepts it, and the original is then reached
 through the base class, through `objc_msgSend`, and from a body calling
 `super`. Pinned by `fixtures/Cases/override-*`.
 
-Every uncovered case fails at the COMPILE stage with an actionable
-diagnostic, so the fail-closed principle in section 2.4 holds:
+Ember refuses body edits to `@inlinable`, `@_transparent`, and
+`@_alwaysEmitIntoClient` before patch generation. For a local package
+`@inlinable` body edit, the watcher names the source file and declaration
+at CLASSIFY, explains that implicit dynamic omits it, and reports
+`Action: full rebuild required.` Handwritten replacements expose the
+compiler and linker diagnostics:
 
 ``` text
 @inlinable / @_transparent
   error: replaced function 'f()' is not marked dynamic
 
+@_alwaysEmitIntoClient
+  ld: ... dynamically replaceable key ... does not have address
+
 private / fileprivate
   error: replaced function 'f()' could not be found
 ```
 
-The `private` row holds only without `-enable-private-imports`. With it,
-private and fileprivate declarations get keys like anything else and are
-replaced normally; section 7.3c has the measurements and what adopting it
-removed.
+With `-enable-private-imports`, private and fileprivate declarations get
+keys and can be replaced. Section 7.3c has the measurements.
 
-Two cautions apply to reading this table.
+In `cross-module-generics-optimized`, the `-O` app embeds the
+`@inlinable` wrapper's original body. In the first process, both the app
+and the library see a loaded replacement for the `@usableFromInline`
+helper called by that body. In a second process, the **same app binary**
+starts with a rebuilt dylib whose wrapper returns `new-body`. The app
+still returns `old-body/old-helper` at the inlined call site, while the
+out-of-line library entry point returns `new-body/old-helper`. The
+`-Onone` app returns `new-body/old-helper` on both routes in the same dylib
+swap experiment. `cross-module-inlinable-rejected` tests the separate
+attempt to patch the wrapper itself and gets the compiler error above.
+The stale optimized output is from rerunning a previously built client
+with a new dylib. Ember's classification prevents a successful reload
+for this body edit.
 
-First, an absent replacement key does not prove a declaration is
-unpatchable. An `@objc` member of an `NSObject` subclass gets no native
-`Tx` key because it dispatches through the Objective-C runtime, yet
-dynamic replacement still applies to it.
+`inline-attributes` shows that plain `@inline(__always)` and
+`@inline(never)` functions retain effective replacement dispatch under
+`-Onone`. None of these accepted fixtures showed a successful load
+with a stale edited body. The measurements support keeping the current
+attribute policy.
 
-Second, the covered set is undocumented and version-sensitive. Treat the
-table as a per-toolchain measurement, not a language rule, and re-run
-the fixtures when the toolchain changes.
+An `@objc` member of an `NSObject` subclass can still be replaced via
+Objective-C dispatch without a native `Tx` key. Implicit dynamic
+coverage is toolchain-specific. Re-run the fixtures when the toolchain
+changes.
 
 ## 13. SwiftUI design
 
@@ -2429,9 +2468,8 @@ toolchains:
       swiftui: experimental
 ```
 
-Six local Xcode versions measured, four of them shipping releases. Every entry
-below is `fixtures/run.sh` and `swift test --package-path Tools/swift-ember`
-actually run, not inferred:
+Seven local Xcode versions measured, five of them shipping releases. The table
+records runs of `fixtures/run.sh` and `swift test --package-path Tools/swift-ember`:
 
 ``` text
                      swift   host target   host   simulator          tests
@@ -2441,21 +2479,19 @@ local, Xcode 26.5    6.3.2   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 local, Xcode 26.6    6.3.3   macosx26.0    41/44  44/44 (iOS 26.5)   226/226
 local, Xcode 27.0b4  6.4     macosx26.0    40/43  43/43 (iOS 27.0)   203/203
 local, Xcode 27.0b6  6.4     macosx26.0    41/44  44/44 (iOS 27.0)   203/203
+local, Xcode 27.2    6.4.2   macosx27.0    49/52  not run            385/385
 CI, macos-15         6.2.4   macosx15.0    26/26  26/26 (iOS 26.2)   109/109
 CI, macos-26         6.3.3   macosx26.0    26/26  26/26 (iOS 26.5)   109/109
 ```
 
-The counts differ by row because the matrix grew, from 26 cases to 44, and
-the test suite with it. A current host result reads 41 of 44 rather than a
-failure: the three UIKit cases are Simulator-only and are skipped by name,
-which `fixtures/run.sh` counts separately. Xcode 26.6 and 27.0 Beta 6 have
-both been run against the current 44-case matrix. The Xcode 26.6 row is the
-newest full run and includes the current 226-test suite; the other rows report
-the matrix and suite exactly as they stood when each was measured.
+The counts reflect the matrix and test suite at the time of each run.
+The current host run passed 49 of 52 cases, with the three Simulator-only
+UIKit cases skipped by name. The Xcode 26.6 and 27.0 Beta 6 rows cover the
+44-case matrix on both targets.
 
 The M6 host-only verification on 2026-09-11 passes 330/330 tests under local
 Swift 6.3.3 and Xcode 27.0 Beta 6's Swift 6.4. The latter also passes the
-current host fixture matrix at 41/44, with only the three named Simulator-only
+44-case host fixture matrix at 41/44, with only the three named Simulator-only
 UIKit cases skipped. It does not replace a full Simulator row above.
 
 Of the cases added after the 26-case rows, thirteen were also run separately
@@ -2484,10 +2520,9 @@ The unsafe cases are the exception. `opaque-inside-a-type` produces SIGSEGV
 everywhere. `opaque-result-type-changed` produced
 `exit 0; g0: old g1: 42` on the Xcode 27.0 Beta 4 host, but SIGSEGV on that
 Simulator and on both targets under Beta 6. Under Xcode 26.6 it again returned
-the new value on the host and produced SIGSEGV on the Simulator. The checked-in
-result files record the Beta 6 observation; the Xcode 26.6 aggregate is
-summarized in the matrix above. Undefined is undefined, across targets and
-toolchain revisions, which is the conclusion those cases exist to support.
+the new value on the host and produced SIGSEGV on the Simulator. The
+checked-in macOS result records SIGSEGV under Xcode 27.2. The Simulator
+result records SIGSEGV under Beta 6.
 
 Reproduce a row with:
 
@@ -2909,19 +2944,18 @@ baseline. Do not generalize these results across Xcode versions.
 ### A.1 Environment
 
 ``` text
-Xcode       27.0 Beta 6
-swiftc      Apple Swift version 6.4 (swiftlang-6.4.0.33.1 clang-2100.3.33.1)
-host        arm64-apple-macosx26.0
-simulator   arm64-apple-ios27.0-simulator (iPhone 17 Pro, iOS 27.0)
+macOS       Xcode 27.2 (27B52), Apple Swift 6.4.2, arm64-apple-macosx27.0
+Simulator   Xcode 27.0 Beta 6, Apple Swift 6.4, arm64-apple-ios27.0-simulator
+            iPhone 17 Pro, iOS 27.0
 ```
 
-The matrix was run on both targets. All 44 cases pass on the Simulator;
-41 pass on the host, the other three being UIKit cases that are skipped
-there by name. Every result below holds for both except where noted.
+The macOS run passed 49 cases and skipped three Simulator-only UIKit
+cases. The recorded Simulator run passed the 44 cases then in the matrix.
+The eight new generic and inlining cases were measured on macOS.
 
-Reproduce with `fixtures/run.sh` and `fixtures/run.sh --platform
-simulator`, which regenerate `fixtures/results-macos.yaml` and
-`fixtures/results-simulator.yaml`.
+Use `fixtures/run.sh --results fixtures/results-macos.yaml` to reproduce the
+host run. On a booted Simulator, use
+`fixtures/run.sh --platform simulator --results fixtures/results-simulator.yaml`.
 
 ### A.2 Method
 
@@ -2958,6 +2992,18 @@ mutating struct method                        replaced, value mutated
 computed property                             replaced
 final class method                            replaced
 generic function                              replaced
+generic struct / class instance method       replaced
+generic struct / class computed getter       replaced
+generic struct / class static method         replaced
+generic struct and class initializers        handwritten replacement reaches new instances;
+                                             ember requires rebuild
+constrained extension method                 replaced
+conditional conformance witness              replaced through concrete, any, some and generic callers
+pre-load generic function / method reference replaced on later calls
+specialized caller under -O                  replaced witness reached through dynamic_function_ref
+cross-module generic function                replaced
+cross-module @usableFromInline helper        replaced through @inlinable caller
+@inline(__always) / @inline(never)            replaced under -Onone
 protocol witness, direct call                 replaced
 protocol witness, existential call            replaced
 protocol extension default                    replaced
@@ -2987,6 +3033,9 @@ opaque result type, same underlying type      replaced
 two generations loaded in sequence            newest wins
 
 @inlinable function                           rejected at COMPILE
+cross-module @inlinable body edit              rejected at CLASSIFY; forced patch rejected at COMPILE
+inlined @inlinable call in -O app             retains old body after dylib-only rebuild
+@_alwaysEmitIntoClient function              rejected at CLASSIFY; forced patch fails to link
 @_transparent function                        rejected at COMPILE
 private function                              rejected at COMPILE
 patch against a non-testable module           rejected at COMPILE
@@ -2998,14 +3047,16 @@ Diagnostics for the rejected cases:
 ``` text
 @inlinable / @_transparent
   error: replaced function 'f()' is not marked dynamic
+@_alwaysEmitIntoClient
+  ld: ... dynamically replaceable key ... does not have address
 private
   error: replaced function 'f()' could not be found
 non-testable module
   error: module 'Fixture' was not compiled for testing
 ```
 
-The opaque result type case is the only one that reaches a running
-process, and its outcome varies:
+The unsafe opaque result type change reaches a running process, and its
+outcome varies:
 
 ``` text
 read only after the patch loads     new value returned
@@ -3031,17 +3082,20 @@ key emitted      internal, public, @usableFromInline
                  init, subscript, operator functions
                  computed properties, lazy properties
                  nested type methods, extensions on imported types
-                 generic functions
+                 generic functions and generic type members
+                 @inline(__always), @inline(never)
 
 no key emitted   @inlinable, @_transparent
-                 private, fileprivate
+                 private, fileprivate without -enable-private-imports
                  deinit
                  @objc members of NSObject subclasses
+
+local key only   @_alwaysEmitIntoClient in always-emit-into-client-rejected
 ```
 
-The last line is the trap: `@objc` members get no native key because
-they dispatch through the Objective-C runtime, but they are replaceable
-anyway. Key presence is evidence, not proof.
+`@objc` members can be replaced through the Objective-C runtime. A
+local-only key does not give a separately linked patch an address it can
+use.
 
 ### A.5 Symbol visibility
 

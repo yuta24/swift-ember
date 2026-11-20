@@ -1,0 +1,1 @@
+../cross-module-generics/App.swift

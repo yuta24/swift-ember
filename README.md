@@ -484,6 +484,10 @@ if runtime loading fails, no later module remains to apply as a partial prefix.
 
 - methods on `class`, `struct`, `enum`, and `actor`, including `mutating`,
   `static`, `async`, `throws`, and `@MainActor` ones;
+- bodies of generic functions, methods, and computed properties in Debug.
+  This includes methods on constrained extensions and witnesses of
+  conditional conformances. Plain `@inline(__always)` and `@inline(never)`
+  functions also reload in the measured Debug configuration;
 - **overrides**, including a body that opens with `super.viewDidLoad()`, and
   including one UIKit reaches through `objc_msgSend` rather than through
   Swift's vtable;
@@ -599,6 +603,12 @@ nothing.
 Release builds, App Store/runtime code delivery, and anything that changes a
 type's layout. Physical devices are a Debug-development workflow and require
 same-Team Development signing; they are not a production patch mechanism.
+
+Initializer body edits, generic signature changes, and edits to the bodies of
+`@inlinable`, `@_transparent`, and `@_alwaysEmitIntoClient` declarations require
+a rebuild. Rebuild callers of an `@inlinable` function along with its library.
+An optimized caller can keep executing a copy of the old body after a
+library-only rebuild. See `DESIGN.md` sections 12.4 and 12.8.
 
 An unannotated SwiftUI `body` is a rebuild, and the reason took three attempts
 to get right. `View` carries a type eraser, so the patch is safe to load, and a
