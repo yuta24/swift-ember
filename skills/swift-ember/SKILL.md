@@ -90,6 +90,7 @@ swift-ember start --project App.xcodeproj --scheme App --configuration Debug \
   `.emberable()`. If missing, use the normal build workflow.
 - When done, check the watcher PID against the one you started, run
   `swift-ember stop` with the same target arguments, and confirm
-  `daemon             not running` with `status`. Uninstall any app you
-  installed. Do not shut down a Simulator you did not boot.
+  `daemon             not running` with `status`. Uninstall an app only if
+  it was absent before you installed it, since that deletes its data. Do not
+  shut down a Simulator you did not boot.
 - Keep `.ember/` and generated captures out of commits.

@@ -106,8 +106,16 @@ other running.
 - Stop only the watcher you started. Run `stop` from the same worktree and
   check that it prints the watcher PID that your `start` printed.
 - Do not shut down a Simulator that you did not boot.
-- Uninstall the app you installed when you finish. A previous run's app can
-  remain on the Simulator.
+- Before installing, check whether the app is already on the Simulator.
+  `simctl uninstall` deletes the app's data container, so uninstall at the
+  end only if the app was absent before you installed it. If it was already
+  there, leave it installed, or ask the user before removing it and its data.
+  A previous run's app can remain on the Simulator.
+
+```sh
+xcrun simctl get_app_container 'SIMULATOR_UDID' 'com.example.App' data
+# Exit status 0 means it was already installed. Record that before installing.
+```
 
 ```sh
 xcrun simctl uninstall 'SIMULATOR_UDID' 'com.example.App'
