@@ -52,8 +52,9 @@ compiles it into the app module.
 
 There is no Xcode project. The bundle is assembled by `build.sh` so that every
 flag the design documents argue about is visible in one place rather than
-buried in a `.pbxproj`. Real projects will get these through xcconfig, which is
-`DESIGN.md` section 5.2's problem, not this example's.
+buried in a `.pbxproj`. Xcode projects use the
+[Debug Build Settings](../../README.md#set-debug-build-settings) described in
+`DESIGN.md` section 5.2.
 
 ### The build settings that matter
 

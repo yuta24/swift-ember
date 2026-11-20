@@ -1,7 +1,15 @@
 # Xcode integration
 
-Share a scheme that builds one application target. Copy `Ember.xcconfig`
-beside the project or pass the path to the template in a swift-ember checkout.
+Follow the [Debug Build Settings](../../README.md#set-debug-build-settings)
+in the main README to configure your app target in Xcode, then build, run,
+and start `swift-ember watch` in a terminal.
+
+## Optional setup with init and Ember.xcconfig
+
+To set up the Debug settings, configuration file, and source recording
+together, share a scheme that builds one application target. Copy
+`Ember.xcconfig` beside the project or pass the path to the template in a
+swift-ember checkout.
 
 ```sh
 swift-ember init --workspace App.xcworkspace --scheme App --sources Sources,Feature/Sources
@@ -29,10 +37,8 @@ disable testability or change optimisation from `-Onone` in Debug. If your
 project uses a generator or a Base Configuration path init cannot resolve,
 make the same setup in the generator or in Xcode. Include `Ember.xcconfig`
 from the app target's Debug xcconfig, or select it as the Debug Base
-Configuration if you have none. In **Edit Scheme > Build**, add
-`swift-ember xcode prepare` before the build and `swift-ember xcode record`
-after it. For both actions, set **Provide build settings from** to the app
-target.
+Configuration if you have none. You can add [optional scheme actions](../../README.md#scheme-actions-optional)
+to record a build source manifest or start the watcher from Xcode.
 
 The generated scripts run for the selected development configuration. Make
 `swift-ember` available to Xcode via `PATH` or `$HOME/.local/bin`, or set
@@ -43,7 +49,7 @@ for the flags needed by local Swift packages.
 
 ## Release isolation
 
-Keep `Ember.xcconfig` scoped to Debug and guard the local package flags with
+Keep the Ember Build Settings scoped to Debug and guard the local package flags with
 `.when(configuration: .debug)`. You can include `Ember.release.xcconfig`
 from the Release configuration as an explicit guard. It disables testability
 and clears the Ember-specific flag and condition variables while retaining

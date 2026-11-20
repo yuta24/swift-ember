@@ -56,7 +56,8 @@ public enum Watch {
         let verifiedUUIDs = try manifest.validate(snapshot) { resolver.isTestSource($0) }
         if verifiedUUIDs == nil {
             print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
-            print("  Pre-watch source edits cannot be verified. Enable build source recording and rebuild.")
+            print("  Edits between the build and watcher startup cannot be verified.")
+            print("  For optional source recording, see \"Scheme actions (optional)\" in README.md.")
         }
 
         startupProgress?.report("preparing IPC listener and source baselines")

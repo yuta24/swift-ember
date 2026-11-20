@@ -7,26 +7,30 @@ to work for anyone else to use this.
 
 ## Running it
 
-Boot a simulator, then from the repository root:
+Boot a Simulator and build from the repository root:
 
 ```
 xcodebuild -project examples/XcodeApp/XcodeApp.xcodeproj -scheme XcodeApp \
            -configuration Debug \
            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+```
 
+Install and launch the built app, or build and run from Xcode. Then start the
+watcher in a terminal:
+
+```sh
 swift-ember doctor --project examples/XcodeApp/XcodeApp.xcodeproj \
                     --scheme XcodeApp --sources examples/XcodeApp/Sources
 swift-ember watch  --project examples/XcodeApp/XcodeApp.xcodeproj \
                     --scheme XcodeApp --sources examples/XcodeApp/Sources
 ```
 
-Install and launch the built app, then edit a method body in
+Once the watcher connects, edit a method body in
 `Sources/Cart.swift`, or `ReceiptController.total()` in
 `Sources/Receipt.swift` --- the UIKit half, which reloads on the controller
 already on screen because the runtime tells it to lay out again. Editing
 `ReceiptController.viewDidLoad()` shows the other half of that story: the
-reload stands and `watch` says the method has already run. Running from Xcode itself works the same way; the daemon
-only needs the project, the scheme, and a running process.
+reload stands and `watch` says the method has already run.
 
 `ContentView.body` is opted into SwiftUI replacement too. Its source imports
 `EmberSwiftUI`, declares `@ObserveEmber`, and applies `.emberable()` to
@@ -57,10 +61,10 @@ test app, and shuts down the Simulator if it booted it.
 
 Two steps.
 
-**Base the Debug configuration on `integrations/xcode/Ember.xcconfig`.** It
-sets the four things that make a binary patchable, and `doctor` names each one
-separately when it is missing, so a half-configured project gets told which
-half.
+**Set the app target's [Debug Build Settings](../../README.md#set-debug-build-settings).**
+This example gets those settings from `integrations/xcode/Ember.xcconfig`.
+`doctor` reports missing settings and verifies that the built app exports
+replacement keys.
 
 **Add the package and link `EmberSwiftUI`.** It re-exports `EmberRuntime`, so
 one product supplies both the loader and the SwiftUI opt-in API. A UIKit-only
@@ -109,7 +113,7 @@ is met a different way: nothing derived is trusted on its own, and `doctor`
 reads the built binary back to check it really does export keys.
 
 For a build with `-derivedDataPath`, pass the same directory to terminal
-commands with `--derived-data-path`. To record the built sources, configure
+commands with `--derived-data-path`. For optional source recording, configure
 `swift-ember xcode prepare` as the Scheme's Build pre-action and
 `swift-ember xcode record` as its Build post-action. Use `xcode start` for
 the post-action to also restart the background watcher. Select the same app

@@ -152,8 +152,8 @@ public enum Doctor {
             if watchesAppModule && !project.declaredConfigured {
                 print("""
 
-                None of the above is set by this tool. The usual way to get all
-                of it at once is to base the Debug configuration on
+                For manual Debug setup, see "Set Debug Build Settings" in README.md.
+                To apply the settings together, use swift-ember init or
                 integrations/xcode/Ember.xcconfig.
                 """)
             }

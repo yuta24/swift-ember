@@ -402,13 +402,13 @@ runtime looks for among its own loaded images. The daemon MUST re-read
 them whenever the binary changes rather than once per session: a rebuild
 with the app still running is the case this exists to catch.
 
-An integrated build MUST record the watched Swift source hashes with the
-link target's UUID set beside the built product. In Xcode, the Build
-pre-action runs `xcode prepare` and the Build post-action runs `xcode record`
-or `xcode start`. Both actions select the same app target under
-**Provide build settings from**. At startup, the daemon MUST reject an incomplete
-source scan or a mismatch with the recorded build. A legacy build without
-source proof MAY start with a visible warning. Changes after the validated
+With optional source recording enabled, the build MUST record the watched
+Swift source hashes with the link target's UUID set beside the built product.
+In Xcode, the Build pre-action runs `xcode prepare` and the Build post-action
+runs `xcode record` or `xcode start`. Both actions select the same app target
+under **Provide build settings from**. At startup, the daemon MUST reject an
+incomplete source scan or a mismatch with the recorded build. A build without
+source proof MAY start with a visible warning. Changes after the startup
 snapshot MUST be eligible for delivery from the first watcher poll.
 
 ### FR-4 Compatibility analysis
