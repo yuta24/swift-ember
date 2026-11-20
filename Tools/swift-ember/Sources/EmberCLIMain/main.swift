@@ -67,9 +67,12 @@ do {
     startupProgress?.report("loading build context")
     resolvedProject = try options.resolveProject()
     context = try options.buildContext(project: resolvedProject)
-} catch let error as EmberError {
-    abort(error.description)
 } catch {
+    // A background `start` reads these lines back into its own error.
+    if let startupProgress {
+        startupProgress.reportFailure(String(describing: error))
+        exit(1)
+    }
     abort("\(error)")
 }
 
@@ -86,10 +89,18 @@ case .status:
     print("sdk                \(context.sdkName)")
     print("compiler           \(context.swiftCompilerVersion)")
     print("bundle id          \(context.bundleIdentifier)")
-    let transport = running?.simulatorIdentifier.map { "simulator \($0)" }
-        ?? context.deviceIdentifier.map { "physical device \($0)" }
-        ?? context.simulatorIdentifier.map { "simulator \($0)" }
-        ?? "simulator"
+    // Split up: one `??` chain of optional maps took too long to type-check
+    // on Xcode 16 and 26.2.
+    let transport: String
+    if let identifier = running?.simulatorIdentifier {
+        transport = "simulator \(identifier)"
+    } else if let identifier = context.deviceIdentifier {
+        transport = "physical device \(identifier)"
+    } else if let identifier = context.simulatorIdentifier {
+        transport = "simulator \(identifier)"
+    } else {
+        transport = "simulator"
+    }
     print("transport          \(transport)")
     if let warning = running?.simulatorWarning { print(warning) }
     if let identity = context.codeSigningIdentity {
