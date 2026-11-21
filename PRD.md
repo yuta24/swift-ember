@@ -561,13 +561,13 @@ devices supported by the selected Xcode. Physical delivery uses CoreDevice
 container transfer and requires a Development-signed patch with the same Team
 ID as the application.
 
-Core function replacement carries no special deployment-target floor beyond
-the package minimum. Neither does `EmberSwiftUI`: it places its own `AnyView`
-boundary outside the changing tree rather than depending on
-`DebugReplaceableView`. The original failure still differs by target --- the
-unannotated `List` case aborts where `DebugReplaceableView` is selected and
-survives where SwiftUI falls back to `AnyView` --- so both remain in the
-compatibility fixtures.
+The package minimum is the deployment-target floor for core function
+replacement and `EmberSwiftUI`. `EmberSwiftUI` places its own `AnyView`
+boundary outside the changing tree. When the deployment target selects
+`DebugReplaceableView`, the unannotated `List` case aborts on iOS 26.2 and
+26.5 and renders the new row on iOS 27.2. The compatibility fixtures cover
+both runtime outcomes. They also exercise the opt-in at the package's iOS
+16.0 deployment floor, where SwiftUI selects `AnyView`.
 
 Physical-device support MUST fail closed when the device is unavailable, the
 app is suspended, or the patch signature does not match the app's Team ID.

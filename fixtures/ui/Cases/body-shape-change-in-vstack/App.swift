@@ -1,10 +1,8 @@
 // The same edit, in a VStack, which does not abort.
 //
-// DESIGN.md 13.1: the erasure makes the return type concrete and keeps the
-// child in a generic box, and the graph downcasts that box to the type it saw
-// first. Changing the type aborts the process -- but only where the view is a
-// row of something that builds a view list. This case is the control: change
-// the container and nothing else, and the same patch is harmless.
+// DESIGN.md 13.1: on the iOS 26 runtimes, changing the type in a List row
+// reaches the cast that aborts. This case is the container control. The same
+// Text-to-VStack change survives in a VStack.
 //
 // `tick` is what makes the body evaluate again. Without it SwiftUI compares
 // the view equal to its predecessor and never calls the body at all, which is

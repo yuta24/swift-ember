@@ -10,8 +10,7 @@ project two wrong conclusions in a row.
 `../Cases/swiftui-body-direct-call` reads `body` directly after loading a patch
 and passes. It passed while `DESIGN.md` said the replacement never runs, and it
 passed while `DESIGN.md` said it runs and is safe. A direct read never touches
-the storage SwiftUI keeps for an erased view, which is where the third and
-measured answer lives.
+the SwiftUI storage involved in the iOS 26 abort.
 
 ## Running
 
@@ -21,9 +20,12 @@ measured answer lives.
 DEPLOY=16.0 ./run.sh         # the supported deployment floor
 ```
 
-Boot a simulator first. `DEPLOY` selects the compile-time deployment target,
-not the booted Simulator runtime; the summary prints both separately. The
-default deployment target is the SDK's own version.
+Boot a simulator first. `DEPLOY` selects the compile-time deployment target
+and defaults to the SDK's own version. The summary reports that target and
+the booted Simulator's runtime version separately.
+For an iOS 26.5 Simulator under Xcode 27.2, use `DEPLOY=26.0 ./run.sh`.
+The default iOS 27.2 build requires SwiftUI symbols available on the newer
+runtime and exits at launch on iOS 26.5.
 
 ## How a case is decided
 
@@ -42,33 +44,44 @@ already aborted.
 Cases/<id>/
 ├── App.swift    a whole SwiftUI application, including @main
 ├── Patch.swift  the replacement
-└── case.conf    EXPECT=alive|crash, optional MIN_DEPLOY and NOTE
+└── case.conf    EXPECT=alive|crash and optional per-case settings
 ```
 
-`Harness/Loader.swift` supplies the heartbeat and the inbox poller.
+`MIN_DEPLOY` skips the case below the specified deployment target.
+`ALIVE_FROM_RUNTIME` selects `EXPECT=alive` at or above the specified runtime
+version. Each result line displays the selected expectation. A case expecting
+`alive` can also set `EXPECT_RENDERED_PREFIX` to require a matching record in
+`Documents/rendered`. `Harness/Loader.swift` supplies the heartbeat, render
+record writer, and inbox poller.
 
 ## What these four establish
 
 They exist to pin `DESIGN.md` section 13.1, which is the part of this project
 that has been wrong most often.
 
-- **`body-shape-change-in-list`** — a `some View` body whose concrete type
-  changes, in a `List`, **aborts the process**. The erasure makes the return
-  type concrete and keeps the child in a generic box; the graph downcasts that
-  box to the type it recorded first. `MIN_DEPLOY=26.0`, because below that
-  `some View` erases to `AnyView`, which tolerates the change.
-- **`body-shape-change-in-vstack`** — the same patch against the same view,
-  with one line different, does not. The container is the condition, and
-  `List` is not a corner case.
+- **`body-shape-change-in-list`** measures a `Text` to `VStack` change in a
+  `List` row. With `DebugReplaceableView`, the graph downcast aborts on iOS
+  26.2 and 26.5. On iOS 27.2, the replacement's `row N` and `second line`
+  appear and the heartbeat continues. The case expects this behavior from
+  runtime iOS 27.0 onward and records the row contents when the second line
+  appears. With the same Xcode 27.2 SDK and iOS 26.0 deployment target, the
+  result changed between runtimes 26.5 and 27.2. `MIN_DEPLOY=26.0` selects
+  builds that use `DebugReplaceableView`. Earlier deployment targets use
+  `AnyView`, which tolerates a type change.
+- **`body-shape-change-in-vstack`** is the container control. The same change
+  survives in a `VStack`, including on the iOS 26 runtimes where the `List`
+  case aborts.
 - **`body-literal-change-in-list`** — an edit that leaves the body's concrete
-  type identical survives in the same `List`. That is the safe subset, and the
-  reason the classifier refuses it anyway is that nothing syntactic separates
-  it from the first case.
+  type identical survives in the same `List` on both runtime versions.
 - **`body-shape-change-enabled-in-list`** — the first case with the production
   `EmberSwiftUI` opt-in. `@ObserveEmber` makes the row evaluate after the
   real loader publishes a generation, and the outermost `.emberable()`
   keeps the stored child at `AnyView`. The process stays alive, the new
   `VStack` renders, the row's `@State` UUID survives, and the loaded image
   reports the expected two replacement records.
-A toolchain that changes any of this should fail here rather than in somebody's
-application.
+
+The classifier still requires a rebuild for these edits to an unannotated
+`some View` body. Apps can still run on affected iOS 26 runtimes, and the build
+does not determine the runtime where the patch will execute. The classifier
+also cannot reliably distinguish a literal-only edit from a type change using
+syntax alone.
