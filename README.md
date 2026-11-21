@@ -708,15 +708,13 @@ a rebuild. Rebuild callers of an `@inlinable` function along with its library.
 An optimized caller can keep executing a copy of the old body after a
 library-only rebuild. See `DESIGN.md` sections 12.4 and 12.8.
 
-An unannotated SwiftUI `body` is a rebuild, and the reason took three attempts
-to get right. `View` carries a type eraser, so the patch is safe to load, and a
-replaced body does run when SwiftUI evaluates that view --- it renders. What it
-also does, when the body's concrete type changes and the view is a row of a
-`List`, is abort the process: the eraser stores its child in a generic box that
-the graph downcasts to the type it saw first. Adding `.padding()` is enough.
-`.emberable()` moves the changing tree behind an `AnyView` that is present
-from the first build; it is an explicit opt-in, not a reason to weaken the
-default refusal. `DESIGN.md` section 13.1 has the original measurements and
-section 13.4 has the opt-in result.
+An unannotated SwiftUI `body` edit requires a rebuild. SwiftUI runs a replaced
+body when it next evaluates the view. On iOS 26.2 and 26.5, changing the
+concrete type in a `List` row with `DebugReplaceableView` aborts when the graph
+downcasts to the first type it saw. On iOS 27.2 the new row renders and the
+process stays alive. Builds can still run on the affected iOS 26 runtimes, so
+the classifier continues to require a rebuild for these edits. `.emberable()`
+opts in by placing the changing tree behind an `AnyView` from the first build.
+See `DESIGN.md` sections 13.1 and 13.4 for the measurements.
 
 The full list is `PRD.md` section 5.

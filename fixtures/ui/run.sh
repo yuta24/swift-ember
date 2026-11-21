@@ -14,8 +14,8 @@
 # because a direct read never touches the storage that aborts.
 #
 # Each case builds an application, installs it on the booted simulator, lets it
-# run, delivers a patch into its Documents/Patches inbox, and then asks one
-# question: is the process still beating.
+# run, and delivers a patch into its Documents/Patches inbox. It then checks
+# whether the process is still beating and, where expected, what rendered.
 
 set -uo pipefail
 
@@ -25,9 +25,8 @@ MODULE=Fixture
 BUNDLE_ID=dev.swift-ember.UIFixture
 STARTUP_TIMEOUT_SECONDS=15
 
-# The crash these pin needs the iOS 26 eraser. Below that `some View` erases to
-# AnyView, which tolerates a type change, so a run at an older target is a
-# different measurement and says so rather than failing.
+# Deployment selects the eraser. Below iOS 26, `some View` erases to AnyView.
+# For cases that need DebugReplaceableView, MIN_DEPLOY sets the build floor.
 DEPLOY="${DEPLOY:-$(xcrun --sdk iphonesimulator --show-sdk-version)}"
 FILTER=""
 
@@ -48,6 +47,11 @@ if ! xcrun simctl list devices booted | grep -q Booted; then
 fi
 RUNTIME="$(xcrun simctl getenv booted SIMULATOR_RUNTIME_VERSION 2>/dev/null)"
 [ -n "$RUNTIME" ] || RUNTIME=unknown
+
+version_at_least() {
+    local version="$1" minimum="$2"
+    [ "$(printf '%s\n%s\n' "$version" "$minimum" | sort -V | head -1)" = "$minimum" ]
+}
 
 wait_for_heartbeat() {
     local deadline data heartbeat
@@ -110,18 +114,26 @@ for dir in "$ROOT"/Cases/*/; do
     EXPECT_REGISTERED=""
     EXPECT_RENDERED_PREFIX=""
     PRESERVE_RENDERED_SUFFIX=no
-    # The lowest deployment target the case says anything at. The abort needs
-    # the iOS 26 eraser, so running it at 18 measures a different thing rather
-    # than a regression -- it is skipped and named instead of failing.
     MIN_DEPLOY=""
-    NOTE=""
-    # shellcheck disable=SC1090
+    ALIVE_FROM_RUNTIME=""
+    # shellcheck source=/dev/null
     [ -f "$dir/case.conf" ] && . "$dir/case.conf"
 
-    if [ -n "$MIN_DEPLOY" ] && [ "$(printf '%s\n%s\n' "$MIN_DEPLOY" "$DEPLOY" | sort -V | head -1)" != "$MIN_DEPLOY" ]; then
+    if [ -n "$MIN_DEPLOY" ] && ! version_at_least "$DEPLOY" "$MIN_DEPLOY"; then
         skip=$((skip + 1))
-        printf '  \033[33mSKIP\033[0m  %-34s needs iOS %s or later\n' "$id" "$MIN_DEPLOY"
+        printf '  \033[33mSKIP\033[0m  %-34s needs deployment target iOS %s or later\n' "$id" "$MIN_DEPLOY"
         continue
+    fi
+
+    if [ -n "$ALIVE_FROM_RUNTIME" ]; then
+        if [ "$RUNTIME" = unknown ]; then
+            fail=$((fail + 1))
+            printf '  \033[31mFAIL\033[0m  %-34s cannot select expectation without the iOS runtime version\n' "$id"
+            continue
+        fi
+        if version_at_least "$RUNTIME" "$ALIVE_FROM_RUNTIME"; then
+            EXPECT=alive
+        fi
     fi
 
     out="$BUILD/$id"
@@ -204,7 +216,7 @@ for dir in "$ROOT"/Cases/*/; do
             if [ "$observed" = "$EXPECT" ]; then
                 verdict=PASS
             else
-                verdict=FAIL; detail="expected $EXPECT, observed $observed ($detail)"
+                verdict=FAIL; detail="observed $observed ($detail)"
             fi
 
             if [ "$verdict" = PASS ] && [ -n "$EXPECT_REGISTERED" ] && [ "$registered" != "$EXPECT_REGISTERED" ]; then
@@ -212,7 +224,7 @@ for dir in "$ROOT"/Cases/*/; do
                 detail="expected $EXPECT_REGISTERED registered replacements, observed ${registered:-none}"
             fi
 
-            if [ "$verdict" = PASS ] && [ -n "$EXPECT_RENDERED_PREFIX" ]; then
+            if [ "$verdict" = PASS ] && [ "$EXPECT" = alive ] && [ -n "$EXPECT_RENDERED_PREFIX" ]; then
                 case "$rendered_after" in
                     "$EXPECT_RENDERED_PREFIX"*) ;;
                     *) verdict=FAIL; detail="expected rendered prefix '$EXPECT_RENDERED_PREFIX', observed '${rendered_after:-none}'" ;;
@@ -234,9 +246,9 @@ for dir in "$ROOT"/Cases/*/; do
     fi
 
     if [ "$verdict" = PASS ]; then
-        pass=$((pass + 1)); printf '  \033[32mPASS\033[0m  %-34s %s\n' "$id" "$detail"
+        pass=$((pass + 1)); printf '  \033[32mPASS\033[0m  %-34s expected %s, %s\n' "$id" "$EXPECT" "$detail"
     else
-        fail=$((fail + 1)); printf '  \033[31mFAIL\033[0m  %-34s %s\n' "$id" "$detail"
+        fail=$((fail + 1)); printf '  \033[31mFAIL\033[0m  %-34s expected %s, %s\n' "$id" "$EXPECT" "$detail"
     fi
 done
 

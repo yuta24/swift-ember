@@ -1411,29 +1411,17 @@ and requiring the file to import SwiftUI, because the guarantee comes
 from `@_typeEraser` on Apple's `View` and not from the spelling --- a
 `some ViewModelProtocol`, or a protocol of one's own named `View`, has no
 eraser at all. The undefined behaviour in section 12.7 comes from a
-caller holding stale metadata for a type that changed; here there is no
-such type. Changing a view tree's shape in a patch is safe. A fixture
-pins this, and a second one pins that the replacement dispatches: a
-direct read of `body` after loading really does run the new code.
+caller holding stale metadata for a type that changed. For a whole `some View`
+return type, the caller sees the concrete eraser. A direct read of `body`
+after loading confirms that the replacement dispatches.
 
-It renders, too --- and it still must not be allowed, for a reason that
-took three attempts to state correctly. Section 13.1 has the
-measurements.
-
-A replaced `body` runs whenever SwiftUI evaluates that body, and
-produces the new tree on screen. What it also does, when the body's
-concrete type changes and the view is a row of a `List`, is abort the
-process. The erasure makes the *return* type concrete; it does not make
-the type behind it free to change, because `DebugReplaceableView` keeps
-its child in a generic box that the graph downcasts to whatever it saw
-first. So section 12.7 is relocated rather than escaped.
-
-The classifier refuses `some View` by default, with wording of its own rather
-than the undefined-behaviour one, because "undefined at runtime" is the wrong
-description of a clean `SIGABRT` in a cast --- and because the two earlier
-wordings, "does nothing" and "is safe and useless", were both measured wrong.
-Section 13.4 describes the explicit boundary that lifts this refusal without
-trying to infer the underlying type.
+When SwiftUI evaluates a replaced `body`, it runs the new code. Rendering a
+new concrete child type in a `List` row can abort on iOS 26, where the graph
+downcasts `DebugReplaceableView`'s generic child storage to the type it first
+saw. On iOS 27.2 the same change renders the new tree and the process stays
+alive. Section 13.1 records the measurements and explains why the classifier
+still refuses unannotated `some View` bodies. Section 13.4 describes the
+explicit opt-in for replacing them.
 
 ### 13.1 Three answers, and the measurements that separate them
 
@@ -1459,9 +1447,9 @@ and the screen agreed exactly: `Stateless: OLD`, `Valued: NEW 7`,
 `Stateful: NEW`. So a replaced body **does** run, and renders, with no
 invalidation sent to SwiftUI at all. Measured under both erasers.
 
-**Two: "so it is safe, and the refusal was wrong."** Also wrong, and
-this one had a patch shipped against it for a few hours. Changing the
-body's concrete type aborts the process:
+**Two: "so it is safe, and the refusal was wrong."** On the iOS 26 runtime,
+changing the body's concrete type from `Text` to `VStack` in a `List` row
+produced this abort:
 
 ``` text
 Could not cast value of type
@@ -1470,50 +1458,39 @@ to
   'DebugReplaceableViewStorage<Text>'
 ```
 
-`SIGABRT`, in `DebugReplaceableViewChild.updateValue()` under
-`AG::Graph::UpdateStack::update()`. The eraser erases the outer type and
-stores the child in a *generic* box; the graph downcasts that box to the
-type recorded on first evaluation. A concrete return type does not make
-the underlying type free to change.
+The process received `SIGABRT` in `DebugReplaceableViewChild.updateValue()`
+under `AG::Graph::UpdateStack::update()`. The eraser stores the child in a
+*generic* box, and the graph downcasts it to the type recorded on first
+evaluation. A `VStack` container survives the same patch on iOS 26. `List`
+builds a view list, which reaches the cast on that runtime. At iOS 16 and 18
+deployment targets, `some View` erases to `AnyView` and the new child renders.
+Targets of iOS 26 and later select `DebugReplaceableView`.
 
-Two conditions, both measured by changing one thing at a time:
+The `List` case was repeated using the Xcode 27.2 SDK:
 
--   **The eraser.** At iOS 16 and 18 deployment targets `some View` erases to
-    `AnyView`, which tolerates a type change because that is what
-    `AnyView` is for, and the same patch renders correctly. At iOS 26
-    and later it is `DebugReplaceableView`, and it aborts.
--   **The container.** The same patch against the same view is harmless
-    inside a `VStack` and aborts inside a `List` --- changing only that
-    line turns one into the other. `List` builds a view list, which is
-    the path the generic storage is cast on. `List` is not a corner
-    case.
+| Deployment target | Simulator runtime | After the patch |
+| --- | --- | --- |
+| iOS 27.2 | iOS 27.2 | New `VStack` renders and heartbeat advances |
+| iOS 26.0 | iOS 27.2 | Process stays alive |
+| iOS 26.0 | iOS 26.5 | Process aborts |
 
-The reach of the damage is what makes this a refusal rather than a
-caveat. The safe set is exactly "edits that leave the body's concrete
-type bit-identical" --- a different string, a different number, a
-modifier that happens to return the same type. Adding `.padding()` is
-outside it. Nothing syntactic tells those apart reliably, and the cost
-of being wrong is the developer's process, so the whole shape is
-refused.
+The iOS 27.2 screenshot shows `row N` and `second line` from the new `VStack`,
+and the tick continues to advance. CI also observed the abort on iOS 26.2 and
+26.5. The two iOS 26.0 deployment target runs used the same SDK, isolating the
+Simulator runtime as the deciding variable.
 
-**Three: refused by default, because a change to the underlying type aborts.**
-That remains the answer for an unannotated body, and unlike the first two it names a
-mechanism that was reproduced from a clean container, with a single
-patch, on two deployment targets.
+**Three: unannotated `some View` bodies still require a rebuild.**
+Apps running on affected iOS 26 runtimes are still supported, and the build
+does not determine which runtime executes the patch. The classifier also
+cannot reliably infer from syntax whether an edit preserves the concrete
+type. A literal edit can preserve it, while adding `.padding()` can change it.
 
-It is also the first of the three with an artifact. `fixtures/ui/`
-builds a rendering application, delivers one patch, and asks whether the
-process is still beating; four cases hold the whole statement in place
---- the abort in a `List`, the same patch surviving in a `VStack`, and a
-literal-only edit surviving in the `List`, plus the shape change surviving
-behind the opt-in boundary with its `@State` unchanged. The console matrix could not
-have caught any of this, and `swiftui-body-direct-call` passed happily
-through both wrong answers because a direct read of `body` never touches
-the storage that aborts.
-
-The measurement that would change it is Apple making the storage
-non-generic, or `some View` ceasing to erase to `DebugReplaceableView`.
-Neither is something this project can arrange.
+The four cases in `fixtures/ui/` exercise rendering after delivering a patch.
+The `List` shape change checks the runtime-specific outcome and verifies the
+new row appeared when the process survives. The other cases cover the same
+shape change in a `VStack`, a literal edit in a `List`, and the opt-in `List`
+shape change with its `@State` preserved. The console case
+`swiftui-body-direct-call` covers dispatch through a direct read of `body`.
 
 ### 13.2 What the opt-in does not attempt
 
@@ -1562,9 +1539,8 @@ creates the host --- Previews --- can supply the input, and the manager
 `invalidateEverything` walks is empty in an ordinary application.
 
 Worth keeping because it is the route somebody will otherwise try
-again, and because the storage it describes is the same storage section
-13.1 measures aborting: `DebugReplaceableViewStorage` is where both the
-hoped-for hook and the actual crash live.
+again, and because `DebugReplaceableViewStorage` is the storage involved
+in the iOS 26 abort measured in section 13.1.
 
 Apple exposes `DebugReplaceableView` for debug-time replacement
 scenarios. Three facts constrain its use:
@@ -1616,8 +1592,9 @@ View and calls the replaced getter. Keeping the adapter in a separate target
 means a UIKit-only application links `EmberRuntime` without importing
 SwiftUI or Combine.
 
-Measured in `fixtures/ui/Cases/body-shape-change-enabled-in-list`, on the same
-iOS 27 `List` where an unannotated body aborts:
+Measured in `fixtures/ui/Cases/body-shape-change-enabled-in-list` on iOS 26.5
+and 27.2. The opt-in renders the new row and preserves its state on both
+runtimes, including iOS 26.5, where the unannotated `List` case aborts.
 
 ``` text
 body                         Text -> VStack<Text, Text>

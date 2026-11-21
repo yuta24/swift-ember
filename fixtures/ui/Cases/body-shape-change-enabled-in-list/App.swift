@@ -1,5 +1,5 @@
-// The proposed SwiftUI opt-in, exercised at the exact boundary where an
-// un-erased body aborts: a row of a List on iOS 26 or later.
+// The SwiftUI opt-in, exercised on a List row where an unannotated body
+// aborts on the iOS 26 runtimes.
 //
 // `@ObserveEmber` invalidates Row itself after dlopen, so SwiftUI calls the
 // replaced body. `emberable()` makes the child stored by
