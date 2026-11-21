@@ -73,7 +73,7 @@ for the same tag. On success the workflow creates or updates a draft GitHub
 Release. Complete the [physical iPhone release checklist](release-checklist.md)
 before publishing it.
 
-For a local packaging check, run `scripts/package-release.sh 0.5.0`.
+For a local packaging check, run `scripts/package-release.sh 0.5.1`.
 This uses ad-hoc signing when `EMBER_CODESIGN_IDENTITY` is unset and requires
 no release secrets. Set `EMBER_CODESIGN_IDENTITY` for Developer ID signing
 and optionally `EMBER_CODESIGN_KEYCHAIN` to select its keychain.
