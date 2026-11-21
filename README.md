@@ -84,7 +84,8 @@ mise use github:yuta24/swift-ember@0.5.1
 To update the pinned version, run
 `mise upgrade --bump github:yuta24/swift-ember`. Use
 `mise use -g github:yuta24/swift-ember` instead to install the latest release
-for every directory, and `mise upgrade github:yuta24/swift-ember` to update it. Skip
+for every directory, and `mise upgrade github:yuta24/swift-ember` to update it.
+mise may skip a release for its first 24 hours (`minimum_release_age`), so name the version to install a new release right away. Skip
 `install.sh` in this case. mise unpacks the archive and puts `bin/` on `PATH`
 in shells where it is activated. `swift-ember skill install` finds the skill
 bundled next to `bin/`.
