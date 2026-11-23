@@ -225,7 +225,10 @@ private func connectedRuntime(to server: IPCServer,
     runtime.sendRaw(try envelope.encodedLine())
 
     for _ in 0..<100 {
-        if reported.all.contains(where: { $0.contains("protocol version") }) {
+        if reported.all.contains(where: {
+            guard case .connectionRefused(let message) = $0 else { return false }
+            return message.contains("protocol version")
+        }) {
             #expect(server.currentSession == nil, "a mismatched peer must not be treated as connected")
             return
         }
@@ -247,7 +250,10 @@ private func connectedRuntime(to server: IPCServer,
     runtime.sendRaw(try Envelope(type: "hello", rawPayload: Data("{}".utf8)).encodedLine())
 
     for _ in 0..<100 {
-        if reported.all.contains(where: { $0.contains("hello") }) { return }
+        if reported.all.contains(where: {
+            guard case .connectionRefused(let message) = $0 else { return false }
+            return message.contains("hello")
+        }) { return }
         try await Task.sleep(for: .milliseconds(20))
     }
     Issue.record("a payload that could not be decoded was dropped silently; saw \(reported.all)")
@@ -255,9 +261,9 @@ private func connectedRuntime(to server: IPCServer,
 
 private final class Reported: @unchecked Sendable {
     private let lock = NSLock()
-    private var lines: [String] = []
-    func append(_ line: String) { lock.withLock { lines.append(line) } }
-    var all: [String] { lock.withLock { lines } }
+    private var diagnostics: [IPCServer.Diagnostic] = []
+    func append(_ diagnostic: IPCServer.Diagnostic) { lock.withLock { diagnostics.append(diagnostic) } }
+    var all: [IPCServer.Diagnostic] { lock.withLock { diagnostics } }
 }
 
 // MARK: - Teardown races and framing
@@ -472,6 +478,8 @@ private final class Reported: @unchecked Sendable {
 /// answer said exactly what was wrong.
 @Test func aReplyAtTheWrongProtocolVersionFailsImmediately() async throws {
     let server = try IPCServer()
+    let reported = Reported()
+    server.onEvent = { reported.append($0) }
     let port = try await server.start()
     defer { server.stop() }
 
@@ -504,6 +512,10 @@ private final class Reported: @unchecked Sendable {
         #expect(ms < 1000, "waited \(Int(ms)) ms for an answer it could never read")
         #expect("\(error)".contains("upgrade one side"), "was: \(error)")
     }
+    #expect(reported.all.contains {
+        guard case .warning(let message) = $0 else { return false }
+        return message.contains("protocol version")
+    })
 }
 
 /// A runtime built before the protocol moved is the ordinary case after this

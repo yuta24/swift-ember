@@ -251,3 +251,18 @@ private func rewriteRecord(at url: URL, key: String, value: Any) throws {
         try Lifecycle.stop(options: options)
     }
 }
+
+@Test func startJSONDoesNotChangeTheBackgroundWatchArguments() throws {
+    let options = try Options.parse([
+        "start", "--json", "--context", "app.json",
+        "--rebuild-command", "build-app", "--rebuild-timeout", "22",
+    ])
+    let session = Lifecycle.session(for: options)
+    let arguments = Lifecycle.watchArguments(options: options, session: session)
+    let rebuildDirectory = try #require(options.rebuildDirectory)
+    #expect(arguments == [
+        "watch", "--context", session.contextURL.path, "--rebuild-command", "build-app",
+        "--rebuild-directory", rebuildDirectory, "--rebuild-timeout", "22.0",
+    ])
+    #expect(try !Options.parse(arguments).json)
+}

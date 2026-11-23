@@ -25,16 +25,16 @@ enum RebuildCommand {
         private var stopping = false
 
         /// Runs an explicitly configured command through zsh.
-        /// stdout/stderr are inherited by design so Xcode diagnostics remain
-        /// attached to the watcher log.
-        func run(_ command: String, in directory: URL) async throws {
+        /// Inherit both streams unless the caller directs them to one destination.
+        func run(_ command: String, in directory: URL, output: FileHandle? = nil) async throws {
             try throwIfStopping()
 
             var environment = ProcessInfo.processInfo.environment
             environment["SWIFT_EMBER_REBUILD"] = "1"
             let pid = try Self.spawn(
                 executable: "/bin/zsh", arguments: ["/bin/zsh", "-lc", command],
-                environment: environment, directory: directory.path)
+                environment: environment, directory: directory.path,
+                outputDescriptor: output?.fileDescriptor)
             let shouldStop = lock.withLock { () -> Bool in
                 activeProcessGroup = pid
                 return stopping
@@ -128,7 +128,7 @@ enum RebuildCommand {
 
         private static func spawn(
             executable: String, arguments: [String],
-            environment: [String: String], directory: String
+            environment: [String: String], directory: String, outputDescriptor: Int32?
         ) throws -> pid_t {
             var actions: posix_spawn_file_actions_t? = nil
             guard posix_spawn_file_actions_init(&actions) == 0 else {
@@ -143,6 +143,14 @@ enum RebuildCommand {
             let changeDirectory = posix_spawn_file_actions_addchdir_np(&actions, directory)
             guard changeDirectory == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: changeDirectory) ?? .EINVAL)
+            }
+            if let outputDescriptor {
+                for stream in [STDOUT_FILENO, STDERR_FILENO] {
+                    let result = posix_spawn_file_actions_adddup2(&actions, outputDescriptor, stream)
+                    guard result == 0 else {
+                        throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EINVAL)
+                    }
+                }
             }
             var defaultSignals = sigset_t()
             sigemptyset(&defaultSignals)

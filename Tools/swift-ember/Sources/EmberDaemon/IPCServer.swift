@@ -52,7 +52,12 @@ public final class IPCServer: @unchecked Sendable {
     private var _port: UInt16 = 0
     public let token: String
 
-    public var onEvent: (@Sendable (String) -> Void)?
+    public enum Diagnostic: Sendable {
+        case warning(String)
+        case connectionRefused(String)
+    }
+
+    public var onEvent: (@Sendable (Diagnostic) -> Void)?
     /// An optional application-level admission check, run after token
     /// authentication but before this peer can supersede the current session.
     /// The daemon transport cannot decide whether a runtime is executing the
@@ -293,7 +298,7 @@ public final class IPCServer: @unchecked Sendable {
                     return peer.buffer.count > Self.messageLimit
                 }
                 if overflowed {
-                    self.onEvent?("dropped a connection that sent \(Self.messageLimit) bytes without a complete message")
+                    self.onEvent?(.warning("dropped a connection that sent \(Self.messageLimit) bytes without a complete message"))
                     peer.connection.cancel()
                     self.handleDisconnect(peer.id)
                     return
@@ -335,13 +340,14 @@ public final class IPCServer: @unchecked Sendable {
 
     private func handle(line: Data, from peer: Peer) {
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: line) else {
-            onEvent?("ignored an unparseable message")
+            onEvent?(.warning("ignored an unparseable message"))
             return
         }
         guard envelope.protocolVersion == EmberProtocol.version else {
             // Section 11.2: a version mismatch fails with a clear diagnostic
             // rather than by misreading the payload.
-            onEvent?("protocol version \(envelope.protocolVersion) from the runtime, expected \(EmberProtocol.version); upgrade one side")
+            let message = "protocol version \(envelope.protocolVersion) from the runtime, expected \(EmberProtocol.version); upgrade one side"
+            onEvent?(envelope.type == "hello" ? .connectionRefused(message) : .warning(message))
             // Remembered, because for a *hello* the settle above has nothing
             // to settle: no session is ever created, and every later save then
             // failed as "no app is connected -- restart the app". Restarting
@@ -382,7 +388,7 @@ public final class IPCServer: @unchecked Sendable {
         switch envelope.type {
         case "hello":
             guard let hello = try? envelope.decode(Hello.self) else {
-                onEvent?("could not read the runtime's hello; the two sides' protocol types have drifted")
+                onEvent?(.connectionRefused("could not read the runtime's hello; the two sides' protocol types have drifted"))
                 return
             }
             // The session file lives in the app's own container, so presenting
@@ -391,7 +397,7 @@ public final class IPCServer: @unchecked Sendable {
             // and every patch after that would be reported as applied to a
             // process that never saw it.
             guard hello.token == token else {
-                onEvent?("refused a connection that did not present the session token")
+                onEvent?(.connectionRefused("refused a connection that did not present the session token"))
                 peer.connection.cancel()
                 handleDisconnect(peer.id)
                 return

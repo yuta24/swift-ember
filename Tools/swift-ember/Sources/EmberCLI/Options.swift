@@ -44,6 +44,7 @@ public struct Options {
     public var simulator: String?
     public var signingIdentity: String?
     public var startupTimeout: TimeInterval = 60
+    public var json = false
     public var rebuildCommand: String?
     public var rebuildDirectory: String?
     public var rebuildTimeout: TimeInterval = 300
@@ -59,6 +60,10 @@ public struct Options {
       status    show what the daemon would use, without starting it
       xcode     own the watcher from Xcode Scheme actions
       skill     install, inspect, or uninstall the coding agent skill
+
+    Machine-readable output:
+
+      --json                         emit JSON from status or start, or NDJSON from watch
 
     Installing the integration:
 
@@ -190,6 +195,7 @@ public struct Options {
                 options.configPath = try value(after: argument)
                 explicitConfigurationFile = true
             case "--no-config": options.ignoresProjectConfiguration = true
+            case "--json": options.json = true
             case "--context":
                 options.contextPath = try value(after: argument)
                 explicit.context = true
@@ -290,6 +296,9 @@ public struct Options {
             index += 1
         }
 
+        if options.json && command != .status && command != .start && command != .watch {
+            throw ParseError.configuration("--json requires status, start or watch")
+        }
         guard let command else { throw ParseError.usage }
         options.command = command
 

@@ -52,6 +52,7 @@ public enum Lifecycle {
         public let pid: Int32
         public let simulatorIdentifier: String?
         public let simulatorWarning: String?
+        let session: Session
     }
 
     struct ProcessIdentity {
@@ -130,7 +131,7 @@ public enum Lifecycle {
         try withSessionLocks([session, implicit].compactMap { $0 }) {
             if runningRecord(session) == nil, let implicit,
                let record = matchingImplicitRecord(implicit, options: options) {
-                reportStart("already running", record: record, session: implicit, options: options)
+                reportStart(.alreadyRunning, record: record, session: implicit, options: options)
                 return
             }
             try startLocked(options: options, context: context, session: session)
@@ -155,7 +156,7 @@ public enum Lifecycle {
     private static func startLocked(options: Options, context: BuildContext, session: Session) throws {
         if let record = try readRecord(at: session.recordURL) {
             if processMatches(record) {
-                reportStart("already running", record: record, session: session, options: options)
+                reportStart(.alreadyRunning, record: record, session: session, options: options)
                 return
             }
             try? FileManager.default.removeItem(at: session.recordURL)
@@ -178,17 +179,9 @@ public enum Lifecycle {
         var environment = backgroundEnvironment(from: ProcessInfo.processInfo.environment)
         environment[recordEnvironment] = session.recordURL.path
         environment[patchDirectoryEnvironment] = session.patchURL.path
-        var arguments = [Options.Command.watch.rawValue, "--context", session.contextURL.path]
-        if let command = options.rebuildCommand {
-            arguments += ["--rebuild-command", command]
-        }
-        if let directory = options.rebuildDirectory {
-            arguments += ["--rebuild-directory", directory]
-        }
-        arguments += ["--rebuild-timeout", String(options.rebuildTimeout)]
         let pid = try spawnDetached(
             executable: executable,
-            arguments: arguments,
+            arguments: watchArguments(options: options, session: session),
             environment: environment,
             logDescriptor: log.fileDescriptor)
 
@@ -200,7 +193,7 @@ public enum Lifecycle {
             if let record = try readRecord(at: session.recordURL),
                record.pid == pid,
                processMatches(record) {
-                reportStart("started", record: record, session: session, options: options)
+                reportStart(.started, record: record, session: session, options: options)
                 return
             }
             var status: Int32 = 0
@@ -217,14 +210,33 @@ public enum Lifecycle {
         throw startupError("timed out while initializing after \(options.startupTimeout)s", log: session.logURL)
     }
 
-    private static func reportStart(_ message: String, record: Record, session: Session, options: Options) {
-        let padding = String(repeating: " ", count: message == "started" ? 12 : 1)
-        print("\(message)\(padding)pid \(record.pid)")
+    static func watchArguments(options: Options, session: Session) -> [String] {
+        var arguments = [Options.Command.watch.rawValue, "--context", session.contextURL.path]
+        if let command = options.rebuildCommand {
+            arguments += ["--rebuild-command", command]
+        }
+        if let directory = options.rebuildDirectory {
+            arguments += ["--rebuild-directory", directory]
+        }
+        arguments += ["--rebuild-timeout", String(options.rebuildTimeout)]
+        return arguments
+    }
+
+    private static func reportStart(_ kind: StartDocument.Kind, record: Record, session: Session, options: Options) {
+        let simulator = simulatorIdentifier(record, session: session) ?? options.simulator
+        let warning = options.simulator == nil ? record.simulator?.warning : nil
+        if options.json {
+            CLIJSON.write(StartDocument(type: kind, pid: record.pid, log: session.logURL.path,
+                                        simulator: simulator, warning: warning))
+            return
+        }
+        let prefix = kind == .started ? "started            " : "already running "
+        print("\(prefix)pid \(record.pid)")
         print("log                \(session.logURL.path)")
-        if let identifier = simulatorIdentifier(record, session: session) ?? options.simulator {
+        if let identifier = simulator {
             print("transport          simulator \(identifier)")
         }
-        if options.simulator == nil, let warning = record.simulator?.warning { print(warning) }
+        if let warning { print(warning) }
     }
 
     private static func startupError(_ reason: String, log: URL) -> LifecycleError {
@@ -298,12 +310,13 @@ public enum Lifecycle {
         let session = session(for: options)
         if let record = runningRecord(session) {
             return RunningSession(pid: record.pid, simulatorIdentifier: simulatorIdentifier(record, session: session),
-                                  simulatorWarning: options.simulator == nil ? record.simulator?.warning : nil)
+                                  simulatorWarning: options.simulator == nil ? record.simulator?.warning : nil,
+                                  session: session)
         }
         if let implicit = implicitSimulatorSession(for: options),
            let record = matchingImplicitRecord(implicit, options: options) {
             return RunningSession(pid: record.pid, simulatorIdentifier: simulatorIdentifier(record, session: implicit),
-                                  simulatorWarning: nil)
+                                  simulatorWarning: nil, session: implicit)
         }
         return nil
     }

@@ -15,16 +15,22 @@ watching examples/CounterApp/Sources
 listening on 127.0.0.1:51237
 
 connected  pid 8621, dev.swift-ember.CounterApp
+```
 
-hot reloaded 1 declaration in 511 ms  (g1)
+One save in the CounterApp example produced this reload summary on Simulator.
+
+```
+hot reloaded 1 declaration in 1629 ms  (g1)
   Cart.subtotalLabel()
-classify                  19 ms
-generate                   1 ms
-compile                  348 ms
-transfer                 111 ms
-load                       32 ms
+  refreshed: 106 views laid out, 1 list reloaded
+classify                  87 ms
+generate                   0 ms
+compile                  809 ms
+link                     434 ms
+transfer                   2 ms
+load                     297 ms
 --------------------------------
-total                    511 ms
+total                   1629 ms
 ```
 
 There is no Swift interpreter here and no reimplementation of the language.
@@ -528,6 +534,65 @@ the build that produced it. A missing product, failed inspection, or detected
 instrumentation gives a nonzero exit status. See
 [Release isolation](integrations/xcode/README.md#release-isolation) for the
 checks and optional guard.
+
+## JSON output
+
+Use `--json` with `status`, `start`, or `watch` to consume their output from a
+script. The flag takes no value.
+
+```sh
+swift-ember status --json
+swift-ember start --json
+swift-ember watch --json
+```
+
+- `status` writes one JSON object with `type: "status"`. It reports `daemon.running`
+  and, when available, `daemon.pid`, `daemon.simulator` (the selected UDID), and
+  `daemon.warning`. The `session`, `context`, and `rebuild` objects describe the
+  session paths, build context, and rebuild settings.
+- `start` writes one JSON object with `type: "started"` or
+  `type: "already_running"`, the watcher PID in `pid`, and its log path in
+  `log`. The optional `simulator` and `warning` fields describe the selected
+  Simulator. The background watcher writes its usual text log.
+- `watch` writes newline-delimited JSON (NDJSON) to stdout and flushes each
+  line. Each event has an increasing `seq` starting at 1 and an ISO 8601
+  timestamp in `at`. Rebuild commands send both of their output streams to
+  stderr. Argument and startup failures can still appear as text on stderr.
+
+This example `connected` event uses a sample sequence number, timestamp, and
+process ID.
+
+```json
+{"v":1,"type":"connected","seq":3,"at":"2026-01-01T00:00:01Z","processId":12345,"bundleIdentifier":"dev.example.App"}
+```
+
+| Watch event | Additional fields |
+| --- | --- |
+| `started` | `sourceRoots`, `buildOutputPaths`, local listener `port`, and `simulator` or `device` when available |
+| `connected` | `processId` and `bundleIdentifier` |
+| `connection_refused` | `message` and, when available, `processId` |
+| `disconnected`, `stopped` | Common fields only |
+| `reloaded` | `generation`, `declarations`, `carried`, `verified`, `registered`, `refreshed`, `oneShot`, `timings`, and `totalMs` |
+| `error`, `rebuild_required`, `session_uncertain` | `stage`, `subject`, `reason`, and `recovery` |
+| `warning`, `rebuild_failed` | `message` |
+| `rebuild_started` | `directory` |
+| `rebuild_completed` | `processId` of the replacement app |
+
+`oneShot` entries have a `name` and a `scope` (`instance` or `process`).
+`timings` lists only measured stages, each with `generation`, `stage`,
+`durationMs`, and `success`. `recovery` is one of `editAndRetry`, `rebuild`,
+`restart`, `configure`, or `retry`.
+
+Diagnostics and connection events, including `connected`, can precede
+`started`. Startup can fail after emitting events and exit without emitting
+`started` or `stopped`. If the watcher is stopped during a rebuild, it can
+emit `stopped` without a `rebuild_completed` or `rebuild_failed` event.
+Readers should also handle EOF.
+
+Every object includes `v: 1` and `type`. The JSON output has its own version,
+independent of the runtime wire protocol. Fields may be added without changing
+`v`. Readers should ignore unfamiliar fields and unknown `type` values. Exit
+codes are the same with or without `--json`.
 
 ## How it works
 
