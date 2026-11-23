@@ -11,9 +11,12 @@ public enum Watch {
         rebuildCommand: String? = nil,
         rebuildDirectory: URL? = nil,
         rebuildTimeout: TimeInterval = 300,
+        json: Bool = false,
         startupProgress: Lifecycle.StartupProgress? = nil,
         onReady: ((SimulatorSelection?) throws -> Void)? = nil
     ) async throws {
+        let output = WatchOutput(json: json)
+        let startupProgress = json ? nil : startupProgress
         startupProgress?.report("checking build product")
         try validatePhysicalDevice(originalContext)
 
@@ -58,14 +61,17 @@ public enum Watch {
         startupProgress?.report("validating source manifest and Mach-O UUIDs")
         let verifiedUUIDs = try manifest.validate(snapshot) { resolver.isTestSource($0) }
         if verifiedUUIDs == nil {
-            print("[WATCH] warning: no build source manifest at \(manifest.url.path).")
-            print("  Edits between the build and watcher startup cannot be verified.")
-            print("  For optional source recording, see \"Scheme actions (optional)\" in README.md.")
+            let message = """
+                [WATCH] warning: no build source manifest at \(manifest.url.path).
+                  Edits between the build and watcher startup cannot be verified.
+                  For optional source recording, see "Scheme actions (optional)" in README.md.
+                """
+            output.warning(message)
         }
 
         startupProgress?.report("selecting destination")
         let selection = try SimulatorSelection.resolve(context: originalContext)
-        if let warning = selection?.warning { print(warning) }
+        if let warning = selection?.warning { output.warning(warning) }
         var selectedContext = originalContext
         selectedContext.simulatorIdentifier = selection?.identifier
         let context = selectedContext
@@ -73,7 +79,7 @@ public enum Watch {
             try SimulatorOwnership.acquire(simulator: $0.identifier, bundle: context.bundleIdentifier,
                                            owner: Lifecycle.watcherOwner(session: session))
         }
-        if let warning = ownership?.warning { print(warning) }
+        if let warning = ownership?.warning { output.warning(warning) }
         defer { withExtendedLifetime(ownership) {} }
 
         startupProgress?.report("preparing IPC listener and source baselines")
@@ -84,7 +90,7 @@ public enum Watch {
         startupProgress?.report("evaluating package compiler settings and priming source baselines")
         let preparation = await coordinator.primeBaselines(from: snapshot, buildUUIDs: verifiedUUIDs)
         func reportSourceDiagnostics(_ preparation: PatchCoordinator.SourcePreparation) {
-            for diagnostic in preparation.diagnostics { print("[WATCH] source module: \(diagnostic)") }
+            for diagnostic in preparation.diagnostics { output.warning("[WATCH] source module: \(diagnostic)") }
         }
         reportSourceDiagnostics(preparation)
         let watcher = FileWatcher(
@@ -102,25 +108,27 @@ public enum Watch {
                 // Module, triple, SDK and compiler version are equal across
                 // rebuilds; only the linker UUID is not, and only the process
                 // can answer for it.
-                print("""
+                let message = """
                 connected  pid \(hello.processId), but this is not the build being watched
 
                   The app was built again after it launched, so patches would be
                   linked against a binary it is not running. Relaunch it.
-                """)
+                """
+                output.report(.connectionRefused(processId: hello.processId, message: message)) { print(message) }
                 return false
             }
             if hello.buildIdentity != context.identity {
                 // Section 6.3: refuse to patch a process built differently from
                 // the sources being watched.
-                print("""
+                let message = """
                 connected  pid \(hello.processId), but the build identity does not match
 
                   running   \(hello.buildIdentity)
                   watching  \(context.identity)
 
                 Rebuild the app from these sources before editing.
-                """)
+                """
+                output.report(.connectionRefused(processId: hello.processId, message: message)) { print(message) }
                 return false
             }
             return true
@@ -130,10 +138,21 @@ public enum Watch {
             // restart, and clearing on one would resume patching exactly the
             // process the flag exists to stop patching.
             Task { await coordinator.sessionDidConnect(hello: hello) }
-            print("connected  pid \(hello.processId), \(hello.moduleName)")
+            output.report(.connected(processId: hello.processId, bundleIdentifier: hello.moduleName)) {
+                print("connected  pid \(hello.processId), \(hello.moduleName)")
+            }
         }
-        server.onDisconnect = { print("disconnected; waiting for the app to reconnect") }
-        server.onEvent = { print($0) }
+        server.onDisconnect = {
+            output.report(.disconnected) { print("disconnected; waiting for the app to reconnect") }
+        }
+        server.onEvent = { diagnostic in
+            switch diagnostic {
+            case .warning(let message):
+                output.warning(message)
+            case .connectionRefused(let message):
+                output.report(.connectionRefused(processId: nil, message: message)) { print(message) }
+            }
+        }
         startupProgress?.report("starting IPC listener")
         let port = try await server.start()
 
@@ -147,18 +166,20 @@ public enum Watch {
             }
         }
 
-        print("watching \(context.sourceRoots.joined(separator: ", "))")
-        if !context.buildOutputPaths.isEmpty {
-            print("ignoring Xcode build outputs: \(context.buildOutputPaths.joined(separator: ", "))")
+        if !json {
+            print("watching \(context.sourceRoots.joined(separator: ", "))")
+            if !context.buildOutputPaths.isEmpty {
+                print("ignoring Xcode build outputs: \(context.buildOutputPaths.joined(separator: ", "))")
+            }
+            if let device = context.deviceIdentifier {
+                print("targeting physical device \(device) through CoreDevice")
+            } else if let simulator = context.simulatorIdentifier {
+                print("targeting simulator \(simulator) on 127.0.0.1:\(port)")
+            } else {
+                print("listening on 127.0.0.1:\(port)")
+            }
+            print("")
         }
-        if let device = context.deviceIdentifier {
-            print("targeting physical device \(device) through CoreDevice")
-        } else if let simulator = context.simulatorIdentifier {
-            print("targeting simulator \(simulator) on 127.0.0.1:\(port)")
-        } else {
-            print("listening on 127.0.0.1:\(port)")
-        }
-        print("")
 
         // While nothing is connected, keep republishing where to dial. On a
         // physical device a slower status heartbeat notices a reinstall, which
@@ -188,7 +209,7 @@ public enum Watch {
                         physicalConnected = false
                         consecutiveFailures += 1
                         if consecutiveFailures == 1 {
-                            print("cannot reach the app's container: \(error)")
+                            output.warning("cannot reach the app's container: \(error)")
                         }
                     }
                     continue
@@ -207,7 +228,7 @@ public enum Watch {
                     // simulator, where the daemon otherwise waits in silence.
                     consecutiveFailures += 1
                     if consecutiveFailures == 1 {
-                        print("cannot reach the app's container: \(error)")
+                        output.warning("cannot reach the app's container: \(error)")
                     }
                 }
             }
@@ -219,15 +240,21 @@ public enum Watch {
         let rebuildRunner = RebuildCommand.Runner()
         let changes = AsyncStream<[FileWatcher.Change]> { continuation in
             watcher.start(onScanFailure: { failure in
-                print("")
-                print("[WATCH] source roots")
-                print(failure.description)
-                print("No source changes will be applied until a complete scan succeeds; retrying.")
-                print("")
+                let retry = "No source changes will be applied until a complete scan succeeds; retrying."
+                let reason = "\(failure.description)\n\n\(retry)"
+                output.report(.error(EmberError(
+                    stage: .watch, subject: "source roots", reason: reason, recovery: .retry))
+                ) {
+                    print("")
+                    print("[WATCH] source roots")
+                    print(failure.description)
+                    print(retry)
+                    print("")
+                }
                 Task {
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: .error,
-                        message: "[WATCH] source roots\n\(failure.description)\n\nNo source changes will be applied until a complete scan succeeds; retrying."))
+                        message: "[WATCH] source roots\n\(reason)"))
                 }
             }) { continuation.yield($0) }
             termination = TerminationSignals {
@@ -239,6 +266,9 @@ public enum Watch {
         startupProgress?.report("writing readiness record")
         try onReady?(selection)
         startupProgress?.report("watcher ready")
+        output.report(.started(sourceRoots: context.sourceRoots, buildOutputPaths: context.buildOutputPaths,
+                               port: port, simulator: context.simulatorIdentifier, device: context.deviceIdentifier))
+        defer { output.finish() }
 
         var removalGuard = RemovalGuard()
 
@@ -250,9 +280,11 @@ public enum Watch {
             let directory = rebuildDirectory
                 ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
 
-            print("automatic rebuild requested; running in \(directory.path):")
-            print("  \(rebuildCommand)")
-            print("")
+            output.report(.rebuildStarted(directory: directory.path)) {
+                print("automatic rebuild requested; running in \(directory.path):")
+                print("  \(rebuildCommand)")
+                print("")
+            }
             do {
                 var attempt = 0
                 while attempt < 3 {
@@ -261,7 +293,8 @@ public enum Watch {
                     let before = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     let beforeUUIDs = Set(await coordinator.currentBuildUUIDs())
-                    try await rebuildRunner.run(rebuildCommand, in: directory)
+                    try await rebuildRunner.run(
+                        rebuildCommand, in: directory, output: json ? FileHandle.standardError : nil)
                     try rebuildRunner.throwIfStopping()
                     let built = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
@@ -272,8 +305,11 @@ public enum Watch {
                     }
 
                     if built != before {
-                        print("sources changed during the rebuild; rerunning with the latest snapshot")
-                        print("")
+                        let message = "sources changed during the rebuild; rerunning with the latest snapshot"
+                        output.report(.warning(message)) {
+                            print(message)
+                            print("")
+                        }
                         continue
                     }
 
@@ -304,8 +340,11 @@ public enum Watch {
                     let current = try await coordinator.captureSources(
                         from: roots, excluding: sourceFilter, ignoring: buildOutputs)
                     if current != built {
-                        print("sources changed while the rebuilt app was launching; rebuilding again")
-                        print("")
+                        let message = "sources changed while the rebuilt app was launching; rebuilding again"
+                        output.report(.warning(message)) {
+                            print(message)
+                            print("")
+                        }
                         continue
                     }
 
@@ -317,8 +356,10 @@ public enum Watch {
                     }
                     let preparation = await coordinator.resetAfterRebuild(to: built, buildUUIDs: Array(rebuiltUUIDs))
                     reportSourceDiagnostics(preparation)
-                    print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
-                    print("")
+                    output.report(.rebuildCompleted(processId: replacement)) {
+                        print("automatic rebuild complete; watching pid \(replacement) from a fresh baseline")
+                        print("")
+                    }
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: .success,
                         message: "Automatic rebuild complete. Hot reload resumed from a fresh baseline."))
@@ -328,9 +369,13 @@ public enum Watch {
             } catch is CancellationError {
                 return false
             } catch {
-                print("automatic rebuild failed: \(error)")
-                print("Fix the rebuild command or rebuild and relaunch the app manually.")
-                print("")
+                let message = "automatic rebuild failed: \(error)"
+                let action = "Fix the rebuild command or rebuild and relaunch the app manually."
+                output.report(.rebuildFailed(message + "\n" + action)) {
+                    print(message)
+                    print(action)
+                    print("")
+                }
                 return false
             }
         }
@@ -346,9 +391,11 @@ public enum Watch {
                 guardedBatch.append(change)
             }
             if let error = removalGuard.check(guardedBatch) {
-                print("")
-                print(error.description)
-                print("")
+                output.report(.rejection(error)) {
+                    print("")
+                    print(error.description)
+                    print("")
+                }
                 await coordinator.reportToRuntime(RuntimeLogMessage(
                     level: .warning, message: error.description))
                 if await recoverByRebuilding(error) {
@@ -361,9 +408,11 @@ public enum Watch {
                 case .ignored:
                     continue
                 case .rejected(let error):
-                    print("")
-                    print(error.description)
-                    print("")
+                    output.report(.rejection(error)) {
+                        print("")
+                        print(error.description)
+                        print("")
+                    }
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: .error, message: error.description))
                     if await recoverByRebuilding(error) {
@@ -373,7 +422,6 @@ public enum Watch {
                     // Repeated on every save rather than said once and
                     // forgotten: the developer is editing, watching nothing
                     // happen, and the reason scrolled off some time ago.
-                    print("")
                     let message = """
                     Not patching: this process cannot be described any more.
 
@@ -385,111 +433,21 @@ public enum Watch {
                     The failure was:
                     \(cause.reason)
                     """
-                    print(message)
-                    print("")
+                    output.report(.sessionUncertain(cause)) {
+                        print("")
+                        print(message)
+                        print("")
+                    }
                     await coordinator.reportToRuntime(RuntimeLogMessage(
                         level: .error, message: message))
                 case .applied(let generation, let declarations, let carried, let verified,
                               let registered, let refreshed, let oneShot, let timeline):
-                    let count = declarations.count
-                    let noun = count == 1 ? "declaration" : "declarations"
-                    var runtimeLines = [String(format: "hot reloaded %d %@ in %.0f ms  (g%llu)",
-                                               count, noun, timeline.totalMs, generation)]
-                    print("")
-                    print(runtimeLines[0])
-                    for name in declarations {
-                        let line = "  \(name)"
-                        print(line)
-                        runtimeLines.append(line)
-                    }
-                    // Named rather than counted. A carried declaration is one
-                    // the patch had to bring with it -- a private helper, or one
-                    // that did not exist in the build -- and seeing which is the
-                    // difference between "that is why it worked" and a mystery.
-                    if !carried.isEmpty {
-                        let line = "  carried: \(carried.joined(separator: ", "))"
-                        print(line)
-                        runtimeLines.append(line)
-                    }
-                    // Said only when it is not true. A reload that could not be
-                    // confirmed is still a reload, but the developer should know
-                    // which kind they are looking at. A reload nobody can
-                    // vouch for is the shape this project refuses elsewhere,
-                    // and saying so is what keeps it from being one.
-                    if !verified {
-                        // Which way the count was wrong, not only that it was.
-                        // "Could not count" and "counted more than were asked
-                        // for" are different problems and were reported with
-                        // the same sentence.
-                        if let registered {
-                            // "Contributed", not "declared": for an `@objc`
-                            // member the evidence is an Objective-C category,
-                            // which says the image brought a method and not
-                            // that it replaced one.
-                            // Always plural: a count below the expected one
-                            // ends the session before it reaches here, and the
-                            // expected count is never zero, so the smallest
-                            // number this line can carry is two.
-                            // Records, not declarations: an accessor and an
-                            // opaque return each bring one, so the two numbers
-                            // are not counts of the same thing and saying
-                            // "declarations" made a correct pair look wrong.
-                            let plural = registered.expected == 1 ? "was" : "were"
-                            let line = "  not verified: the image carries \(registered.counted) replacement "
-                                + "records and \(registered.expected) \(plural) generated"
-                            print(line)
-                            runtimeLines.append(line)
-                        } else {
-                            let line = "  not verified: the runtime could not read the image's records"
-                            print(line)
-                            runtimeLines.append(line)
-                        }
-                    }
-                    // What it took to put the change on screen. A UIKit process
-                    // is told to lay out again, and a list to reload; without
-                    // that the body is replaced in the process and the screen
-                    // keeps whatever it drew last.
-                    if let refreshed {
-                        let line = "  refreshed: \(refreshed)"
-                        print(line)
-                        runtimeLines.append(line)
-                    }
-                    // The entry points a refresh cannot reach on its own. Said
-                    // rather than left to be discovered: an edit that loads and
-                    // changes nothing is the outcome this tool exists to avoid
-                    // reporting as success.
-                    // Grouped by how far out of reach the new body is. A view
-                    // controller can be made again inside this process and will
-                    // run it; an application delegate cannot, and a relaunch
-                    // starts from the built binary with no patch in it -- so
-                    // telling someone to make another one would be advice that
-                    // does not work.
-                    let reachable = oneShot.filter { $0.scope == .instance }
-                    let unreachable = oneShot.filter { $0.scope == .process }
-                    if !reachable.isEmpty {
-                        let lines = [
-                            "  already ran: \(reachable.map(\.name).joined(separator: ", "))",
-                            "  replaced, but UIKit will not call it again for anything that",
-                            "  already exists; the next instance of that type runs the new body",
-                        ]
-                        lines.forEach { print($0) }
-                        runtimeLines.append(contentsOf: lines)
-                    }
-                    if !unreachable.isEmpty {
-                        let lines = [
-                            "  already ran: \(unreachable.map(\.name).joined(separator: ", "))",
-                            "  there is one of these per process, and relaunching starts from the",
-                            "  built binary, so seeing this change takes a build",
-                        ]
-                        lines.forEach { print($0) }
-                        runtimeLines.append(contentsOf: lines)
-                    }
-                    print(timeline.summary())
-                    print("")
-                    let hasCaveat = !verified || !oneShot.isEmpty
-                    await coordinator.reportToRuntime(RuntimeLogMessage(
-                        level: hasCaveat ? .warning : .success,
-                        message: runtimeLines.joined(separator: "\n")))
+                    let report = ReloadReport(
+                        generation: generation, declarations: declarations, carried: carried,
+                        verified: verified, registered: registered, refreshed: refreshed,
+                        oneShot: oneShot, timeline: timeline)
+                    let message = output.reportReload(report, summary: timeline.summary())
+                    await coordinator.reportToRuntime(message)
             }
         }
     }

@@ -865,3 +865,37 @@ private func withConfiguration(
         #expect(ownership.failures.first?.contains("sourceModules") == true)
     }
 }
+
+@Test(arguments: ["status", "start", "watch"])
+func jsonIsOptInForSupportedCommands(command: String) throws {
+    #expect(try parse(command).json == false)
+    #expect(try parse(command, "--json").json)
+    #expect(try parse("--json", command).json)
+}
+
+@Test(arguments: [[], ["init"], ["doctor"], ["stop"], ["xcode", "prepare"], ["xcode", "record"],
+                  ["xcode", "start"], ["xcode", "stop"]])
+func otherCommandsRejectJSON(command: [String]) {
+    do {
+        _ = try Options.parse(command + ["--json"])
+        Issue.record("an unsupported command accepted --json")
+    } catch let error as Options.ParseError {
+        #expect(error.description == "--json requires status, start or watch")
+    } catch {
+        Issue.record("unexpected error: \(error)")
+    }
+}
+
+@Test func skillAndOtherOutputOptionsAreRejected() {
+    #expect(throws: (any Error).self) { _ = try SkillCommand.parse(["status", "--json"]) }
+    #expect(throws: Options.ParseError.self) { _ = try parse("watch", "--format", "json") }
+    #expect(throws: Options.ParseError.self) { _ = try parse("watch", "--json=true") }
+}
+
+@Test func projectConfigurationCannotSelectJSONOutput() throws {
+    try withConfiguration(#"{"json":true}"#) { _, current in
+        #expect(throws: Options.ParseError.self) {
+            _ = try Options.parse(["status"], environment: [:], currentDirectory: current)
+        }
+    }
+}

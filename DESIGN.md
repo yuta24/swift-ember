@@ -2152,32 +2152,34 @@ change fails there first.
 
 ## 18. Observability
 
-Emit one structured event per stage:
+Collect a timing for each measured stage. In `watch --json`, the `reloaded`
+event includes these entries in its `timings` array.
 
 ``` json
 {
   "generation": 42,
-  "stage": "compile",
+  "stage": "COMPILE",
   "durationMs": 183.4,
   "success": true
 }
 ```
 
-CLI summary:
+The CLI prints each measured stage followed by the total. The example uses
+`<ms>` for measured durations.
 
 ``` text
-change detection       21 ms
-classification         14 ms
-generation              8 ms
-swift frontend         231 ms
-link                   318 ms
-load                    17 ms
+classify                <ms>
+generate                <ms>
+compile                 <ms>
+link                    <ms>
+transfer                <ms>
+load                    <ms>
 --------------------------------
-total                  609 ms
+total                   <ms>
 ```
 
 This data determines whether ORC or persistent compiler work is
-justified. It has now been collected; section 18.1 has it.
+justified. Section 18.1 reports the measured compiler benchmark.
 
 ### 18.1 Measured
 
