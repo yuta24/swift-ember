@@ -288,7 +288,7 @@ private func withConfiguration(
     let project = root.appendingPathComponent("App.xcodeproj").path
     // A physical CoreDevice UDID is not an RFC UUID. Requiring UUID syntax
     // silently selected the Simulator transport for real iPhones.
-    let identifier = "00008120-001E1C66369B401E"
+    let identifier = "00008120-0123456789ABCDEF"
 
     let physical = try Options.parse(
         ["xcode", "start", "--scheme", "App"], environment: [
