@@ -105,6 +105,17 @@ private func reloadReport(_ timeline: StageTimeline, withDetails: Bool = false) 
     #expect(documents.last?["type"] as? String == "stopped")
 }
 
+// `JSONSerialization` occasionally returns a `Double` that is not bit-identical to the one
+// that was written, so the exact timing comparisons read the same line with `JSONDecoder`.
+private struct DecodedReloadTimings: Decodable {
+    struct StageTiming: Decodable {
+        let durationMs: Double
+    }
+
+    let timings: [StageTiming]
+    let totalMs: Double
+}
+
 @Test(arguments: [true, false])
 func reloadedHasStableKeysAndOnlyMeasuredStages(withDetails: Bool) throws {
     let timeline = StageTimeline(generation: 7)
@@ -137,8 +148,10 @@ func reloadedHasStableKeysAndOnlyMeasuredStages(withDetails: Bool) throws {
     let timings = try #require(event["timings"] as? [[String: Any]])
     #expect(timings.compactMap { $0["stage"] as? String } == ["CLASSIFY", "LINK"])
     #expect(timings.allSatisfy { $0["success"] as? Bool == true && $0["generation"] as? Int == 7 })
-    #expect(timings.compactMap { $0["durationMs"] as? Double } == timeline.all.map(\.durationMs))
-    #expect(event["totalMs"] as? Double == timeline.totalMs)
+    let line = try #require(lines.read().first)
+    let decoded = try JSONDecoder().decode(DecodedReloadTimings.self, from: line)
+    #expect(decoded.timings.map(\.durationMs) == timeline.all.map(\.durationMs))
+    #expect(decoded.totalMs == timeline.totalMs)
 }
 
 @Test func humanReloadTextAndRuntimeMessageKeepTheirExistingLayout() {
